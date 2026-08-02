@@ -56,12 +56,58 @@ func TestRestoreDirPicksTheFolderTheBridgeWroteTo(t *testing.T) {
 
 	// No settings file: the situation the flag exists for.
 	opts := options{configPath: filepath.Join(t.TempDir(), "gone.toml")}
-	got, err := restoreDir(opts)
-	if err != nil {
-		t.Fatalf("restoreDir: %v", err)
+	if err := restoreCache(opts); err != nil {
+		t.Fatalf("restoreCache: %v", err)
 	}
-	if got != changed {
-		t.Errorf("restoreDir() = %q, want the folder holding the backup %q", got, changed)
+
+	if _, err := os.Stat(papertracker.CachePath(changed)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the folder the bridge wrote to was not restored: %v", err)
+	}
+	if got, err := papertracker.ReadCache(untouched); err != nil || got != "192.168.1.50" {
+		t.Errorf("the untouched folder = %q, %v, want it left alone", got, err)
+	}
+}
+
+// The settings can name a folder the bridge never wrote to: the client is
+// reinstalled elsewhere while write_cache is on, and install_dir follows it.
+// The record stays behind in the old folder, still pointing that copy of the
+// client at a bridge that is about to stop, so "no backup here" cannot be the
+// end of it.
+func TestRestoreFallsBackWhenTheNamedFolderHasNoBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	// Where the bridge actually wrote, and where it no longer looks.
+	old := filepath.Join(home, "PaperTracker")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(papertracker.CachePath(old), []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := papertracker.WriteCache(old, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	// Where the settings point now.
+	moved := t.TempDir()
+	if err := os.WriteFile(papertracker.CachePath(moved), []byte("192.168.1.60"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	dir, err := restoreWhereverItWas(moved)
+	if err != nil {
+		t.Fatalf("restoreWhereverItWas: %v", err)
+	}
+	if dir != old {
+		t.Errorf("restored in %q, want the folder holding the backup %q", dir, old)
+	}
+	if got, err := papertracker.ReadCache(old); err != nil || got != "192.168.1.50" {
+		t.Errorf("the folder the bridge wrote to = %q, %v, want the camera address back", got, err)
+	}
+	if got, err := papertracker.ReadCache(moved); err != nil || got != "192.168.1.60" {
+		t.Errorf("the folder the settings name = %q, %v, want it left alone", got, err)
 	}
 }
 
@@ -77,8 +123,8 @@ func TestRestoreCacheSaysThereIsNothingToUndo(t *testing.T) {
 	t.Setenv("APPDATA", t.TempDir())
 
 	opts := options{configPath: filepath.Join(t.TempDir(), "gone.toml")}
-	if _, err := restoreDir(opts); !errors.Is(err, papertracker.ErrNoBackup) {
-		t.Fatalf("restoreDir error = %v, want ErrNoBackup", err)
+	if _, err := restoreWhereverItWas(""); !errors.Is(err, papertracker.ErrNoBackup) {
+		t.Fatalf("restoreWhereverItWas error = %v, want ErrNoBackup", err)
 	}
 	if err := restoreCache(opts); err != nil {
 		t.Errorf("restoreCache = %v, want it to report that there is nothing to restore", err)

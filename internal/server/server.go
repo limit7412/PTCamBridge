@@ -392,6 +392,20 @@ func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "cross-origin requests are not accepted", http.StatusForbidden)
 		return false
 	}
+	// Origin is not enough on its own for a GET. A page can request this URL as
+	// a subresource -- <img src>, <script src> -- and a browser sends no Origin
+	// for those, so the Host check would be all that stood in the way. It
+	// cannot read the answer, but GET /devices is not free: on Windows it runs
+	// ffmpeg and waits up to fifteen seconds, so a page cycling URLs can keep
+	// spawning processes on the machine.
+	//
+	// Sec-Fetch-Site says where the request came from and cannot be set by a
+	// page. Browsers that send it are held to it; anything that does not send
+	// it is not a browser, and no page can make one stop sending it.
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		http.Error(w, "the management API does not answer requests made by another site", http.StatusForbidden)
+		return false
+	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return true
 	}

@@ -462,6 +462,50 @@ func TestRestoreCacheIsNotAppliedTwice(t *testing.T) {
 	}
 }
 
+// A restore that could not write is a restore that has not happened, so the
+// record has to go back where it was. Left taken, the next start would find
+// contents that do not match the cache and refuse to guess -- a full disk or a
+// locked file would turn into something only a person can finish.
+func TestRestoreCachePutsTheRecordBackWhenItCannotWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	original := "192.168.1.50"
+	if err := os.WriteFile(path+BackupSuffix, []byte(original), 0o644); err != nil {
+		t.Fatalf("write the backup: %v", err)
+	}
+	// A directory where the cache should be: the rename onto it cannot succeed,
+	// which is the closest thing to a full disk that a test can arrange.
+	if err := os.MkdirAll(filepath.Join(path, "in-the-way"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	if err := RestoreCache(dir); err == nil {
+		t.Fatal("expected the write to fail")
+	}
+
+	backup, err := os.ReadFile(path + BackupSuffix)
+	if err != nil {
+		t.Fatalf("the record was not put back: %v", err)
+	}
+	if string(backup) != original {
+		t.Errorf("backup = %q, want the address it held %q", backup, original)
+	}
+	if _, err := os.Stat(path + BackupSuffix + RestoringSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the claim was left taken: %v", err)
+	}
+
+	// And once the way is clear it restores, without anyone renaming anything.
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatalf("clear the way: %v", err)
+	}
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	if got, _ := ReadCache(dir); got != original {
+		t.Errorf("cache = %q, want the camera address back", got)
+	}
+}
+
 // The ordinary version of that: the restore finished and only the tidying up
 // failed, so the client already holds what the record says. Nothing is left to
 // do but remove it, quietly -- this runs on every start.

@@ -204,23 +204,16 @@ func RestoreCache(installDir string) error {
 		return err
 	}
 
-	if erase {
-		// There was no cache before the bridge, so putting that back means
-		// removing the file rather than writing an empty one.
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("papertracker: remove %s: %w", path, err)
+	if err := applyRestore(path, working, erase); err != nil {
+		// Nothing was put back, so the claim goes back with it. Leaving it
+		// taken would turn a full disk or a locked file into a restore that
+		// only a person can finish: the next start would find a record whose
+		// contents do not match the cache and refuse to guess. Put back where
+		// it was, it is simply tried again.
+		if undo := unclaimRestore(working); undo != nil {
+			return errors.Join(err, undo)
 		}
-	} else {
-		original, err := os.ReadFile(working)
-		if err != nil {
-			return fmt.Errorf("papertracker: read %s: %w", working, err)
-		}
-		// Written under a temporary name and renamed, because the record is
-		// dropped straight after: a partial write here would lose the address
-		// for good, leaving a truncated copy as the only thing to hand back.
-		if err := writeAtomic(path, original); err != nil {
-			return err
-		}
+		return err
 	}
 
 	if err := os.Remove(working); err != nil {
@@ -229,6 +222,36 @@ func RestoreCache(installDir string) error {
 		// start will not undo this again -- it will report that there is
 		// nothing to restore, which is true.
 		return fmt.Errorf("papertracker: %s was restored but %s could not be removed: %w", path, working, err)
+	}
+	return nil
+}
+
+// applyRestore puts the client back the way the claimed record describes.
+func applyRestore(path, working string, erase bool) error {
+	if erase {
+		// There was no cache before the bridge, so putting that back means
+		// removing the file rather than writing an empty one.
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("papertracker: remove %s: %w", path, err)
+		}
+		return nil
+	}
+	original, err := os.ReadFile(working)
+	if err != nil {
+		return fmt.Errorf("papertracker: read %s: %w", working, err)
+	}
+	// Written under a temporary name and renamed, because the record is
+	// dropped straight after: a partial write here would lose the address for
+	// good, leaving a truncated copy as the only thing to hand back.
+	return writeAtomic(path, original)
+}
+
+// unclaimRestore puts a claimed record back under the name that means "waiting
+// to be restored".
+func unclaimRestore(working string) error {
+	record := strings.TrimSuffix(working, RestoringSuffix)
+	if err := os.Rename(working, record); err != nil {
+		return fmt.Errorf("papertracker: put %s back to %s: %w", working, record, err)
 	}
 	return nil
 }

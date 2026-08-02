@@ -367,6 +367,8 @@ type fakeController struct {
 	applyErr error
 	// devices is what Devices returns.
 	devices Devices
+	// devicesCalls counts enumerations, which cost a subprocess on Windows.
+	devicesCalls int
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
@@ -386,7 +388,10 @@ func (c *fakeController) Switch(_ context.Context, sourceType string) error {
 	return nil
 }
 
-func (c *fakeController) Devices(context.Context) Devices { return c.devices }
+func (c *fakeController) Devices(context.Context) Devices {
+	c.devicesCalls++
+	return c.devices
+}
 
 func TestManagementAPIIsAbsentUnlessEnabled(t *testing.T) {
 	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: false})
@@ -569,6 +574,54 @@ func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
 			}
 			if switched := ctrl.switched != ""; switched != (tc.want == http.StatusOK) {
 				t.Errorf("controller switched = %v, but the request returned %d", switched, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// A GET needs no preflight and carries no Origin when a page asks for it as a
+// subresource -- <img src="http://127.0.0.1:18080/api/v1/devices">. The page
+// cannot read the answer, but the answer is not free: enumerating devices runs
+// ffmpeg and waits for it, so a page cycling URLs keeps starting processes on
+// the machine. Sec-Fetch-Site says where the request came from and no page can
+// forge it or stop the browser sending it.
+func TestDeviceEnumerationRefusesACrossSiteGet(t *testing.T) {
+	cases := []struct {
+		name string
+		site string
+		want int
+	}{
+		{name: "a subresource on someone else's page", site: "cross-site", want: http.StatusForbidden},
+		{name: "another port on this machine", site: "same-site", want: http.StatusForbidden},
+		{name: "a page served by the bridge", site: "same-origin", want: http.StatusOK},
+		{name: "the address typed in", site: "none", want: http.StatusOK},
+		{name: "curl, which sends no such header", site: "", want: http.StatusOK},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := &fakeController{cfg: config.Default()}
+			s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/devices", nil)
+			if tc.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.site)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.want {
+				out, _ := io.ReadAll(resp.Body)
+				t.Errorf("status = %d, want %d: %s", resp.StatusCode, tc.want, out)
+			}
+			if listed := ctrl.devicesCalls > 0; listed != (tc.want == http.StatusOK) {
+				t.Errorf("the controller was asked to enumerate = %v, but the request returned %d", listed, resp.StatusCode)
 			}
 		})
 	}
