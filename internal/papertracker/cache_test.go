@@ -863,12 +863,21 @@ func TestRememberWrittenDirRecordsAnAbsolutePath(t *testing.T) {
 	state := t.TempDir()
 	install := t.TempDir()
 
+	// Chdir rather than t.Chdir: the module targets a Go version that predates
+	// it. Nothing here runs in parallel, so the process-wide change is safe as
+	// long as it is put back.
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	t.Chdir(filepath.Dir(install))
-	defer func() { _ = os.Chdir(wd) }()
+	if err := os.Chdir(filepath.Dir(install)); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatalf("chdir back: %v", err)
+		}
+	})
 
 	if err := RememberWrittenDir(state, filepath.Base(install)); err != nil {
 		t.Fatalf("RememberWrittenDir: %v", err)
