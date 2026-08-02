@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"slices"
 	"sync"
@@ -196,6 +197,18 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 
+	// Apply's guarantee is that settings are only kept if the new source
+	// starts, and while paused nothing can start: the most that could be
+	// checked is that a driver object can be constructed, which says nothing
+	// about the device being there. Accepting the change anyway would trade a
+	// known-good configuration for an unproven one and write it out, and
+	// resuming does not verify either -- a camera plugged in after sign-in has
+	// to be picked up, so resume leaves the driver retrying exactly as startup
+	// does. Saying so is better than any of that.
+	if b.paused && !captureUnchanged(previous, cfg) {
+		return errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
+	}
+
 	// Build the encoder before anything is torn down: an unusable boundary
 	// should not cost the user the source that is running right now.
 	encoder, err := core.NewMultipartEncoder(cfg.Server.Boundary, cfg.StreamHeaders())
@@ -241,10 +254,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		// sending the very same settings again, which diffs to nothing against
 		// the running configuration and would otherwise rewrite the stale file
 		// and report success.
-		base := b.persistBase
-		if b.unsaved != nil {
-			base = *b.unsaved
-		}
+		base := b.saveBaseLocked()
 		saved := mergeChanges(base, previous, cfg)
 		if err := config.Save(b.cfgPath, saved); err != nil {
 			// The running configuration is already correct, so nothing is torn
@@ -257,6 +267,37 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		b.unsaved = nil
 	}
 	return nil
+}
+
+// saveBaseLocked returns what the next save should build on: the settings file
+// as it stands right now, plus anything an earlier save failed to write.
+//
+// Re-reading matters because the file is not only written from here. The tray
+// offers "Edit settings", and the settings that need a restart can only be
+// changed that way, so a user who edits server.listen and then touches
+// anything in the tray before restarting would have had that edit written back
+// over from a base captured at startup.
+//
+// A file that is missing, unreadable or unparsable falls back to the last
+// known contents. There is nothing to merge onto in those cases, and refusing
+// to save would lose a change that is already in effect on top of it.
+func (b *Bridge) saveBaseLocked() config.Config {
+	base := b.persistBase
+	if _, err := os.Stat(b.cfgPath); err == nil {
+		if onDisk, err := config.LoadFile(b.cfgPath); err != nil {
+			b.log.Warn("could not re-read the settings file before saving; merging onto the last known contents",
+				"path", b.cfgPath, "error", err)
+		} else {
+			base = onDisk
+		}
+	}
+	if b.unsaved != nil {
+		// Lay the pending write back on top of whatever the file says now.
+		// persistBase is what the file held when that write was built, so
+		// this copies exactly the leaves it was trying to change.
+		base = mergeChanges(base, b.persistBase, *b.unsaved)
+	}
+	return base
 }
 
 // mergeChanges returns base with every value this change actually touched

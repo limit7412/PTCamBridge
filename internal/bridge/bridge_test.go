@@ -902,6 +902,10 @@ func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
 	effective := fileCfg
 	effective.Source.UVC.Device = "just for this run"
 
+	if err := config.Save(path, fileCfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
 	b := New(effective, path, hub.New(), status.New(), discardLogger())
 	b.SetPersistBase(fileCfg)
 
@@ -1077,5 +1081,133 @@ func TestBridgeApplyCarriesAnUnsavedChangeIntoTheNextSave(t *testing.T) {
 	}
 	if saved.Server.Boundary != "unwritable" {
 		t.Errorf("saved boundary = %q, want the earlier change that is still in effect", saved.Server.Boundary)
+	}
+}
+
+// The settings file is not written only from here: the tray offers "Edit
+// settings", and the values that need a restart can only be changed that way.
+// A save built on the file as it was at startup would write those edits back
+// over the moment anything else was changed.
+func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	fileCfg := mjpegConfig(upstream.URL)
+	if err := config.Save(path, fileCfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(fileCfg, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(fileCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// The user edits the file by hand. server.listen is one of the settings
+	// that can only be changed this way, which is what makes losing it likely.
+	edited := fileCfg
+	edited.Server.Listen = "127.0.0.1:19999"
+	edited.Source.UVC.Device = "picked while running"
+	if err := config.Save(path, edited); err != nil {
+		t.Fatalf("Save the edit: %v", err)
+	}
+
+	// Then changes something unrelated through the tray before restarting.
+	updated := b.Snapshot()
+	updated.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if !saved.Server.HoldOnSourceLoss {
+		t.Error("the change the caller made was not saved")
+	}
+	if saved.Server.Listen != "127.0.0.1:19999" {
+		t.Errorf("saved listen = %q, want the hand edit kept", saved.Server.Listen)
+	}
+	if saved.Source.UVC.Device != "picked while running" {
+		t.Errorf("saved device = %q, want the hand edit kept", saved.Source.UVC.Device)
+	}
+}
+
+// Nothing can be started while paused, so nothing can be proven. Taking the
+// change anyway would swap a working configuration for an unproven one and
+// write it out, and resume does not verify either.
+func TestBridgeApplyRejectsASourceChangeWhilePaused(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	other := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	cfg := mjpegConfig(upstream.URL)
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	frames := hub.New()
+	b := New(cfg, path, frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("SetPaused: %v", err)
+	}
+
+	next := b.Snapshot()
+	next.Source.MJPEG.URL = other.URL
+	if err := b.Apply(ctx, next); err == nil {
+		t.Fatal("expected a source change to be refused while paused")
+	}
+	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
+		t.Errorf("URL = %q, want the settings left alone", got)
+	}
+
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if saved.Source.MJPEG.URL != upstream.URL {
+		t.Errorf("saved URL = %q, want the unverified change kept out of the file", saved.Source.MJPEG.URL)
+	}
+}
+
+// Pausing is for releasing the camera, so the settings that do not touch it
+// still have to be changeable while paused -- including the one about what to
+// do when there is no source.
+func TestBridgeApplyAllowsAServerChangeWhilePaused(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("SetPaused: %v", err)
+	}
+
+	next := b.Snapshot()
+	next.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, next); err != nil {
+		t.Fatalf("Apply a server-only change while paused: %v", err)
+	}
+	if !b.Snapshot().Server.HoldOnSourceLoss {
+		t.Error("the server-only change was not applied")
 	}
 }

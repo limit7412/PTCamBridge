@@ -123,6 +123,32 @@ func run(ctx context.Context, opts Options, m menu) {
 		}(kind, item.ClickedCh)
 	}
 
+	// Pause requests are handed to one worker rather than a goroutine per
+	// click, so they are applied in the order they were made. Concurrent
+	// SetPaused calls would serialise on the bridge's lock in whatever order
+	// the scheduler picked, which for a toggle means the last click does not
+	// decide the result.
+	pending := make(chan bool, 1)
+	wantPaused := opts.Controller.Paused()
+	// Each request is an absolute target, not a toggle, so an older one that
+	// has not been picked up yet is simply replaced. That keeps the send
+	// below from ever blocking the event loop.
+	request := func(paused bool) {
+		select {
+		case <-pending:
+		default:
+		}
+		pending <- paused
+	}
+	go func() {
+		for paused := range pending {
+			if err := opts.Controller.SetPaused(paused); err != nil {
+				opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
+			}
+		}
+	}()
+	defer close(pending)
+
 	refresh(opts, m)
 	for {
 		select {
@@ -153,14 +179,14 @@ func run(ctx context.Context, opts Options, m menu) {
 			// Also off the loop, and for the same reason: pausing takes the
 			// bridge's lock, so a click that arrives during a slow switch
 			// would block here and undo the point of the goroutine above.
-			// The target state is decided here so two quick clicks cannot
-			// both read the same value.
-			paused := !opts.Controller.Paused()
-			go func(paused bool) {
-				if err := opts.Controller.SetPaused(paused); err != nil {
-					opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
-				}
-			}(paused)
+			//
+			// The toggle is against what the last click asked for, not what
+			// the bridge currently reports. Two clicks in quick succession
+			// both see the old state otherwise -- the first goroutine has not
+			// reached SetPaused yet -- so they ask for the same thing twice
+			// and the pair does not cancel out.
+			wantPaused = !wantPaused
+			request(wantPaused)
 			refresh(opts, m)
 
 		case <-m.address.ClickedCh:

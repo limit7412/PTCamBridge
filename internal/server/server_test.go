@@ -877,3 +877,29 @@ func TestManagementAPIAcceptsTrailingWhitespace(t *testing.T) {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// An absent type decodes to the empty string, and empty is not "missing" any
+// further down: Normalise reads it as unset and fills in uvc, so a request
+// with no type would move a working source rather than being rejected.
+func TestManagementAPIRejectsAnEmptySourceType(t *testing.T) {
+	for _, body := range []string{`{}`, `{"type":""}`} {
+		t.Run(body, func(t *testing.T) {
+			ctrl := &fakeController{cfg: config.Default()}
+			s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			resp, err := http.Post(ts.URL+"/api/v1/source", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", resp.StatusCode)
+			}
+			if ctrl.switched != "" {
+				t.Errorf("the controller switched to %q with no type given", ctrl.switched)
+			}
+		})
+	}
+}

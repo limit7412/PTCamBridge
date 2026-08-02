@@ -224,7 +224,11 @@ func SplitMultipart(buf []byte, boundary string, maxSize int) (frames [][]byte, 
 				pos = afterDelim
 				continue
 			}
-			if bodyAt+n > len(buf) {
+			// Subtract rather than add: bodyAt+n is two attacker-influenced
+			// numbers, and a Content-Length near MaxInt wraps it negative,
+			// which passes this check and then panics on the slice below.
+			// bodyAt is an index into buf, so len(buf)-bodyAt cannot.
+			if n > len(buf)-bodyAt {
 				return frames, buf[start:]
 			}
 			body = buf[bodyAt : bodyAt+n]

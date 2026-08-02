@@ -470,6 +470,14 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A body of {} decodes cleanly into an empty type, and empty is not a
+	// missing value further down: Normalise reads it as "unset" and fills in
+	// the default, so a request with no type at all would quietly move a
+	// working serial or MJPEG source onto UVC.
+	if body.Type == "" {
+		http.Error(w, `"type" is required`, http.StatusBadRequest)
+		return
+	}
 	if err := s.opts.Controller.Switch(r.Context(), body.Type); err != nil {
 		http.Error(w, err.Error(), applyStatus(err))
 		return

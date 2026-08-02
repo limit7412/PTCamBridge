@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -244,5 +245,20 @@ func TestScanJPEGAppliesMaxSizeToFillBytes(t *testing.T) {
 	// A generous limit still accepts it: fill bytes are legal.
 	if _, err := ScanJPEG(padded, 1<<20); err != nil {
 		t.Errorf("ScanJPEG rejected legal fill bytes under a large limit: %v", err)
+	}
+}
+
+// max_frame_size can be set near MaxInt, and Content-Length comes off the
+// wire, so adding the two before the bounds check wraps negative: the check
+// passes and the slice that follows panics.
+func TestSplitMultipartSurvivesAnEnormousContentLength(t *testing.T) {
+	body := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", math.MaxInt)
+	frames, rest := SplitMultipart([]byte(body), "frame", math.MaxInt)
+
+	if len(frames) != 0 {
+		t.Errorf("got %d frames from a part whose body never arrived", len(frames))
+	}
+	if len(rest) == 0 {
+		t.Error("the incomplete part was dropped rather than held for more data")
 	}
 }
