@@ -761,3 +761,112 @@ func TestBridgeApplyFailsWhenShutdownInterruptsVerification(t *testing.T) {
 		t.Errorf("an unverified configuration was persisted: %q", saved.Source.MJPEG.URL)
 	}
 }
+
+// An override meant for one run must not become permanent the first time
+// something unrelated is changed.
+func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	// What the file says.
+	fileCfg := mjpegConfig(upstream.URL)
+	fileCfg.Source.UVC.Device = "the camera the user configured"
+
+	// What this run is actually using, after a -device override.
+	effective := fileCfg
+	effective.Source.UVC.Device = "just for this run"
+
+	b := New(effective, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(fileCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// Change something else entirely.
+	updated := b.Snapshot()
+	updated.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !saved.Server.HoldOnSourceLoss {
+		t.Error("the change the caller made was not saved")
+	}
+	if got := saved.Source.UVC.Device; got != "the camera the user configured" {
+		t.Errorf("saved device = %q, want the run override left out of the file", got)
+	}
+}
+
+// The override does have to be saved when it is what the caller changed.
+func TestBridgeApplySavesADeliberateChangeToAnOverriddenField(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	fileCfg := mjpegConfig(upstream.URL)
+	fileCfg.Source.UVC.Device = "from the file"
+	effective := fileCfg
+	effective.Source.UVC.Device = "from the command line"
+
+	b := New(effective, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(fileCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	updated := b.Snapshot()
+	updated.Source.UVC.Device = "picked in the tray"
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := saved.Source.UVC.Device; got != "picked in the tray" {
+		t.Errorf("saved device = %q, want the deliberate change", got)
+	}
+}
+
+// Settings for a source that is not running describe nothing the camera is
+// doing, so filling them in ahead of a switch must not interrupt it.
+func TestCaptureUnchangedIgnoresTheInactiveSources(t *testing.T) {
+	base := mjpegConfig("http://camera.invalid/")
+
+	preparing := base
+	preparing.Source.UVC.Device = "a camera to switch to later"
+	preparing.Source.Serial.Port = "COM7"
+	if !captureUnchanged(base, preparing) {
+		t.Error("filling in an inactive source was treated as a capture change")
+	}
+
+	switched := base
+	switched.Source.MJPEG.URL = "http://other.invalid/"
+	if captureUnchanged(base, switched) {
+		t.Error("changing the active source's URL was not treated as a capture change")
+	}
+
+	resized := base
+	resized.Source.MaxFrameSize = 1 << 20
+	if captureUnchanged(base, resized) {
+		t.Error("changing max_frame_size was not treated as a capture change")
+	}
+
+	rotated := base
+	rotated.Transform.Rotate = 90
+	if captureUnchanged(base, rotated) {
+		t.Error("changing the transform was not treated as a capture change")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -50,6 +51,12 @@ type Bridge struct {
 	// cfgPath is where Apply persists settings; empty disables persistence.
 	cfgPath string
 
+	// persistBase is what the settings file said, before the environment and
+	// the command line were layered on. Saving starts from this so a
+	// -device or a PAPERBRIDGE_* meant for one run is not written back as if
+	// the user had chosen it permanently.
+	persistBase config.Config
+
 	// stream is told about settings the HTTP server has to reapply itself.
 	// It is set once during wiring, before anything can call Apply.
 	stream StreamConfigurator
@@ -65,7 +72,16 @@ type Bridge struct {
 // New builds a bridge for the given settings. Start must be called to begin
 // capturing.
 func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log *slog.Logger) *Bridge {
-	return &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg}
+	return &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg}
+}
+
+// SetPersistBase records the settings as the file has them, which is what
+// saving builds on. Without it the effective settings are saved verbatim, and
+// a one-off override becomes permanent the first time anything calls Apply.
+func (b *Bridge) SetPersistBase(cfg config.Config) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.persistBase = cfg
 }
 
 // SetStreamConfigurator registers the HTTP server so that Apply can hand it the
@@ -161,7 +177,9 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 	}
 
 	if b.cfgPath != "" {
-		if err := config.Save(b.cfgPath, cfg); err != nil {
+		saved := mergeChanges(b.persistBase, previous, cfg)
+		b.persistBase = saved
+		if err := config.Save(b.cfgPath, saved); err != nil {
 			// The running configuration is already correct, so nothing is torn
 			// down; the caller is told so it can say the change is temporary.
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
@@ -171,12 +189,60 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 	return nil
 }
 
+// mergeChanges returns base with every value this change actually touched
+// taken from next.
+//
+// The point is what it leaves alone: a field the caller did not change keeps
+// whatever the settings file had, so an override that only applies to this run
+// is not written back by an unrelated change somewhere else in the tree.
+func mergeChanges(base, previous, next config.Config) config.Config {
+	out := base
+	mergeChanged(reflect.ValueOf(&out).Elem(), reflect.ValueOf(previous), reflect.ValueOf(next))
+	return out
+}
+
+// mergeChanged walks the settings tree and copies the leaves that differ.
+func mergeChanged(out, previous, next reflect.Value) {
+	if out.Kind() == reflect.Struct {
+		for i := 0; i < out.NumField(); i++ {
+			mergeChanged(out.Field(i), previous.Field(i), next.Field(i))
+		}
+		return
+	}
+	if !reflect.DeepEqual(previous.Interface(), next.Interface()) {
+		out.Set(next)
+	}
+}
+
 // captureUnchanged reports whether two settings would build and run the same
 // source, which is what decides if a change has to interrupt the camera.
 //
-// Source carries a slice, so this cannot be a plain comparison.
+// Only the selected source's own settings count. Comparing the whole Source
+// tree would restart a working camera because the user filled in the MJPEG URL
+// they intend to switch to later, and while that camera was reconnecting the
+// change would be rejected outright.
+//
+// A source type added later falls through to the default and restarts, which
+// is the safe answer; a new field inside an existing source is caught by the
+// struct comparisons.
 func captureUnchanged(previous, next config.Config) bool {
-	return reflect.DeepEqual(previous.Source, next.Source) && previous.Transform == next.Transform
+	if previous.Source.Type != next.Source.Type ||
+		previous.Source.MaxFrameSize != next.Source.MaxFrameSize ||
+		previous.Transform != next.Transform {
+		return false
+	}
+	switch next.Source.Type {
+	case config.SourceUVC:
+		return previous.Source.UVC == next.Source.UVC
+	case config.SourceSerial:
+		return previous.Source.Serial.Port == next.Source.Serial.Port &&
+			previous.Source.Serial.Baud == next.Source.Serial.Baud &&
+			slices.Equal(previous.Source.Serial.Header, next.Source.Serial.Header)
+	case config.SourceMJPEG:
+		return previous.Source.MJPEG == next.Source.MJPEG
+	default:
+		return false
+	}
 }
 
 // restartRequired rejects changes to settings that are only read while the
@@ -211,19 +277,23 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 func (b *Bridge) Devices(ctx context.Context) (server.Devices, error) {
 	var devices server.Devices
 
-	cameras, err := source.ListDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
-	if err != nil {
-		b.log.Warn("could not list capture devices", "error", err)
+	cameras, cameraErr := source.ListDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
+	if cameraErr != nil {
+		b.log.Warn("could not list capture devices", "error", cameraErr)
 	}
 	devices.Cameras = cameras
 
-	ports, err := source.ListSerialPorts()
-	if err != nil {
-		b.log.Warn("could not list serial ports", "error", err)
+	ports, serialErr := source.ListSerialPorts()
+	if serialErr != nil {
+		b.log.Warn("could not list serial ports", "error", serialErr)
 	}
 	devices.SerialPorts = ports
 
-	return devices, nil
+	// Enumeration failing is not the same as finding nothing, and the caller
+	// is the only one that can tell the user which it was. Swallowing it here
+	// leaves the tray and the API showing an empty list as if the machine had
+	// no camera at all.
+	return devices, errors.Join(cameraErr, serialErr)
 }
 
 // SetPaused stops or resumes capture. Pausing releases the camera, which

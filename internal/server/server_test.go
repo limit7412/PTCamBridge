@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -364,6 +365,8 @@ type fakeController struct {
 	applied  bool
 	// applyErr is what Apply returns, for the failure mappings.
 	applyErr error
+	// devicesErr is what Devices returns.
+	devicesErr error
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
@@ -383,7 +386,9 @@ func (c *fakeController) Switch(_ context.Context, sourceType string) error {
 	return nil
 }
 
-func (c *fakeController) Devices(context.Context) (Devices, error) { return Devices{}, nil }
+func (c *fakeController) Devices(context.Context) (Devices, error) {
+	return Devices{}, c.devicesErr
+}
 
 func TestManagementAPIIsAbsentUnlessEnabled(t *testing.T) {
 	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: false})
@@ -745,5 +750,28 @@ func TestStreamSendsAFreshOpeningFrame(t *testing.T) {
 	}
 	if !bytes.Contains(buf, []byte("--"+core.DefaultBoundary)) {
 		t.Errorf("opening bytes = %q, want the current frame", buf)
+	}
+}
+
+// An enumeration that failed is not an empty machine, and only the caller can
+// tell the user which it was.
+func TestDevicesReportsAnEnumerationFailure(t *testing.T) {
+	ctrl := &fakeController{cfg: config.Default(), devicesErr: errors.New("ffmpeg is not executable")}
+	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/v1/devices")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 when enumeration failed", resp.StatusCode)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(out), "not executable") {
+		t.Errorf("body = %q, want the enumeration error", out)
 	}
 }

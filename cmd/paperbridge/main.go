@@ -106,10 +106,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(cfgPath)
+	fileCfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
 	}
+	cfg := fileCfg
 	applyFlags(&cfg, opts)
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
@@ -149,6 +150,10 @@ func run() error {
 	frames := hub.New()
 	tracker := status.New()
 	app := bridge.New(cfg, cfgPath, frames, tracker, log)
+	// Saving starts from what the file said, not from the effective settings:
+	// a -device or a PAPERBRIDGE_* is for this run, and must not be written
+	// back the first time the tray changes something unrelated.
+	app.SetPersistBase(fileCfg)
 
 	admin := cfg.IsLoopback()
 	if !admin {
@@ -175,7 +180,7 @@ func run() error {
 	app.SetStreamConfigurator(srv)
 
 	if cfg.PaperTracker.WriteCache {
-		if err := papertracker.WriteCache(cfg.PaperTracker.InstallDir, address); err != nil {
+		if err := papertracker.WriteCache(cfg.PaperTracker.InstallDir, connectAddress(address)); err != nil {
 			// The bridge still works; the user just has to point the client at
 			// it by hand.
 			log.Error("could not update the PaperTracker address cache", "error", err)
@@ -269,11 +274,29 @@ func applyFlags(cfg *config.Config, o options) {
 func setupLogging(cfg config.Config, console bool) (*slog.Logger, io.Closer, error) {
 	dir, err := cfg.LogDir()
 	if err != nil {
-		// Without a writable location, console-only logging still beats none.
+		// Console-only logging beats none, but it only counts as logging if
+		// the console is actually switched on: a tray launch does not pass
+		// -console, and without this every later error goes to io.Discard.
 		fmt.Fprintln(os.Stderr, "paperbridge: logging to the console only:", err)
-		dir = ""
+		dir, console = "", true
 	}
 	return logging.Setup(logging.Options{Dir: dir, Level: cfg.Log.Level, Console: console})
+}
+
+// connectAddress turns a listen address into one the client can dial.
+//
+// A wildcard bind resolves to something like "[::]:18080", which is a valid
+// thing to listen on and a useless thing to connect to. The client runs on
+// this machine, so loopback is the address it wants.
+func connectAddress(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return addr
 }
 
 // describeBindFailure turns "address already in use" into an answer to the

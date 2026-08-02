@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,7 +25,8 @@ const (
 type MJPEGConfig struct {
 	// URL is the upstream stream, for example http://192.168.1.50/.
 	URL string
-	// ConnectTimeout bounds the handshake and the wait for response headers.
+	// ConnectTimeout bounds every phase of getting connected: DNS, TCP, TLS
+	// and the wait for response headers.
 	// The stream body itself is unbounded.
 	ConnectTimeout time.Duration
 	// StallTimeout is how long the stream may go quiet before it counts as
@@ -80,6 +82,15 @@ func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEG
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Every phase of getting connected, not just the wait for headers.
+	// ResponseHeaderTimeout alone leaves DNS, TCP and TLS on the transport's
+	// own much longer defaults, so an unreachable camera would hold a
+	// reconnect attempt open far past the timeout this field promises.
+	transport.DialContext = (&net.Dialer{
+		Timeout:   cfg.ConnectTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.TLSHandshakeTimeout = cfg.ConnectTimeout
 	transport.ResponseHeaderTimeout = cfg.ConnectTimeout
 	// A camera serves one stream per connection; pooling gains nothing and
 	// keeps a dead socket around.
