@@ -353,3 +353,14 @@ func TestMJPEGProxyKeepsCredentialsOutOfMessages(t *testing.T) {
 		t.Errorf("error leaks the password: %v", err)
 	}
 }
+
+// url.Parse accepts "http:///stream"; the transport does not. Catching it here
+// makes it a configuration error the bridge can roll back from, rather than
+// something the reconnect loop retries forever.
+func TestNewMJPEGProxyRejectsAURLWithNoHost(t *testing.T) {
+	for _, raw := range []string{"http:///stream", "http://", "https:///"} {
+		if _, err := NewMJPEGProxy(MJPEGConfig{URL: raw}, discardLogger(), nil); err == nil {
+			t.Errorf("NewMJPEGProxy(%q) accepted a URL with no host", raw)
+		}
+	}
+}

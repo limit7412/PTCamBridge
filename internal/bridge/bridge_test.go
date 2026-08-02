@@ -155,14 +155,14 @@ func TestBridgeAppliesTheConfiguredTransform(t *testing.T) {
 	}
 }
 
-func TestBridgeSwitchChangesTheSource(t *testing.T) {
+// Switching to a source that is not attached now fails and leaves the working
+// one running, instead of reporting success with nothing producing frames.
+func TestBridgeSwitchRejectsAnUnavailableSource(t *testing.T) {
+	shortenVerify(t, 1500*time.Millisecond)
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
 	frames := hub.New()
-	tracker := status.New()
-	cfg := mjpegConfig(upstream.URL)
-	cfg.Source.UVC.Device = "nonexistent-camera"
-	b := New(cfg, "", frames, tracker, discardLogger())
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -172,18 +172,44 @@ func TestBridgeSwitchChangesTheSource(t *testing.T) {
 	defer b.Stop()
 	waitForFrame(t, frames, 5*time.Second)
 
-	if err := b.Switch(ctx, config.SourceSerial); err != nil {
-		t.Fatalf("Switch: %v", err)
-	}
-	if got := b.Snapshot().Source.Type; got != config.SourceSerial {
-		t.Errorf("source type = %q after switching, want serial", got)
-	}
-
-	if err := b.Switch(ctx, config.SourceMJPEG); err != nil {
-		t.Fatalf("switch back: %v", err)
+	if err := b.Switch(ctx, config.SourceSerial); err == nil {
+		t.Fatal("expected switching to a serial port that is not there to fail")
 	}
 	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
-		t.Errorf("source type = %q after switching back, want mjpeg", got)
+		t.Errorf("source type = %q, want the working mjpeg source kept", got)
+	}
+
+	before := frames.Stats().Published
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if frames.Stats().Published > before {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the working source stopped producing frames after a rejected switch")
+}
+
+// Switching to a source that does work is accepted, and the frames keep coming.
+func TestBridgeSwitchToAWorkingSource(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	if err := b.Switch(ctx, config.SourceMJPEG); err != nil {
+		t.Fatalf("Switch to a working source: %v", err)
+	}
+	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
+		t.Errorf("source type = %q, want mjpeg", got)
 	}
 }
 
@@ -485,5 +511,124 @@ func TestBridgeStartTwiceIsAnError(t *testing.T) {
 	_ = b.Start(ctx)
 	if err := b.Start(ctx); err == nil {
 		t.Fatal("expected the second Start to be rejected")
+	}
+}
+
+// shortenVerify keeps the start verification from dominating test runtime.
+func shortenVerify(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := startVerifyTimeout
+	startVerifyTimeout = d
+	t.Cleanup(func() { startVerifyTimeout = previous })
+}
+
+// Only a frame proves a source works. A driver that starts, fails to reach its
+// camera and settles into reconnecting has not started anything the user can
+// use, so Apply must not keep those settings.
+func TestBridgeApplyRevertsWhenTheNewSourceNeverDelivers(t *testing.T) {
+	shortenVerify(t, 1500*time.Millisecond)
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	// An upstream that accepts the connection and then says nothing: no error
+	// to report, and no frame either.
+	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		<-r.Context().Done()
+	}))
+	defer silent.Close()
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	broken := b.Snapshot()
+	broken.Source.MJPEG.URL = silent.URL
+
+	if err := b.Apply(ctx, broken); err == nil {
+		t.Fatal("expected Apply to fail for a source that never produced a frame")
+	}
+	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
+		t.Errorf("URL = %q, want the working upstream restored", got)
+	}
+
+	before := frames.Stats().Published
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if frames.Stats().Published > before {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the restored source is not producing frames")
+}
+
+// Startup is the opposite case: a camera that is not there yet must be left to
+// reconnect, because nothing will start it a second time.
+func TestBridgeStartLeavesAnUnreachableSourceRetrying(t *testing.T) {
+	shortenVerify(t, 500*time.Millisecond)
+
+	// Nothing is listening here, so every attempt fails and retries.
+	cfg := mjpegConfig("http://127.0.0.1:1/")
+	frames := hub.New()
+	b := New(cfg, "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start reported a failure for a source that should keep retrying: %v", err)
+	}
+	defer b.Stop()
+
+	// The driver has to still be alive: stopping it is what would stop a
+	// camera plugged in later from ever being picked up.
+	time.Sleep(750 * time.Millisecond)
+	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
+		t.Errorf("source type = %q, want the configured mjpeg source", got)
+	}
+	if b.stopped == nil {
+		t.Error("no driver is running after Start; a source appearing later would never be picked up")
+	}
+}
+
+// While paused nothing runs, but Apply still has to reject settings that could
+// not start: resuming later would otherwise fail with the previous, working
+// configuration already gone.
+func TestBridgeApplyValidatesTheDriverWhilePaused(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	unbuildable := b.Snapshot()
+	unbuildable.Source.Type = config.SourceUVC
+	unbuildable.Source.UVC.Device = "" // no device: the driver refuses to build
+
+	if err := b.Apply(ctx, unbuildable); err == nil {
+		t.Fatal("expected settings that cannot build a driver to be rejected while paused")
+	}
+	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
+		t.Errorf("source type = %q, want the previous settings kept", got)
+	}
+
+	// Resuming must therefore still work.
+	if err := b.SetPaused(false); err != nil {
+		t.Errorf("resume after a rejected change: %v", err)
 	}
 }

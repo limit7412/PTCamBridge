@@ -295,8 +295,16 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("source.type %q must be one of %q, %q or %q", c.Source.Type, SourceUVC, SourceSerial, SourceMJPEG)
 	}
+	// Zero means "use the core default". Any other value below the smallest
+	// possible JPEG would pass validation and then silently drop every frame,
+	// because the parsers use it as a hard ceiling and nothing about a source
+	// that reads happily but publishes nothing looks like a failure.
 	if c.Source.MaxFrameSize < 0 {
 		return fmt.Errorf("source.max_frame_size must not be negative, got %d", c.Source.MaxFrameSize)
+	}
+	if c.Source.MaxFrameSize > 0 && c.Source.MaxFrameSize < core.MinJPEGSize {
+		return fmt.Errorf("source.max_frame_size %d is below the %d bytes of the smallest possible JPEG; use 0 for the default",
+			c.Source.MaxFrameSize, core.MinJPEGSize)
 	}
 	for i, b := range c.Source.Serial.Header {
 		if b < 0 || b > 0xFF {

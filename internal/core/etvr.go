@@ -87,7 +87,7 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte) {
 			return frames, buf[start:]
 		}
 		payloadLen := int(binary.LittleEndian.Uint16(buf[lenAt : lenAt+etvrLengthBytes]))
-		if payloadLen < minJPEGSize || payloadLen > p.maxPayload {
+		if payloadLen < MinJPEGSize || payloadLen > p.maxPayload {
 			pos = start + 1
 			continue
 		}

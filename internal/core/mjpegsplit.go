@@ -210,7 +210,7 @@ func SplitMultipart(buf []byte, boundary string, maxSize int) (frames [][]byte, 
 
 		var body []byte
 		if n, hasCL := contentLength(headers); hasCL {
-			if n < minJPEGSize || n > maxSize {
+			if n < MinJPEGSize || n > maxSize {
 				pos = afterDelim
 				continue
 			}

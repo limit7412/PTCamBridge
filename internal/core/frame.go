@@ -28,8 +28,8 @@ const (
 // stream has desynchronised rather than that a huge frame really arrived.
 const DefaultMaxFrameSize = 4 << 20
 
-// minJPEGSize is SOI + EOI; anything shorter cannot be a JPEG at all.
-const minJPEGSize = 4
+// MinJPEGSize is SOI + EOI; anything shorter cannot be a JPEG at all.
+const MinJPEGSize = 4
 
 // Errors reported by ValidateJPEG.
 var (
@@ -57,7 +57,7 @@ func ValidateJPEG(data []byte, maxSize int) error {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxFrameSize
 	}
-	if len(data) < minJPEGSize {
+	if len(data) < MinJPEGSize {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooSmall, len(data))
 	}
 	if len(data) > maxSize {

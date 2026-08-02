@@ -24,14 +24,15 @@ import (
 // add latency.
 const frameQueueDepth = 1
 
-// startGrace is how long a freshly started driver is watched for a fatal
-// error before the start counts as successful.
+// startVerifyTimeout is how long Apply waits for a new source to prove itself
+// before giving up on it.
 //
-// A driver reports most failures asynchronously, because Run keeps retrying a
-// camera that is merely unplugged. The failures that retrying cannot fix -- no
-// ffmpeg binary, an unusable device name -- surface within a few milliseconds,
-// and Apply has to see them to be able to roll back to the previous source.
-const startGrace = 300 * time.Millisecond
+// The proof is the first frame, not the absence of an early error: a driver
+// reconnects on its own, so "has not failed yet" says nothing. The window has
+// to cover a whole first attempt -- the MJPEG connect timeout is five seconds,
+// and a camera that has to fall back from passthrough to re-encoding spends a
+// backoff and a second ffmpeg startup getting there.
+var startVerifyTimeout = 10 * time.Second
 
 // StreamConfigurator receives the parts of a settings change that the HTTP
 // server owns and must adopt for itself.
@@ -83,7 +84,9 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return errors.New("bridge: already started")
 	}
 	b.root = ctx
-	return b.startLocked()
+	// Startup does not verify: a camera that is not plugged in yet has to be
+	// picked up when it appears, and tearing the driver down would stop that.
+	return b.startLocked(false)
 }
 
 // Stop halts capture and waits for the driver to finish releasing its device.
@@ -132,10 +135,12 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 	b.stopLocked()
 	b.cfg = cfg
 
-	if err := b.startLocked(); err != nil {
+	if err := b.startLocked(true); err != nil {
 		b.log.Error("new settings could not start a source, reverting", "error", err)
 		b.cfg = previous
-		if revertErr := b.startLocked(); revertErr != nil {
+		// The previous source was working, so it is put back without being
+		// made to prove itself again.
+		if revertErr := b.startLocked(false); revertErr != nil {
 			return fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
 		}
 		return err
@@ -222,7 +227,7 @@ func (b *Bridge) SetPaused(paused bool) error {
 		return nil
 	}
 	b.log.Info("capture resumed")
-	return b.startLocked()
+	return b.startLocked(false)
 }
 
 // Paused reports whether capture is currently paused.
@@ -234,14 +239,28 @@ func (b *Bridge) Paused() bool {
 
 // startLocked builds and launches the configured driver. The caller holds mu.
 //
-// It returns an error both for a driver that cannot be built and for one that
-// fails fatally within startGrace of being launched. Nothing is left running
-// in either case, so the caller is free to start a different configuration.
-func (b *Bridge) startLocked() error {
+// With verify set it waits for the source to deliver a frame, and returns an
+// error if it does not, leaving nothing running. That is what Apply needs:
+// only a frame proves a source works, since a driver that cannot reach its
+// camera reconnects rather than failing. Without verify the driver is left to
+// retry in the background, which is what startup wants -- a camera plugged in
+// after sign-in still has to be picked up.
+func (b *Bridge) startLocked(verify bool) error {
 	if b.root == nil || b.paused || b.root.Err() != nil {
-		return nil
+		// Nothing is going to run, but the settings still have to be able to
+		// produce a driver. Accepting them unchecked while paused would save a
+		// configuration that Resume then cannot start, with the previous
+		// working one already gone.
+		_, err := b.newSource(b.status)
+		return err
 	}
-	drv, err := b.newSource()
+
+	// The reporter is how a driver announces its first frame, so wrapping it
+	// is what turns "started" into "working" without the driver knowing.
+	firstFrame := make(chan struct{})
+	reporter := &frameWatcher{inner: b.status, seen: firstFrame}
+
+	drv, err := b.newSource(reporter)
 	if err != nil {
 		return err
 	}
@@ -251,7 +270,7 @@ func (b *Bridge) startLocked() error {
 	stopped := make(chan struct{})
 	// Buffered so the driver never blocks reporting a failure nobody is
 	// waiting for any more.
-	fatal := make(chan error, 1)
+	failed := make(chan error, 1)
 
 	b.cancel = cancel
 	b.stopped = stopped
@@ -272,7 +291,7 @@ func (b *Bridge) startLocked() error {
 		// fix, so any error here means this source will never produce a frame.
 		if err := drv.Run(ctx, frames); err != nil && ctx.Err() == nil {
 			log.Error("source stopped", "source", drv.Name(), "error", err)
-			fatal <- err
+			failed <- err
 		}
 	}()
 
@@ -286,17 +305,46 @@ func (b *Bridge) startLocked() error {
 		close(stopped)
 	}()
 
-	timer := time.NewTimer(startGrace)
+	if !verify {
+		b.log.Info("source started", "source", drv.Name())
+		return nil
+	}
+
+	timer := time.NewTimer(startVerifyTimeout)
 	defer timer.Stop()
 	select {
-	case err := <-fatal:
+	case <-firstFrame:
+	case err := <-failed:
 		b.stopLocked()
 		return err
 	case <-timer.C:
+		b.stopLocked()
+		return fmt.Errorf("bridge: %s produced no frame within %s", drv.Name(), startVerifyTimeout)
+	case <-b.root.Done():
+		return nil
 	}
 
 	b.log.Info("source started", "source", drv.Name())
 	return nil
+}
+
+// frameWatcher closes seen the first time a driver reports a frame, and
+// otherwise forwards everything to the tracker unchanged.
+type frameWatcher struct {
+	inner source.Reporter
+	seen  chan struct{}
+	once  sync.Once
+}
+
+func (w *frameWatcher) Connected(name string) {
+	w.once.Do(func() { close(w.seen) })
+	w.inner.Connected(name)
+}
+
+func (w *frameWatcher) Disconnected(name string, err error) {
+	// Deliberately not a verdict: the first attempt failing is normal for a
+	// camera that has to fall back from passthrough to re-encoding.
+	w.inner.Disconnected(name, err)
 }
 
 // stopLocked cancels the running driver and waits for it to exit. Waiting is
@@ -327,8 +375,9 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 	}
 }
 
-// newSource builds the driver named by the current settings.
-func (b *Bridge) newSource() (source.Source, error) {
+// newSource builds the driver named by the current settings, reporting its
+// connection state to reporter.
+func (b *Bridge) newSource(reporter source.Reporter) (source.Source, error) {
 	cfg := b.cfg
 	switch cfg.Source.Type {
 	case config.SourceUVC:
@@ -338,7 +387,7 @@ func (b *Bridge) newSource() (source.Source, error) {
 			Framerate:    cfg.Source.UVC.Framerate,
 			FFmpegPath:   cfg.Source.UVC.FFmpegPath,
 			MaxFrameSize: cfg.Source.MaxFrameSize,
-		}, b.log, b.status)
+		}, b.log, reporter)
 
 	case config.SourceSerial:
 		return source.NewSerial(source.SerialConfig{
@@ -346,13 +395,13 @@ func (b *Bridge) newSource() (source.Source, error) {
 			Baud:         cfg.Source.Serial.Baud,
 			Header:       cfg.SerialHeader(),
 			MaxFrameSize: cfg.Source.MaxFrameSize,
-		}, b.log, b.status)
+		}, b.log, reporter)
 
 	case config.SourceMJPEG:
 		return source.NewMJPEGProxy(source.MJPEGConfig{
 			URL:          cfg.Source.MJPEG.URL,
 			MaxFrameSize: cfg.Source.MaxFrameSize,
-		}, b.log, b.status)
+		}, b.log, reporter)
 
 	default:
 		return nil, fmt.Errorf("bridge: unknown source type %q", cfg.Source.Type)

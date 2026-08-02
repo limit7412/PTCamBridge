@@ -99,7 +99,7 @@ func run() error {
 		return autostart.Disable()
 	}
 	if opts.listDevices {
-		return listDevices()
+		return listDevices(opts)
 	}
 
 	cfgPath, err := resolveConfigPath(opts.configPath)
@@ -304,11 +304,23 @@ func probeExistingInstance(addr string) (bool, string) {
 	return true, stats.Version
 }
 
-func listDevices() error {
+func listDevices(opts options) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cameras, err := source.ListDevices(ctx, "")
+	// The settings are read here too: an installation that points at ffmpeg
+	// with source.uvc.ffmpeg_path rather than bundling it would otherwise get
+	// an empty list from a command whose whole job is to find the camera.
+	var ffmpegPath string
+	if cfgPath, err := resolveConfigPath(opts.configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "could not locate the settings file:", err)
+	} else if cfg, err := config.Load(cfgPath); err != nil {
+		fmt.Fprintln(os.Stderr, "could not read the settings file:", err)
+	} else {
+		ffmpegPath = cfg.Source.UVC.FFmpegPath
+	}
+
+	cameras, err := source.ListDevices(ctx, ffmpegPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "could not list capture devices:", err)
 	}

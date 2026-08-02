@@ -1,6 +1,8 @@
 package config
 
 import (
+	"github.com/limit7412/PTCamBridge/internal/core"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -278,5 +280,26 @@ func TestValidateRejectsReservedExtraHeaders(t *testing.T) {
 	cfg.Server.ExtraHeaders = map[string]string{"content-length": "0"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected an extra header that shadows Content-Length to be rejected")
+	}
+}
+
+// A positive max_frame_size below the smallest possible JPEG passes as "not
+// negative" and then silently drops every frame, since the parsers use it as a
+// hard ceiling and a source that reads happily but publishes nothing never
+// looks like a failure.
+func TestValidateRejectsATinyMaxFrameSize(t *testing.T) {
+	for _, size := range []int{1, 2, 3} {
+		cfg := Default()
+		cfg.Source.MaxFrameSize = size
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("max_frame_size = %d was accepted", size)
+		}
+	}
+	for _, size := range []int{0, core.MinJPEGSize, 1 << 20} {
+		cfg := Default()
+		cfg.Source.MaxFrameSize = size
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("max_frame_size = %d rejected: %v", size, err)
+		}
 	}
 }

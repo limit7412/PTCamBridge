@@ -63,6 +63,12 @@ func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEG
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("mjpeg: unsupported URL scheme %q", u.Scheme)
 	}
+	// url.Parse is happy with "http:///stream". The transport is not, and its
+	// "no Host in request URL" would arrive as an ordinary error that the
+	// reconnect loop then retries forever.
+	if u.Host == "" {
+		return nil, fmt.Errorf("mjpeg: URL %q has no host", cfg.URL)
+	}
 	if cfg.ConnectTimeout <= 0 {
 		cfg.ConnectTimeout = defaultConnectTimeout
 	}

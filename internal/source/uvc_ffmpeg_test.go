@@ -28,28 +28,46 @@ func fakeFFmpeg(t *testing.T, diag string) string {
 	return path
 }
 
-func TestDeviceUnavailable(t *testing.T) {
-	cases := map[string]bool{
-		`[dshow @ 000001] Could not find video device with name "Babble"`: true,
-		"[video4linux2] Cannot open video device /dev/video9":             true,
-		"/dev/video9: No such file or directory":                          true,
-		"Error while decoding stream: Invalid data found":                 false,
-		"": false,
+// A camera that is not plugged in yet reports the same thing as one that will
+// never exist, so the driver keeps retrying either way: a camera attached after
+// sign-in still has to be picked up. Deciding whether a source works is the
+// bridge's job, and it does it by waiting for a frame.
+func TestUVCKeepsRetryingAnUnopenableDevice(t *testing.T) {
+	u, err := NewUVC(UVCConfig{
+		Device:     "not-plugged-in-yet",
+		FFmpegPath: fakeFFmpeg(t, `[dshow @ 000001] Could not find video device with name "not-plugged-in-yet"`),
+	}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewUVC: %v", err)
 	}
-	for diag, want := range cases {
-		if got := deviceUnavailable(diag); got != want {
-			t.Errorf("deviceUnavailable(%q) = %v, want %v", diag, got, want)
-		}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- u.Run(ctx, make(chan core.Frame, 4)) }()
+
+	// Long enough for the first attempt, the 1s backoff and the second.
+	select {
+	case err := <-done:
+		t.Fatalf("Run gave up on a device that may still appear: %v", err)
+	case <-time.After(2500 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop on cancellation")
 	}
 }
 
-// A device ffmpeg cannot open will not appear on a retry, so the driver has to
-// give up rather than loop -- that is what lets Apply roll back to the source
-// that was working.
-func TestUVCTreatsAnUnopenableDeviceAsFatal(t *testing.T) {
+// A missing ffmpeg is different: no camera appearing later fixes it, and the
+// driver has nothing to retry.
+func TestUVCTreatsAMissingFFmpegAsFatal(t *testing.T) {
 	u, err := NewUVC(UVCConfig{
-		Device:     "no-such-camera",
-		FFmpegPath: fakeFFmpeg(t, `[dshow @ 000001] Could not find video device with name "no-such-camera"`),
+		Device:     "camera",
+		FFmpegPath: filepath.Join(t.TempDir(), "no-such-ffmpeg"),
 	}, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewUVC: %v", err)
@@ -68,57 +86,6 @@ func TestUVCTreatsAnUnopenableDeviceAsFatal(t *testing.T) {
 			t.Fatalf("Run returned %v, want a FatalError", err)
 		}
 	case <-ctx.Done():
-		t.Fatal("Run kept retrying a device ffmpeg cannot open")
-	}
-}
-
-// The mirror image: a camera that delivered frames and then went away is
-// exactly what the reconnect loop is for, so the same diagnostic must not end
-// the driver once a frame has arrived.
-func TestUVCKeepsRetryingAfterADeviceThatWorked(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in driver is a shell script")
-	}
-	dir := t.TempDir()
-	jpegPath := filepath.Join(dir, "frame.jpg")
-	if err := os.WriteFile(jpegPath, testJPEG(t), 0o644); err != nil {
-		t.Fatalf("write the fixture frame: %v", err)
-	}
-	// The first run delivers a frame and exits; every run after it reports the
-	// device as gone.
-	marker := filepath.Join(dir, "ran")
-	script := "#!/bin/sh\n" +
-		"if [ -f " + marker + " ]; then echo 'Could not find video device' >&2; exit 1; fi\n" +
-		"touch " + marker + "\n" +
-		"cat " + jpegPath + "\n" +
-		"exit 1\n"
-	path := filepath.Join(dir, "ffmpeg")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write the stand-in ffmpeg: %v", err)
-	}
-
-	u, err := NewUVC(UVCConfig{Device: "camera", FFmpegPath: path}, discardLogger(), nil)
-	if err != nil {
-		t.Fatalf("NewUVC: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- u.Run(ctx, make(chan core.Frame, 4)) }()
-
-	// Long enough for the first attempt, the 1s backoff and the second attempt.
-	select {
-	case err := <-done:
-		t.Fatalf("Run gave up on a camera that had been working: %v", err)
-	case <-time.After(2500 * time.Millisecond):
-	}
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not stop on cancellation")
+		t.Fatal("Run kept retrying a missing ffmpeg binary")
 	}
 }
