@@ -21,6 +21,15 @@ const CacheFileName = "wifi_cache.txt"
 // bridge took over.
 const BackupSuffix = ".bak"
 
+// NoOriginalSuffix marks that the client had no cached address at all when the
+// bridge first wrote one.
+//
+// Without it the first run leaves no record, so the second run finds the
+// bridge's own address sitting there and preserves that as "the original".
+// Restoring would then hand the user back the bridge instead of the state they
+// started from, and there would be no way to get to "no cache" again.
+const NoOriginalSuffix = ".bak.none"
+
 // ErrNotFound means no PaperTracker installation was located.
 var ErrNotFound = errors.New("papertracker: no installation directory found")
 
@@ -65,18 +74,29 @@ func WriteCache(installDir, addr string) error {
 	return nil
 }
 
-// backupOnce copies path to path+BackupSuffix unless a backup already exists.
+// backupOnce records the pre-bridge state, once. That is either the original
+// file copied to path+BackupSuffix, or the marker saying there was no original.
 func backupOnce(path string) error {
 	backup := path + BackupSuffix
-	if _, err := os.Stat(backup); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("papertracker: stat %s: %w", backup, err)
+	marker := path + NoOriginalSuffix
+
+	// Either file means the pre-bridge state is already on disk, and a second
+	// pass would only overwrite it with the bridge's own address.
+	for _, existing := range []string{backup, marker} {
+		if _, err := os.Stat(existing); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("papertracker: stat %s: %w", existing, err)
+		}
 	}
 
 	original, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// Nothing to preserve; the client had no cached address.
+		// The client had no cached address. Recording that is what makes the
+		// state restorable at all.
+		if err := os.WriteFile(marker, nil, 0o644); err != nil {
+			return fmt.Errorf("papertracker: write %s: %w", marker, err)
+		}
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("papertracker: read %s: %w", path, err)
@@ -92,6 +112,21 @@ func backupOnce(path string) error {
 func RestoreCache(installDir string) error {
 	path := CachePath(installDir)
 	backup := path + BackupSuffix
+	marker := path + NoOriginalSuffix
+
+	if _, err := os.Stat(marker); err == nil {
+		// There was no cache before the bridge, so putting that back means
+		// removing the file rather than writing an empty one.
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("papertracker: remove %s: %w", path, err)
+		}
+		if err := os.Remove(marker); err != nil {
+			return fmt.Errorf("papertracker: remove %s: %w", marker, err)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("papertracker: stat %s: %w", marker, err)
+	}
 
 	original, err := os.ReadFile(backup)
 	if errors.Is(err, os.ErrNotExist) {

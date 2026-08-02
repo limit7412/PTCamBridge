@@ -63,12 +63,28 @@ var reservedPartHeaders = []string{"Content-Type", "Content-Length"}
 
 // ValidateStreamHeader reports whether a name and value are usable as an extra
 // part header.
+//
+// The syntax is the one RFC 7230 defines for a header field, not merely
+// "contains no line break". A name like "Bad Header" or a value carrying a
+// stray control byte is written out happily but makes a strict MIME parser
+// reject the whole part, which turns a settings change that returned 200 into
+// a stream the client cannot read.
 func ValidateStreamHeader(name, value string) error {
-	if name == "" || strings.ContainsAny(name, ":\r\n") {
-		return fmt.Errorf("invalid extra header name %q", name)
+	if name == "" {
+		return errors.New("an extra header name cannot be empty")
 	}
-	if strings.ContainsAny(value, "\r\n") {
-		return fmt.Errorf("invalid extra header value for %q", name)
+	for _, r := range name {
+		if !isTokenRune(r) {
+			return fmt.Errorf("extra header name %q contains %q, which is not allowed in a header name", name, r)
+		}
+	}
+	for _, r := range value {
+		if r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7F {
+			return fmt.Errorf("extra header %q has a control character %q in its value", name, r)
+		}
 	}
 	for _, reserved := range reservedPartHeaders {
 		if strings.EqualFold(strings.TrimSpace(name), reserved) {
@@ -117,6 +133,16 @@ func (e MultipartEncoder) ContentType() string {
 // nonTokenBoundaryChars are the characters ValidateBoundary accepts that are
 // not RFC 2045 token characters, and so force a quoted parameter.
 const nonTokenBoundaryChars = "()/:=?,"
+
+// isTokenRune reports whether r may appear in a header field name, per the
+// RFC 7230 token production.
+func isTokenRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("!#$%&'*+-.^_`|~", r)
+}
 
 // AppendPart appends one encoded part to dst and returns the extended slice,
 // letting a writer reuse a single scratch buffer across frames.

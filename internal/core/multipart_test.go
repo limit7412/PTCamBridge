@@ -164,3 +164,33 @@ func TestExtraHeadersCannotOverrideTheEncodersOwn(t *testing.T) {
 		t.Errorf("ValidateStreamHeader rejected an ordinary header: %v", err)
 	}
 }
+
+// "Contains no line break" is not the same as "is a header field". A name with
+// a space or a value with a stray control byte is written out happily but makes
+// a strict MIME parser reject the whole part.
+func TestExtraHeadersMustBeValidFieldSyntax(t *testing.T) {
+	bad := []StreamHeader{
+		{Name: "Bad Header", Value: "x"},
+		{Name: "Tab\tName", Value: "x"},
+		{Name: "Nul\x00Name", Value: "x"},
+		{Name: "X-Ok", Value: "has a \x00 nul"},
+		{Name: "X-Ok", Value: "has a \x07 bell"},
+		{Name: "X-Ok", Value: "has a \x7f delete"},
+	}
+	for _, h := range bad {
+		if err := ValidateStreamHeader(h.Name, h.Value); err == nil {
+			t.Errorf("ValidateStreamHeader(%q, %q) accepted unusable field syntax", h.Name, h.Value)
+		}
+	}
+
+	good := []StreamHeader{
+		{Name: "X-Frame-Source", Value: "paperbridge"},
+		{Name: "X-Odd_But~Legal!", Value: "value with spaces"},
+		{Name: "X-Ok", Value: "tab\tseparated"},
+	}
+	for _, h := range good {
+		if err := ValidateStreamHeader(h.Name, h.Value); err != nil {
+			t.Errorf("ValidateStreamHeader(%q, %q) = %v, want it accepted", h.Name, h.Value, err)
+		}
+	}
+}

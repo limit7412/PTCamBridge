@@ -11,6 +11,17 @@ import (
 // quality was configured.
 const DefaultQuality = 85
 
+// DefaultMaxPixels bounds how large an image may be before it is decoded.
+//
+// A JPEG states its dimensions in a header a few bytes long, so
+// source.max_frame_size -- which counts compressed bytes -- says nothing about
+// what decoding will ask for: a structurally valid frame of well under a
+// kilobyte can declare 65535x65535 and have the decoder allocate the buffers
+// for it up front. A tracking camera sends 240x240, so this ceiling is far
+// above anything real while keeping one frame from a hostile or broken
+// upstream out of memory-exhaustion range.
+const DefaultMaxPixels = 16 << 20
+
 // Transform describes the optional geometry and re-encode step applied between
 // the source and the stream. The zero value is a no-op, and a no-op transform
 // forwards the input bytes untouched rather than decoding and re-encoding
@@ -27,6 +38,9 @@ type Transform struct {
 	// Quality is the JPEG quality for the re-encode, 1-100. Zero means "do not
 	// re-encode unless a geometry change forces it".
 	Quality int
+	// MaxPixels rejects an image larger than this before decoding it. Zero
+	// selects DefaultMaxPixels.
+	MaxPixels int
 }
 
 // Validate reports whether the transform can be applied.
@@ -56,6 +70,12 @@ func (t Transform) Apply(src []byte) ([]byte, error) {
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
+	// Read the header first: the decoder sizes its buffers from the declared
+	// dimensions, so anything over the ceiling has to be turned away before
+	// Decode is allowed to allocate for it.
+	if err := t.checkSize(src); err != nil {
+		return nil, err
+	}
 	img, err := jpeg.Decode(bytes.NewReader(src))
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
@@ -79,6 +99,28 @@ func (t Transform) Apply(src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+// checkSize reads only the JPEG header and reports whether the image it
+// describes is small enough to decode.
+func (t Transform) checkSize(src []byte) error {
+	limit := t.MaxPixels
+	if limit <= 0 {
+		limit = DefaultMaxPixels
+	}
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(src))
+	if err != nil {
+		return fmt.Errorf("read the image header: %w", err)
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return fmt.Errorf("image declares unusable dimensions %dx%d", cfg.Width, cfg.Height)
+	}
+	// Divide rather than multiply: the product of two declared dimensions can
+	// overflow before it is ever compared.
+	if cfg.Width > limit/cfg.Height {
+		return fmt.Errorf("image is %dx%d, over the %d pixel limit", cfg.Width, cfg.Height, limit)
+	}
+	return nil
 }
 
 // remap builds a dstW x dstH image by pulling each destination pixel from the

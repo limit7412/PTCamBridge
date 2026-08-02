@@ -3,6 +3,7 @@ package source
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -265,5 +267,89 @@ func TestMJPEGProxyName(t *testing.T) {
 	}
 	if drv.Name() != "mjpeg" {
 		t.Errorf("Name() = %q, want mjpeg", drv.Name())
+	}
+}
+
+// A server that answers and refuses us is not going to change its mind on a
+// retry, and Apply has to hear about it while it can still roll back.
+func TestMJPEGProxyTreatsAPermanent4xxAsFatal(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer ts.Close()
+
+			p, err := NewMJPEGProxy(MJPEGConfig{URL: ts.URL}, discardLogger(), nil)
+			if err != nil {
+				t.Fatalf("NewMJPEGProxy: %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			done := make(chan error, 1)
+			go func() { done <- p.Run(ctx, make(chan core.Frame, 4)) }()
+
+			select {
+			case err := <-done:
+				var fatal *FatalError
+				if !errors.As(err, &fatal) {
+					t.Fatalf("Run returned %v, want a FatalError", err)
+				}
+			case <-ctx.Done():
+				t.Fatalf("Run kept retrying a %d", code)
+			}
+		})
+	}
+}
+
+// 429 and friends are the server asking us to come back, which is what the
+// reconnect loop already does.
+func TestMJPEGProxyKeepsRetryingATransient4xx(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer ts.Close()
+
+	p, err := NewMJPEGProxy(MJPEGConfig{URL: ts.URL}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, make(chan core.Frame, 4)) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Run gave up on a 429: %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	cancel()
+	<-done
+}
+
+// A camera behind basic auth must not write its password into the log on every
+// reconnect.
+func TestMJPEGProxyKeepsCredentialsOutOfMessages(t *testing.T) {
+	// Port 1 on loopback refuses immediately, so the connect error is the one
+	// carrying the URL.
+	p, err := NewMJPEGProxy(MJPEGConfig{URL: "http://camera:hunter2@127.0.0.1:1/"}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	if strings.Contains(p.safeURL, "hunter2") {
+		t.Fatalf("safeURL = %q, want the password masked", p.safeURL)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = p.session(ctx, make(chan core.Frame, 1))
+	if err == nil {
+		t.Fatal("expected the connection to fail")
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error leaks the password: %v", err)
 	}
 }

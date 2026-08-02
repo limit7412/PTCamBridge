@@ -1,6 +1,7 @@
 package papertracker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,5 +146,70 @@ func TestFindInstallDirRecognisesAnInstall(t *testing.T) {
 	}
 	if got != install {
 		t.Errorf("FindInstallDir() = %q, want %q", got, install)
+	}
+}
+
+// The first run has nothing to preserve, but it still has to record that --
+// otherwise the second run backs up the bridge's own address and calls it the
+// client's, and the pre-bridge state is gone for good.
+func TestWriteCacheRecordsThatThereWasNoOriginal(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("first WriteCache: %v", err)
+	}
+	if _, err := os.Stat(path + NoOriginalSuffix); err != nil {
+		t.Fatalf("no marker after the first run: %v", err)
+	}
+	if _, err := os.Stat(path + BackupSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a backup was taken when there was no original: %v", err)
+	}
+
+	// A second run must not now treat the bridge's own address as the client's.
+	if err := WriteCache(dir, "127.0.0.1:18081"); err != nil {
+		t.Fatalf("second WriteCache: %v", err)
+	}
+	if _, err := os.Stat(path + BackupSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the second run backed up the bridge's own address: %v", err)
+	}
+
+	// Restoring "no cache" means removing the file, not leaving an address.
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		data, _ := os.ReadFile(path)
+		t.Errorf("the cache still exists after restoring (%q), want it gone", data)
+	}
+	if _, err := os.Stat(path + NoOriginalSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the marker outlived the restore")
+	}
+}
+
+// The ordinary case still has to work: a real original is preserved and put
+// back verbatim.
+func TestWriteCachePreservesARealOriginal(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	if err := os.WriteFile(path, []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("seed the cache: %v", err)
+	}
+
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	if _, err := os.Stat(path + NoOriginalSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the no-original marker was written despite a real original")
+	}
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+	got, err := ReadCache(dir)
+	if err != nil {
+		t.Fatalf("ReadCache: %v", err)
+	}
+	if got != "192.168.1.50" {
+		t.Errorf("restored %q, want the camera address back", got)
 	}
 }

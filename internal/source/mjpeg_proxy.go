@@ -45,6 +45,10 @@ type MJPEGProxy struct {
 	client   *http.Client
 	log      *slog.Logger
 	reporter Reporter
+	// safeURL is the upstream with any password masked. Every message that
+	// names the stream uses it, because a camera behind basic auth would
+	// otherwise write its credentials into the log on each reconnect.
+	safeURL string
 }
 
 // NewMJPEGProxy builds the driver and validates the upstream URL up front.
@@ -80,6 +84,7 @@ func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEG
 		client:   &http.Client{Transport: transport},
 		log:      log,
 		reporter: reporter,
+		safeURL:  u.Redacted(),
 	}, nil
 }
 
@@ -112,27 +117,35 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	resp, err := p.client.Do(req)
 	if err != nil {
 		if ctx.Err() == nil && reqCtx.Err() != nil {
-			return fmt.Errorf("mjpeg: %s sent nothing for %s", p.cfg.URL, p.cfg.StallTimeout)
+			return fmt.Errorf("mjpeg: %s sent nothing for %s", p.safeURL, p.cfg.StallTimeout)
 		}
-		return fmt.Errorf("mjpeg: connect to %s: %w", p.cfg.URL, err)
+		return fmt.Errorf("mjpeg: connect to %s: %w", p.safeURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("mjpeg: %s returned %s", p.cfg.URL, resp.Status)
+		err := fmt.Errorf("mjpeg: %s returned %s", p.safeURL, resp.Status)
+		if permanentHTTPStatus(resp.StatusCode) {
+			// The server answered and refused us: a wrong path, or credentials
+			// it will not accept. Unlike a refused connection there is no
+			// version of this that a retry fixes, so it is reported as fatal
+			// and Apply gets to roll back to the source that was working.
+			return fatalf(err)
+		}
+		return err
 	}
 
 	split := core.SplitJPEGStream
 	contentType := resp.Header.Get("Content-Type")
 	if boundary, ok := core.BoundaryFromContentType(contentType); ok {
-		p.log.Debug("upstream is multipart", "boundary", boundary, "url", p.cfg.URL)
+		p.log.Debug("upstream is multipart", "boundary", boundary, "url", p.safeURL)
 		split = func(buf []byte, maxSize int) ([][]byte, []byte) {
 			return core.SplitMultipart(buf, boundary, maxSize)
 		}
 	} else {
 		// Either a bare concatenated JPEG stream or a multipart response with
 		// no usable boundary parameter. Structural scanning handles both.
-		p.log.Debug("upstream has no usable boundary, scanning for images", "content_type", contentType, "url", p.cfg.URL)
+		p.log.Debug("upstream has no usable boundary, scanning for images", "content_type", contentType, "url", p.safeURL)
 	}
 
 	assembler := newFrameAssembler(split, p.cfg.MaxFrameSize)
@@ -158,12 +171,26 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 				return nil
 			}
 			if reqCtx.Err() != nil {
-				return fmt.Errorf("mjpeg: %s went quiet for %s", p.cfg.URL, p.cfg.StallTimeout)
+				return fmt.Errorf("mjpeg: %s went quiet for %s", p.safeURL, p.cfg.StallTimeout)
 			}
 			if errors.Is(err, io.EOF) {
-				return fmt.Errorf("mjpeg: %s closed the stream", p.cfg.URL)
+				return fmt.Errorf("mjpeg: %s closed the stream", p.safeURL)
 			}
-			return fmt.Errorf("mjpeg: read from %s: %w", p.cfg.URL, err)
+			return fmt.Errorf("mjpeg: read from %s: %w", p.safeURL, err)
 		}
 	}
+}
+
+// permanentHTTPStatus reports whether a status means the request itself is
+// wrong, rather than the server being briefly unable to serve it.
+//
+// 4xx is the client's fault by definition, with the exceptions below: those
+// three ask the caller to come back later, which is exactly what the reconnect
+// loop does.
+func permanentHTTPStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	}
+	return code >= 400 && code < 500
 }

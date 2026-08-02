@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"image/jpeg"
+	"strings"
 	"testing"
 )
 
@@ -154,5 +155,50 @@ func TestTransformValidate(t *testing.T) {
 func TestTransformRejectsNonJPEG(t *testing.T) {
 	if _, err := (Transform{Rotate: 90}).Apply([]byte("not an image")); err == nil {
 		t.Fatal("expected a decode error")
+	}
+}
+
+// A JPEG states its size in a header a few bytes long, so a frame that passes
+// the compressed-byte limit can still ask the decoder for gigabytes. The
+// header has to be checked before Decode is allowed to allocate.
+func TestTransformRejectsAnOversizedImageBeforeDecoding(t *testing.T) {
+	// A real, small frame whose SOF is rewritten to claim 65535x65535. The
+	// file stays well under any byte limit while telling the decoder to size
+	// its buffers for four gigapixels.
+	bomb := bytes.Clone(encodeJPEG(t, 16, 16))
+	sof := bytes.Index(bomb, []byte{markerPrefix, 0xC0})
+	if sof < 0 {
+		t.Fatal("fixture has no baseline SOF0 to rewrite")
+	}
+	// FF C0, length(2), precision(1), height(2), width(2)
+	copy(bomb[sof+5:sof+9], []byte{0xFF, 0xFF, 0xFF, 0xFF})
+
+	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(bomb)); err != nil {
+		t.Fatalf("the rewritten fixture is not parsable: %v", err)
+	} else if cfg.Width != 65535 || cfg.Height != 65535 {
+		t.Fatalf("fixture declares %dx%d, want 65535x65535", cfg.Width, cfg.Height)
+	}
+
+	tr := Transform{Rotate: 90}
+	if _, err := tr.Apply(bomb); err == nil {
+		t.Fatal("expected a 65535x65535 frame to be refused")
+	} else if !strings.Contains(err.Error(), "pixel limit") {
+		t.Errorf("error = %v, want it to name the pixel limit", err)
+	}
+}
+
+// The ceiling must not get in the way of the images this actually carries.
+func TestTransformAcceptsAnOrdinaryFrame(t *testing.T) {
+	tr := Transform{Rotate: 90}
+	if _, err := tr.Apply(encodeJPEG(t, 240, 240)); err != nil {
+		t.Errorf("Apply on a 240x240 frame: %v", err)
+	}
+}
+
+// MaxPixels is what the check is against, so a low one has to bite.
+func TestTransformHonoursAConfiguredPixelLimit(t *testing.T) {
+	tr := Transform{Rotate: 90, MaxPixels: 16}
+	if _, err := tr.Apply(encodeJPEG(t, 32, 32)); err == nil {
+		t.Error("expected a 32x32 frame to exceed a 16 pixel limit")
 	}
 }
