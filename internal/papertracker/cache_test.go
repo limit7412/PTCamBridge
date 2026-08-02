@@ -255,6 +255,168 @@ func TestRestoreCacheIgnoresABackupTheBridgeDidNotWrite(t *testing.T) {
 	}
 }
 
+// Restoring runs against whichever folder the search returns, and more than one
+// PaperTracker can sit on a machine -- an old copy beside a new one. The one
+// that matters is the one the bridge wrote to; picking the first that merely
+// looks like an install reports "nothing to restore" while the client that was
+// really changed stays pointed at a bridge that is no longer running.
+func TestFindRestoreDirPrefersTheFolderTheBridgeWroteTo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	// Searched first, and a perfectly ordinary install -- but untouched.
+	untouched := filepath.Join(home, "PaperTracker")
+	if err := os.MkdirAll(untouched, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(CachePath(untouched), []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Searched later, and the one the bridge actually took over.
+	changed := filepath.Join(home, ".local", "share", "PaperTracker")
+	if err := os.MkdirAll(changed, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(CachePath(changed), []byte("192.168.1.60"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := WriteCache(changed, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	if got, err := FindInstallDir(); err != nil || got != untouched {
+		t.Fatalf("FindInstallDir() = %q, %v -- the fixture does not reproduce the ambiguity", got, err)
+	}
+	got, err := FindRestoreDir()
+	if err != nil {
+		t.Fatalf("FindRestoreDir: %v", err)
+	}
+	if got != changed {
+		t.Errorf("FindRestoreDir() = %q, want the folder holding the backup %q", got, changed)
+	}
+}
+
+// The marker counts as well: a first run against a client with no cache at all
+// leaves only that behind, and it is just as much "the bridge was here".
+func TestFindRestoreDirFindsAFolderWithOnlyTheMarker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dir := filepath.Join(home, ".local", "share", "PaperTracker")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	got, err := FindRestoreDir()
+	if err != nil {
+		t.Fatalf("FindRestoreDir: %v", err)
+	}
+	if got != dir {
+		t.Errorf("FindRestoreDir() = %q, want %q", got, dir)
+	}
+}
+
+// Nothing to restore has to be distinguishable from a failure: the search runs
+// on every start with write_cache off, on machines the bridge never touched.
+func TestFindRestoreDirReportsNoBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("ProgramFiles", t.TempDir())
+	t.Setenv("ProgramFiles(x86)", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	install := filepath.Join(home, "PaperTracker")
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(CachePath(install), []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if _, err := FindRestoreDir(); !errors.Is(err, ErrNoBackup) {
+		t.Errorf("FindRestoreDir error = %v, want ErrNoBackup", err)
+	}
+}
+
+// The cache itself is replaced, not overwritten in place. os.WriteFile empties
+// the file before writing it, so a disk that fills up in between leaves the
+// client with no address at all -- and WriteCache's caller only logs the
+// failure and carries on, so nothing would put it back.
+//
+// A hard link is what makes the difference visible: it keeps hold of the file
+// that was there, so it still reads as the old address if the new one arrived
+// under a different name and was renamed into place, and as the new address if
+// the old file was truncated and written over.
+func TestWriteCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	original := "192.168.1.50"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "held-open")
+	if err := os.Link(path, link); err != nil {
+		t.Skipf("hard links are not available here: %v", err)
+	}
+
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	held, err := os.ReadFile(link)
+	if err != nil {
+		t.Fatalf("read the link: %v", err)
+	}
+	if string(held) != original {
+		t.Errorf("the file that was there now reads %q: it was written over in place, not replaced", held)
+	}
+	if got, err := ReadCache(dir); err != nil || got != "127.0.0.1:18080" {
+		t.Errorf("ReadCache() = %q, %v, want the bridge address", got, err)
+	}
+}
+
+// Restoring is the same, and worse if it goes wrong: the backup is removed
+// straight afterwards, so a half-written original is all the user would have
+// left.
+func TestRestoreCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	original := "192.168.1.50"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	link := filepath.Join(dir, "held-open")
+	if err := os.Link(path, link); err != nil {
+		t.Skipf("hard links are not available here: %v", err)
+	}
+
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+
+	held, err := os.ReadFile(link)
+	if err != nil {
+		t.Fatalf("read the link: %v", err)
+	}
+	if string(held) != "127.0.0.1:18080" {
+		t.Errorf("the file that was there now reads %q: it was written over in place, not replaced", held)
+	}
+	if got, err := ReadCache(dir); err != nil || got != original {
+		t.Errorf("ReadCache() = %q, %v, want the camera address back", got, err)
+	}
+}
+
 // A backup only counts once it is complete. Half of one is worse than none:
 // backupOnce would see it and decide the pre-bridge address was already safe,
 // so the real one would be overwritten and only a truncated copy left to

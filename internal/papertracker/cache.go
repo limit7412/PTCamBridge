@@ -75,8 +75,12 @@ func WriteCache(installDir, addr string) error {
 	if err := backupOnce(path); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(addr), 0o644); err != nil {
-		return fmt.Errorf("papertracker: write %s: %w", path, err)
+	// Replaced rather than overwritten in place. os.WriteFile truncates first,
+	// so a disk that fills up between the two leaves the client with an empty or
+	// half-written address -- and the caller only logs the failure and carries
+	// on, so nothing would put it right. A rename either happens or does not.
+	if err := writeAtomic(path, []byte(addr)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -175,8 +179,10 @@ func RestoreCache(installDir string) error {
 	} else if err != nil {
 		return fmt.Errorf("papertracker: read %s: %w", backup, err)
 	}
-	if err := os.WriteFile(path, original, 0o644); err != nil {
-		return fmt.Errorf("papertracker: write %s: %w", path, err)
+	// The backup is removed straight after, so a partial write here would lose
+	// the address for good: the truncated copy would be all that is left.
+	if err := writeAtomic(path, original); err != nil {
+		return err
 	}
 	if err := os.Remove(backup); err != nil {
 		return fmt.Errorf("papertracker: remove %s: %w", backup, err)
@@ -205,6 +211,44 @@ func FindInstallDir() (string, error) {
 		}
 	}
 	return "", ErrNotFound
+}
+
+// FindRestoreDir looks for the installation the bridge actually wrote to.
+//
+// Restoring needs a different answer from writing. FindInstallDir returns the
+// first folder that looks like PaperTracker at all, and with more than one on
+// the machine -- an old copy beside a new one, or a portable build in Downloads
+// -- that is quite likely not the one whose cache the bridge replaced. Restoring
+// there finds no backup, reports that there is nothing to undo, and leaves the
+// client that was really changed pointing at a bridge which is no longer
+// running.
+//
+// Only the bridge's own files count as a match, for the same reason the backup
+// is named after it: the search runs on machines the bridge may never have
+// touched.
+func FindRestoreDir() (string, error) {
+	for _, dir := range candidateDirs() {
+		if dir == "" {
+			continue
+		}
+		if hasBackup(dir) {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("%w in any of the usual PaperTracker folders", ErrNoBackup)
+}
+
+// hasBackup reports whether the bridge recorded a pre-bridge state in dir,
+// which is either a backup of the client's address or the marker saying it had
+// none.
+func hasBackup(dir string) bool {
+	path := CachePath(dir)
+	for _, name := range []string{path + BackupSuffix, path + NoOriginalSuffix} {
+		if _, err := os.Stat(name); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // looksLikeInstall reports whether dir holds something recognisably

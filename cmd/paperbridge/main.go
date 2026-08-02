@@ -441,7 +441,11 @@ func decodeJSON(r io.Reader, v any) error {
 func restoreCacheQuietly(log *slog.Logger, installDir string) {
 	dir := installDir
 	if dir == "" {
-		found, err := papertracker.FindInstallDir()
+		// The folder holding the bridge's own backup, not merely the first one
+		// that looks like PaperTracker: restoring into the wrong copy of the
+		// client would report nothing to undo and leave the one that was really
+		// changed pointing at a bridge that is no longer running.
+		found, err := papertracker.FindRestoreDir()
 		if err != nil {
 			return
 		}
@@ -465,6 +469,14 @@ func restoreCacheQuietly(log *slog.Logger, installDir string) {
 func restoreCache(opts options) error {
 	dir, err := restoreDir(opts)
 	if err != nil {
+		if errors.Is(err, papertracker.ErrNoBackup) {
+			// The search covers every usual folder, so this says the bridge has
+			// not written to any of them -- the same answer as finding the
+			// folder and finding no backup in it.
+			fmt.Println("Nothing to restore: PaperBridge has not changed the PaperTracker address cache.")
+			fmt.Println("If the client is installed somewhere unusual, set papertracker.install_dir or pass -config.")
+			return nil
+		}
 		return err
 	}
 	if err := papertracker.RestoreCache(dir); err != nil {
@@ -494,9 +506,12 @@ func restoreDir(opts options) (string, error) {
 			}
 		}
 	}
-	dir, err := papertracker.FindInstallDir()
+	// The search asks which folder the bridge wrote to, not which folder holds
+	// a client. Several installations can sit on one machine, and only one of
+	// them has the address that needs putting back.
+	dir, err := papertracker.FindRestoreDir()
 	if err != nil {
-		return "", fmt.Errorf("could not find the PaperTracker folder; set papertracker.install_dir or pass -config: %w", err)
+		return "", err
 	}
 	return dir, nil
 }

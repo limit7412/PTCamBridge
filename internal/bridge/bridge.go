@@ -655,12 +655,9 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 
 	timer := time.NewTimer(startVerifyTimeout)
 	defer timer.Stop()
+	var frameErr error
 	select {
-	case err := <-published:
-		if err != nil {
-			b.stopLocked()
-			return fmt.Errorf("bridge: %s produced a frame that is not a usable JPEG: %w", drv.Name(), err)
-		}
+	case frameErr = <-published:
 	case err := <-failed:
 		b.stopLocked()
 		return err
@@ -681,7 +678,37 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		return errors.New("bridge: shutting down before the new source produced a frame")
 	}
 
+	if err := verifyOutcome(drv.Name(), frameErr, verifyCtx.Err(), b.root.Err()); err != nil {
+		b.stopLocked()
+		return err
+	}
+
 	b.log.Info("source started", "source", drv.Name())
+	return nil
+}
+
+// verifyOutcome says what a delivered frame is worth, given whether the request
+// that asked for the change and the bridge itself are still there.
+//
+// It is separate from the select above because a select cannot express
+// priority. When the first frame and the request's deadline land together both
+// cases are ready and either may be taken, so reading the frame case is not
+// proof that nobody has given up waiting -- and taking it at face value applies
+// the change and writes it to the settings file behind a client that was told
+// it failed. Asking again once the frame is in hand makes the answer the same
+// whichever case the select happened to pick.
+func verifyOutcome(name string, frameErr, requestErr, shutdownErr error) error {
+	if frameErr != nil {
+		return fmt.Errorf("bridge: %s produced a frame that is not a usable JPEG: %w", name, frameErr)
+	}
+	if requestErr != nil {
+		return fmt.Errorf("bridge: %s started as the request ended, so the change was not kept: %w", name, requestErr)
+	}
+	if shutdownErr != nil {
+		// A configuration proved a moment before the bridge stops is still one
+		// nothing has run on, and the next start would come up on it unverified.
+		return errors.New("bridge: shutting down as the new source produced its first frame")
+	}
 	return nil
 }
 

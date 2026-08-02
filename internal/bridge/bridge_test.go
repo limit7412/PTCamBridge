@@ -627,6 +627,124 @@ func TestBridgeApplyStopsWhenTheRequestIsCancelled(t *testing.T) {
 	}
 }
 
+// The frame and the request's deadline can become ready together, and then the
+// select takes either one -- so a verification that reads the frame case is not
+// evidence that anyone is still waiting for the answer. Keeping the change on
+// that basis writes it to the settings file behind a client that was told it
+// failed, and which of the two happens is a coin toss.
+//
+// The race itself cannot be staged from a test: the two events have to become
+// ready within the same instant, and anything that makes them so from the
+// outside also decides which the select sees first. What can be tested is the
+// decision the select feeds, which is why it is a function.
+func TestVerifyOutcomeRejectsAFrameNobodyIsWaitingFor(t *testing.T) {
+	cancelled := context.Canceled
+	deadline := context.DeadlineExceeded
+
+	if err := verifyOutcome("mjpeg", nil, nil, nil); err != nil {
+		t.Errorf("a good frame with the request still there = %v, want success", err)
+	}
+
+	err := verifyOutcome("mjpeg", nil, cancelled, nil)
+	if err == nil {
+		t.Fatal("a frame that arrived after the request had gone was accepted")
+	}
+	if !errors.Is(err, cancelled) {
+		t.Errorf("error = %v, want it to carry the request's own error", err)
+	}
+
+	if err := verifyOutcome("mjpeg", nil, deadline, nil); !errors.Is(err, deadline) {
+		t.Errorf("a frame that arrived after the deadline = %v, want it rejected", err)
+	}
+
+	// Shutting down is not proof either: nothing would run on the settings, but
+	// the next start would come up on them.
+	if err := verifyOutcome("mjpeg", nil, nil, context.Canceled); err == nil {
+		t.Error("a frame delivered as the bridge stopped was accepted")
+	}
+
+	// An unusable frame still loses to nothing, and says why.
+	if err := verifyOutcome("mjpeg", errors.New("not a JPEG"), nil, nil); err == nil {
+		t.Error("an undecodable frame was accepted")
+	}
+}
+
+// The same thing end to end: the source comes up only after the client has
+// given up, and the bridge has to be left on the source that was working.
+func TestBridgeApplyRollsBackASourceThatCameUpTooLate(t *testing.T) {
+	shortenVerify(t, time.Minute)
+	jpg := testJPEG(t, 16, 16)
+	upstream := mjpegUpstream(t, jpg)
+
+	connected := make(chan struct{}, 1)
+	release := make(chan struct{})
+	late := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		// Nothing is sent until the test says so, which it does only after the
+		// request asking for this source has been cancelled.
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
+		w.Write(jpg)
+		fmt.Fprint(w, "\r\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer late.Close()
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	req, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	next := b.Snapshot()
+	next.Source.MJPEG.URL = late.URL
+
+	done := make(chan error, 1)
+	go func() { done <- b.Apply(req, next) }()
+
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the new source never connected")
+	}
+	cancelReq()
+	close(release)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Apply kept a source that only came up after the request had gone")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Apply never returned")
+	}
+
+	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
+		t.Errorf("URL = %q, want the working upstream still in place", got)
+	}
+	if !b.captureRunningForTest() {
+		t.Error("the bridge was left with nothing running")
+	}
+}
+
 // A change that only touches the server settings never reaches the
 // verification, so the request context has to be checked on the way in too.
 // Waiting for the lock can take as long as another caller's whole
