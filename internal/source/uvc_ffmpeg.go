@@ -64,9 +64,14 @@ type UVC struct {
 	cfg      UVCConfig
 	log      *slog.Logger
 	reporter Reporter
-	// copyCodec is cleared once a camera has proven it cannot deliver MJPEG
-	// natively, after which frames are re-encoded instead.
+	// copyCodec asks the camera for MJPEG and passes it through. It is cleared
+	// when passthrough produces nothing, and set again if re-encoding produces
+	// nothing either -- see chooseCodec.
 	copyCodec bool
+	// reencodeReal records that re-encoding is what made this camera work,
+	// which is the only positive evidence that it has no MJPEG output of its
+	// own. Until then, clearing copyCodec is a guess being tested.
+	reencodeReal bool
 }
 
 // NewUVC builds the driver. The device must be set.
@@ -95,20 +100,53 @@ func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 		// is the bridge that decides whether a source is working, by waiting
 		// for the first frame when the caller needs an answer.
 		frames, diag, err := u.capture(ctx, out, u.copyCodec)
-		if err != nil && frames == 0 && u.copyCodec && !deviceUnavailable(diag) {
-			// The device opened and still produced nothing in passthrough
-			// mode, so it most likely has no MJPEG output format. Re-encode
-			// from here on.
-			//
-			// The diagnostic is checked because this latch is permanent: a
-			// camera that was merely not plugged in yet fails the same way,
-			// and letting that turn passthrough off would cost every later
-			// frame a decode and re-encode for the life of the process.
-			u.copyCodec = false
-			u.log.Info("camera did not deliver MJPEG, switching to re-encoding", "device", u.cfg.Device)
-		}
+		u.chooseCodec(frames, diag, err)
 		return err
 	})
+}
+
+// chooseCodec picks the mode the next attempt runs in.
+//
+// Passthrough failing is not evidence that the camera has no MJPEG output. A
+// device that is busy, or still settling after sign-in, fails the same way and
+// says so in words this cannot be expected to recognise -- the diagnostics
+// differ by ffmpeg version, backend and driver. Matching them positively would
+// only move the guess somewhere harder to see.
+//
+// What does distinguish the two is what happens next. Re-encoding asks for a
+// different output format from the same device: if that works, the format was
+// the problem and passthrough is put away for good. If it produces nothing
+// either, the device was the problem all along, and passthrough is tried again
+// so that a camera which comes back later is not decoded and re-encoded for the
+// rest of the process -- costing CPU and image quality for a guess made while
+// it was unplugged.
+func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
+	if frames > 0 {
+		if !u.copyCodec && !u.reencodeReal {
+			u.reencodeReal = true
+			u.log.Info("camera has no MJPEG output of its own, re-encoding from here on", "device", u.cfg.Device)
+		}
+		return
+	}
+	if err == nil {
+		return
+	}
+
+	if u.copyCodec {
+		if deviceUnavailable(diag) {
+			// The device never opened, so nothing was learned about its
+			// formats. Trying the re-encode is pointless as well as misleading.
+			return
+		}
+		u.copyCodec = false
+		u.log.Debug("passthrough produced no frames, trying re-encoding", "device", u.cfg.Device)
+		return
+	}
+	if u.reencodeReal {
+		return
+	}
+	u.copyCodec = true
+	u.log.Debug("re-encoding produced no frames either, going back to passthrough", "device", u.cfg.Device)
 }
 
 // capture runs one ffmpeg process to completion and returns how many frames it

@@ -158,8 +158,67 @@ func TestUVCKeepsPassthroughWhenTheDeviceNeverOpened(t *testing.T) {
 	}
 }
 
+// Falling back is a guess being tested, not a verdict. Re-encoding asks the
+// same device for a different output format: if that works the format really
+// was the problem, and if it produces nothing either then the device was, so
+// passthrough comes back. Otherwise a camera that was merely busy at sign-in
+// costs every later frame a decode and re-encode for the life of the process,
+// on the strength of a stderr string this cannot be expected to recognise.
+func TestUVCCodecChoice(t *testing.T) {
+	const busy = "[dshow @ 000001] I/O error"
+	const missing = `[dshow @ 000001] Could not find video device with name "camera"`
+	failed := errors.New("ffmpeg exited")
+
+	t.Run("a device that never opened keeps passthrough", func(t *testing.T) {
+		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
+		u.chooseCodec(0, missing, failed)
+		if !u.copyCodec {
+			t.Error("passthrough was disabled by a device that never opened")
+		}
+	})
+
+	t.Run("an unrecognised failure is probed and then undone", func(t *testing.T) {
+		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
+
+		u.chooseCodec(0, busy, failed)
+		if u.copyCodec {
+			t.Fatal("re-encoding was never tried")
+		}
+		u.chooseCodec(0, busy, failed)
+		if !u.copyCodec {
+			t.Error("re-encoding produced nothing either, so passthrough should be back")
+		}
+	})
+
+	t.Run("re-encoding that works settles it", func(t *testing.T) {
+		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
+
+		u.chooseCodec(0, "Selected video codec mjpeg is not supported by the device", failed)
+		if u.copyCodec {
+			t.Fatal("re-encoding was never tried")
+		}
+		u.chooseCodec(12, "", nil)
+		if !u.reencodeReal {
+			t.Fatal("frames arrived under re-encoding, which is what proves the camera has no MJPEG")
+		}
+		// The camera being unplugged later must not undo that.
+		u.chooseCodec(0, busy, failed)
+		if u.copyCodec {
+			t.Error("passthrough came back after re-encoding had been proven necessary")
+		}
+	})
+
+	t.Run("passthrough that works is left alone", func(t *testing.T) {
+		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
+		u.chooseCodec(12, "", nil)
+		if !u.copyCodec || u.reencodeReal {
+			t.Error("a working passthrough was changed")
+		}
+	})
+}
+
 // The other side of it: a device that opened and could not deliver MJPEG has
-// to fall back, or it never works at all.
+// to try re-encoding, or it never works at all.
 func TestUVCFallsBackWhenTheDeviceRejectsMJPEG(t *testing.T) {
 	u, err := NewUVC(UVCConfig{
 		Device:     "camera",

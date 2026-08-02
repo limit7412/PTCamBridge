@@ -417,6 +417,171 @@ func TestRestoreCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
 	}
 }
 
+// Restoring runs on every start with write_cache off, so it has to be
+// impossible to do twice. If the record survives a restore -- its removal
+// failing on a locked or read-only file -- the next start would put the
+// pre-bridge address back over whatever the client cached since, undoing a
+// camera the user chose after they stopped using the bridge.
+func TestRestoreCacheIsNotAppliedTwice(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	if err := os.WriteFile(path, []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("seed the cache: %v", err)
+	}
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+
+	// Stand in for a removal that failed: the record is back under the name a
+	// restore in progress uses, which is the state that removal would leave.
+	working := path + BackupSuffix + RestoringSuffix
+	if err := os.WriteFile(working, []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+	// The client has moved on to another camera since.
+	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
+		t.Fatalf("write the new address: %v", err)
+	}
+
+	err := RestoreCache(dir)
+	if err == nil {
+		t.Fatal("a restore that already happened was applied again")
+	}
+	if !errors.Is(err, ErrRestoreInterrupted) {
+		t.Errorf("error = %v, want ErrRestoreInterrupted", err)
+	}
+	got, err := ReadCache(dir)
+	if err != nil {
+		t.Fatalf("ReadCache: %v", err)
+	}
+	if got != "192.168.1.77" {
+		t.Errorf("cache = %q, want the address the client chose since", got)
+	}
+}
+
+// The ordinary version of that: the restore finished and only the tidying up
+// failed, so the client already holds what the record says. Nothing is left to
+// do but remove it, quietly -- this runs on every start.
+func TestRestoreCacheCleansUpAfterItself(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	original := "192.168.1.50"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed the cache: %v", err)
+	}
+	working := path + BackupSuffix + RestoringSuffix
+	if err := os.WriteFile(working, []byte(original), 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+
+	if err := RestoreCache(dir); !errors.Is(err, ErrNoBackup) {
+		t.Fatalf("RestoreCache = %v, want ErrNoBackup: there is nothing left to put back", err)
+	}
+	if _, err := os.Stat(working); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the leftover was not cleaned up: %v", err)
+	}
+	if got, _ := ReadCache(dir); got != original {
+		t.Errorf("cache = %q, want it left alone", got)
+	}
+}
+
+// An interrupted restore is a restore waiting to happen, not litter. Turning
+// write_cache back on takes the cache over again, and the address under the
+// working name is still the one to hand back -- so it becomes the record once
+// more, instead of being replaced by a copy of the bridge's own address.
+func TestWriteCacheReclaimsAnInterruptedRestore(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	original := "192.168.1.50"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed the cache: %v", err)
+	}
+	working := path + BackupSuffix + RestoringSuffix
+	if err := os.WriteFile(working, []byte(original), 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	backup, err := os.ReadFile(path + BackupSuffix)
+	if err != nil {
+		t.Fatalf("read the backup: %v", err)
+	}
+	if string(backup) != original {
+		t.Errorf("backup = %q, want the client's own address %q", backup, original)
+	}
+	if _, err := os.Stat(working); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the working name outlived the reclaim: %v", err)
+	}
+
+	// And it restores as usual from there.
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+	if got, _ := ReadCache(dir); got != original {
+		t.Errorf("cache = %q, want the camera address back", got)
+	}
+}
+
+// The same for a client that had no cache at all: restoring means removing the
+// file, and doing that a second time would delete a cache the client wrote
+// after the bridge was done with it.
+func TestRestoreCacheDoesNotRemoveACacheWrittenAfterTheRestore(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+
+	working := path + NoOriginalSuffix + RestoringSuffix
+	if err := os.WriteFile(working, nil, 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+	// The client has since cached a camera of its own.
+	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
+		t.Fatalf("write the new address: %v", err)
+	}
+
+	if err := RestoreCache(dir); !errors.Is(err, ErrRestoreInterrupted) {
+		t.Fatalf("RestoreCache = %v, want ErrRestoreInterrupted", err)
+	}
+	if got, err := ReadCache(dir); err != nil || got != "192.168.1.77" {
+		t.Errorf("ReadCache() = %q, %v, want the client's own address left alone", got, err)
+	}
+}
+
+// A folder in the middle of a restore still has to be found, or the search
+// would report that the bridge never touched the machine.
+func TestFindRestoreDirFindsAnInterruptedRestore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dir := filepath.Join(home, ".local", "share", "PaperTracker")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	working := CachePath(dir) + BackupSuffix + RestoringSuffix
+	if err := os.WriteFile(working, []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+
+	got, err := FindRestoreDir()
+	if err != nil {
+		t.Fatalf("FindRestoreDir: %v", err)
+	}
+	if got != dir {
+		t.Errorf("FindRestoreDir() = %q, want %q", got, dir)
+	}
+}
+
 // A backup only counts once it is complete. Half of one is worse than none:
 // backupOnce would see it and decide the pre-bridge address was already safe,
 // so the real one would be overwritten and only a truncated copy left to
