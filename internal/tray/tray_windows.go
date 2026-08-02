@@ -15,6 +15,11 @@ import (
 // only; nothing in the pipeline depends on it.
 const refreshInterval = time.Second
 
+// commandQueueDepth bounds the menu actions waiting to be applied. Clicks
+// arrive at human speed and the worker only falls behind while a switch is
+// being verified, so a handful is more than a real user produces.
+const commandQueueDepth = 8
+
 // sourceChoice is one entry in the source submenu.
 type sourceChoice struct {
 	kind  string
@@ -123,31 +128,38 @@ func run(ctx context.Context, opts Options, m menu) {
 		}(kind, item.ClickedCh)
 	}
 
-	// Pause requests are handed to one worker rather than a goroutine per
-	// click, so they are applied in the order they were made. Concurrent
-	// SetPaused calls would serialise on the bridge's lock in whatever order
-	// the scheduler picked, which for a toggle means the last click does not
-	// decide the result.
-	pending := make(chan bool, 1)
-	wantPaused := opts.Controller.Paused()
-	// Each request is an absolute target, not a toggle, so an older one that
-	// has not been picked up yet is simply replaced. That keeps the send
-	// below from ever blocking the event loop.
-	request := func(paused bool) {
-		select {
-		case <-pending:
-		default:
-		}
-		pending <- paused
-	}
+	// Everything that changes the bridge goes through one worker, in the
+	// order it was clicked.
+	//
+	// Off the event loop, because a source that is not attached is given up to
+	// the verification timeout to prove itself and running that here would
+	// stop the menu answering at all -- including Quit, which is exactly what
+	// the user reaches for when a switch is hanging.
+	//
+	// One worker rather than a goroutine each, because these actions all
+	// serialise on the bridge's lock and a goroutine per click leaves the
+	// order to the scheduler. Picking UVC and then MJPEG would settle on
+	// whichever won the race, so the tick could show one source and the
+	// bridge run the other.
+	commands := make(chan func(), commandQueueDepth)
 	go func() {
-		for paused := range pending {
-			if err := opts.Controller.SetPaused(paused); err != nil {
-				opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
-			}
+		for cmd := range commands {
+			cmd()
 		}
 	}()
-	defer close(pending)
+	defer close(commands)
+
+	// The queue is short and the send never blocks: holding the event loop
+	// until the worker catches up is the thing being avoided. Dropping is
+	// said out loud rather than left to look like a click that did nothing.
+	submit := func(what string, cmd func()) {
+		select {
+		case commands <- cmd:
+		default:
+			opts.Log.Warn("ignoring a menu action, earlier ones are still being applied", "action", what)
+		}
+	}
+	wantPaused := opts.Controller.Paused()
 
 	refresh(opts, m)
 	for {
@@ -160,33 +172,29 @@ func run(ctx context.Context, opts Options, m menu) {
 			refresh(opts, m)
 
 		case kind := <-switches:
-			// Off the event loop: a source that is not attached is given up to
-			// the verification timeout to prove itself, and running that here
-			// would stop the menu answering at all -- including Quit, which is
-			// exactly what the user reaches for when a switch is hanging.
-			//
 			// Nothing is refreshed on completion. The ticker redraws once a
 			// second from state the bridge exposes without a lock, so the menu
 			// catches up on its own whichever way the switch goes.
-			go func(kind string) {
+			submit("switch source", func() {
 				if err := opts.Controller.Switch(ctx, kind); err != nil {
 					opts.Log.Error("could not switch source", "source", kind, "error", err)
 				}
-			}(kind)
+			})
 			refresh(opts, m)
 
 		case <-m.pause.ClickedCh:
-			// Also off the loop, and for the same reason: pausing takes the
-			// bridge's lock, so a click that arrives during a slow switch
-			// would block here and undo the point of the goroutine above.
-			//
 			// The toggle is against what the last click asked for, not what
 			// the bridge currently reports. Two clicks in quick succession
-			// both see the old state otherwise -- the first goroutine has not
-			// reached SetPaused yet -- so they ask for the same thing twice
-			// and the pair does not cancel out.
+			// both see the old state otherwise -- the first has not reached
+			// SetPaused yet -- so they ask for the same thing twice and the
+			// pair does not cancel out.
 			wantPaused = !wantPaused
-			request(wantPaused)
+			paused := wantPaused
+			submit("pause", func() {
+				if err := opts.Controller.SetPaused(paused); err != nil {
+					opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
+				}
+			})
 			refresh(opts, m)
 
 		case <-m.address.ClickedCh:

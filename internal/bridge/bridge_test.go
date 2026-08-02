@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1274,4 +1275,71 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 	if !saved.Server.HoldOnSourceLoss {
 		t.Error("the held change was not written once the file could be read")
 	}
+}
+
+// A driver can stop on its own, on an error retrying cannot fix. Nothing
+// restarts it, and the settings that produced it are still the current ones,
+// so re-selecting that same source is how a user recovers once the cause is
+// dealt with. Skipping the restart because the settings match would answer
+// that with success and leave the bridge producing nothing.
+func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
+	shortenVerify(t, 5*time.Second)
+	jpg := testJPEG(t, 16, 16)
+
+	// 404 is fatal to the MJPEG driver: it stops rather than reconnecting.
+	var serving atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serving.Load() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for {
+			fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
+			if _, err := w.Write(jpg); err != nil {
+				return
+			}
+			fmt.Fprint(w, "\r\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// Wait for the driver to give up.
+	deadline := time.Now().Add(5 * time.Second)
+	for b.captureRunningForTest() {
+		if time.Now().After(deadline) {
+			t.Fatal("the driver did not stop on a 404")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := frames.Latest(); ok {
+		t.Fatal("a frame arrived from an upstream that was answering 404")
+	}
+
+	// The cause is dealt with, and the user picks the same source again.
+	serving.Store(true)
+	if err := b.Apply(ctx, b.Snapshot()); err != nil {
+		t.Fatalf("re-applying the same settings after a fatal stop: %v", err)
+	}
+	waitForFrame(t, frames, 5*time.Second)
 }

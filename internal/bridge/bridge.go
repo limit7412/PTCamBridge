@@ -216,7 +216,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("server.boundary: %w", err)
 	}
 
-	if captureUnchanged(previous, cfg) {
+	if captureUnchanged(previous, cfg) && b.captureAsExpectedLocked() {
 		// Only the server-side settings moved, so the camera is left alone.
 		// Restarting it would interrupt the stream for nothing, and the
 		// verification below would reject the change outright while the camera
@@ -273,6 +273,35 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		b.unsaved = nil
 	}
 	return nil
+}
+
+// captureAsExpectedLocked reports whether the capture is in the state the
+// current settings ask for, which is what makes leaving it alone safe.
+//
+// A driver can stop on its own: Run returns a FatalError for something
+// retrying cannot fix, such as an MJPEG upstream answering 404 or ffmpeg not
+// being on disk yet. Nothing restarts it, and the settings that produced it
+// are still the ones in b.cfg. Re-selecting that same source once the cause is
+// dealt with is the obvious way to recover, and skipping the restart because
+// the settings did not change would answer that with success while /healthz
+// stayed at 503.
+//
+// Paused, stopped and not-yet-started all count as expected: nothing is meant
+// to be running, so there is nothing to put right.
+func (b *Bridge) captureAsExpectedLocked() bool {
+	if b.root == nil || b.paused || b.root.Err() != nil {
+		return true
+	}
+	if b.stopped == nil {
+		return false
+	}
+	select {
+	case <-b.stopped:
+		// Both capture goroutines have exited.
+		return false
+	default:
+		return true
+	}
 }
 
 // saveBaseLocked returns what the next save should build on: the settings file

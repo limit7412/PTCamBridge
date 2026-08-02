@@ -454,10 +454,17 @@ func restoreCache(opts options) error {
 // restoreDir finds the client folder, preferring what the settings say. The
 // search is the fallback so the flag still works once the settings file has
 // been deleted, which is the situation it is for.
+//
+// The file is only read if it is already there. config.Load writes a default
+// one when it is not, and creates %APPDATA%\PaperBridge to hold it -- so the
+// command meant to be run while uninstalling would put back the folder the
+// user was in the middle of removing.
 func restoreDir(opts options) (string, error) {
 	if cfgPath, err := resolveConfigPath(opts.configPath); err == nil {
-		if cfg, err := config.Load(cfgPath); err == nil && cfg.PaperTracker.InstallDir != "" {
-			return cfg.PaperTracker.InstallDir, nil
+		if _, err := os.Stat(cfgPath); err == nil {
+			if cfg, err := config.Load(cfgPath); err == nil && cfg.PaperTracker.InstallDir != "" {
+				return cfg.PaperTracker.InstallDir, nil
+			}
 		}
 	}
 	dir, err := papertracker.FindInstallDir()

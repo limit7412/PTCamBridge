@@ -81,7 +81,12 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 			// declared length, so the scan never walks over one. Treating a
 			// second SOI as harmless instead would make it a resynchronisation
 			// point in the middle of a scan the caller is about to redo.
-			return i, ErrNotJPEG
+			//
+			// The length stops short of the marker rather than covering it.
+			// This is where the next frame begins when the one before it was
+			// truncated, so a caller resynchronising has to land on it, not
+			// two bytes past it.
+			return i - 2, ErrNotJPEG
 		case marker == markerTEM, marker == 0x00,
 			marker >= markerRST0 && marker <= markerRST7:
 			// Standalone marker: no length field follows.

@@ -293,3 +293,23 @@ func TestSplitJPEGStreamResyncIsLinear(t *testing.T) {
 		t.Fatal("resynchronising over 1 MiB of image starts did not finish in 2s")
 	}
 }
+
+// A frame cut short by a dropped connection is followed immediately by the
+// next one. Resynchronising past that SOI instead of onto it would throw the
+// good frame away too, so an upstream alternating between broken and whole
+// frames would publish nothing at all.
+func TestSplitJPEGStreamRecoversTheFrameAfterATruncatedOne(t *testing.T) {
+	good := encodeJPEG(t, 32, 32)
+	// Cut inside the entropy-coded data, which is where a dropped connection
+	// almost always lands: it is the bulk of the frame.
+	truncated := good[:len(good)-8]
+	buf := append(append([]byte{}, truncated...), good...)
+
+	frames, _ := SplitJPEGStream(buf, 0)
+	if len(frames) != 1 {
+		t.Fatalf("got %d frames, want the whole one after the truncated one", len(frames))
+	}
+	if !bytes.Equal(frames[0], good) {
+		t.Error("the recovered frame does not match the one that was sent")
+	}
+}
