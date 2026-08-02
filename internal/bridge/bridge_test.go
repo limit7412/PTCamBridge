@@ -1436,3 +1436,47 @@ func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 		t.Error("the second change was not saved")
 	}
 }
+
+// A pending write carries the whole configuration, most of which is just a
+// copy of the file from when the save failed. Only the leaves the bridge
+// itself changed may be laid back over the file: the rest has to give way to
+// whatever the user has edited since, or the retry silently reverts them.
+func TestBridgeUnsavedChangesDoNotRevertLaterFileEdits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	// What the file held when the save failed.
+	whenItFailed := config.Default()
+	whenItFailed.Server.Listen = "127.0.0.1:11111"
+
+	// What that save wanted to write: the same file, plus the boundary the
+	// bridge was asked to change.
+	wanted := whenItFailed
+	wanted.Server.Boundary = "from-the-bridge"
+
+	// The user has edited the file again since.
+	editedSince := config.Default()
+	editedSince.Server.Listen = "127.0.0.1:22222"
+	editedSince.Source.UVC.Device = "picked by hand"
+	if err := config.Save(path, editedSince); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(config.Default(), path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(config.Default())
+	b.holdPendingForTest(whenItFailed, wanted)
+
+	base, err := b.saveBaseForTest()
+	if err != nil {
+		t.Fatalf("saveBase: %v", err)
+	}
+
+	if base.Server.Boundary != "from-the-bridge" {
+		t.Errorf("boundary = %q, want the pending change carried forward", base.Server.Boundary)
+	}
+	if base.Server.Listen != "127.0.0.1:22222" {
+		t.Errorf("listen = %q, want the newer hand edit, not the value from when the save failed", base.Server.Listen)
+	}
+	if base.Source.UVC.Device != "picked by hand" {
+		t.Errorf("device = %q, want the newer hand edit kept", base.Source.UVC.Device)
+	}
+}

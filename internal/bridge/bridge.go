@@ -68,11 +68,11 @@ type Bridge struct {
 	// the user had chosen it permanently.
 	persistBase config.Config
 
-	// unsaved is what the file should contain but does not, because a save
-	// failed. It is nil while the file is up to date. Keeping it means a retry
-	// writes the settings that were lost rather than diffing against a running
-	// configuration that already has them and finding nothing to do.
-	unsaved *config.Config
+	// unsaved is a write that never reached the file. It is nil while the
+	// file is up to date. Keeping it means a retry writes the settings that
+	// were lost rather than diffing against a running configuration that
+	// already has them and finding nothing to do.
+	unsaved *pendingSave
 
 	// stream is told about settings the HTTP server has to reapply itself.
 	// It is set once during wiring, before anything can call Apply.
@@ -90,6 +90,19 @@ type Bridge struct {
 	cancel  context.CancelFunc
 	stopped chan struct{}
 	paused  bool
+}
+
+// pendingSave is a settings write that failed and still has to happen.
+//
+// Both halves are needed. want is the whole configuration, so it can be
+// written as-is. from is what the file held when this pending write was first
+// built, and it is the only thing that says which parts of want are the
+// bridge's own doing: the leaves where they differ. Everything else in want is
+// just a copy of the file at that moment, and laying that back over a file the
+// user has edited since would undo the edit.
+type pendingSave struct {
+	want config.Config
+	from config.Config
 }
 
 // view is the lock-free copy of what callers read but never change.
@@ -264,8 +277,8 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 			// The running configuration is already correct, so nothing is torn
 			// down; the caller is told so it can say the change is temporary.
 			// The pending write is kept so a retry, or the next change, writes
-			// it once the file can be read again.
-			b.unsaved = &saved
+			// it once the file can be written again.
+			b.holdUnsavedLocked(base, previous, cfg)
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
 			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
@@ -304,6 +317,26 @@ func (b *Bridge) captureAsExpectedLocked() bool {
 	}
 }
 
+// holdUnsavedLocked records a change that could not be written, so a later
+// save can still make it.
+//
+// A pending write already in hand is extended in place rather than rebuilt
+// from the file. Its basis has to stay where it was: it is what separates the
+// bridge's own changes from the file contents that happen to be sitting in
+// want, and moving it forward would fold anything the user edited in the
+// meantime into the set of values the bridge intends to write back.
+func (b *Bridge) holdUnsavedLocked(base, previous, cfg config.Config) {
+	if b.unsaved != nil {
+		b.unsaved.want = mergeChanges(b.unsaved.want, previous, cfg)
+		return
+	}
+	// base is the file as it was just read, so the difference between it and
+	// what this change produces is exactly what the bridge is asking for. When
+	// the read failed it is the last known contents instead, which is the best
+	// guess available and no worse than the alternative of writing nothing.
+	b.unsaved = &pendingSave{want: mergeChanges(base, previous, cfg), from: base}
+}
+
 // saveBaseLocked returns what the next save should build on: the settings file
 // as it stands right now, plus anything an earlier save failed to write.
 //
@@ -340,9 +373,10 @@ func (b *Bridge) saveBaseLocked() (config.Config, error) {
 	}
 	if b.unsaved != nil {
 		// Lay the pending write back on top of whatever the file says now.
-		// persistBase is what the file held when that write was built, so
-		// this copies exactly the leaves it was trying to change.
-		base = mergeChanges(base, b.persistBase, *b.unsaved)
+		// Only the leaves it actually meant to change are copied; the rest of
+		// want is a snapshot of the file from back then, and writing that back
+		// would undo anything edited since.
+		base = mergeChanges(base, b.unsaved.from, b.unsaved.want)
 	}
 	return base, readErr
 }
