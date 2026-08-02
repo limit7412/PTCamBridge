@@ -1,0 +1,269 @@
+package source
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"image"
+	"image/jpeg"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/limit7412/PTCamBridge/internal/core"
+)
+
+func testJPEG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewGray(image.Rect(0, 0, 16, 16)), nil); err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// countingReporter records the connection transitions a driver reports.
+type countingReporter struct {
+	connects    atomic.Int64
+	disconnects atomic.Int64
+}
+
+func (r *countingReporter) Connected(string)           { r.connects.Add(1) }
+func (r *countingReporter) Disconnected(string, error) { r.disconnects.Add(1) }
+
+// collect runs a driver until it has produced want frames or the deadline
+// passes, then cancels it and returns what arrived.
+func collect(t *testing.T, drv Source, want int, timeout time.Duration) [][]byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	frames := make(chan core.Frame, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = drv.Run(ctx, frames)
+	}()
+
+	var got [][]byte
+	for len(got) < want {
+		select {
+		case f := <-frames:
+			got = append(got, f.Data)
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return got
+		}
+	}
+	cancel()
+	<-done
+	return got
+}
+
+// serveMultipart writes an endless multipart MJPEG stream in the shape ESP32
+// firmware produces.
+func serveMultipart(t *testing.T, jpg []byte, boundary string, withContentLength bool, limit int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+boundary)
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+
+		for i := 0; limit == 0 || i < limit; i++ {
+			fmt.Fprintf(w, "--%s\r\nContent-Type: image/jpeg\r\n", boundary)
+			if withContentLength {
+				fmt.Fprintf(w, "Content-Length: %d\r\n", len(jpg))
+			}
+			fmt.Fprint(w, "\r\n")
+			if _, err := w.Write(jpg); err != nil {
+				return
+			}
+			fmt.Fprint(w, "\r\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}))
+}
+
+func TestMJPEGProxyReadsAMultipartStream(t *testing.T) {
+	jpg := testJPEG(t)
+	upstream := serveMultipart(t, jpg, "frame", true, 0)
+	defer upstream.Close()
+
+	reporter := &countingReporter{}
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL}, discardLogger(), reporter)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+
+	got := collect(t, drv, 3, 10*time.Second)
+	if len(got) < 3 {
+		t.Fatalf("got %d frames, want at least 3", len(got))
+	}
+	for i, f := range got {
+		if !bytes.Equal(f, jpg) {
+			t.Errorf("frame %d does not match the upstream image", i)
+		}
+	}
+	if reporter.connects.Load() == 0 {
+		t.Error("the driver never reported that it connected")
+	}
+}
+
+// Firmware that omits Content-Length still has to work, since the body then
+// runs to the next boundary.
+func TestMJPEGProxyWithoutContentLength(t *testing.T) {
+	jpg := testJPEG(t)
+	upstream := serveMultipart(t, jpg, "frame", false, 0)
+	defer upstream.Close()
+
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	got := collect(t, drv, 2, 10*time.Second)
+	if len(got) < 2 || !bytes.Equal(got[0], jpg) {
+		t.Fatalf("got %d frames, want at least 2 matching the upstream image", len(got))
+	}
+}
+
+// Some cameras answer with a bare concatenated JPEG stream and no multipart
+// wrapper at all.
+func TestMJPEGProxyWithBareJPEGStream(t *testing.T) {
+	jpg := testJPEG(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		flusher, _ := w.(http.Flusher)
+		for i := 0; i < 5; i++ {
+			if _, err := w.Write(jpg); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	got := collect(t, drv, 3, 10*time.Second)
+	if len(got) < 3 {
+		t.Fatalf("got %d frames, want at least 3", len(got))
+	}
+}
+
+// FR-5: an upstream that drops out must be picked up again without restarting
+// the bridge.
+func TestMJPEGProxyReconnectsAfterTheUpstreamCloses(t *testing.T) {
+	jpg := testJPEG(t)
+	var sessions atomic.Int64
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions.Add(1)
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
+		w.Write(jpg)
+		fmt.Fprint(w, "\r\n")
+		// Then hang up, which is what a rebooting camera looks like.
+	}))
+	defer upstream.Close()
+
+	reporter := &countingReporter{}
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL}, discardLogger(), reporter)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+
+	// The first retry waits one second, so two frames means one reconnect.
+	got := collect(t, drv, 2, 15*time.Second)
+	if len(got) < 2 {
+		t.Fatalf("got %d frames, want 2 (one per connection)", len(got))
+	}
+	if sessions.Load() < 2 {
+		t.Errorf("the upstream saw %d connections, want at least 2", sessions.Load())
+	}
+	if reporter.disconnects.Load() == 0 {
+		t.Error("the driver never reported the disconnection")
+	}
+}
+
+// A stream that connects and then goes silent is not the same as a closed
+// one; without a stall timeout the driver would wait forever.
+func TestMJPEGProxyTimesOutOnASilentStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	reporter := &countingReporter{}
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL, StallTimeout: 200 * time.Millisecond}, discardLogger(), reporter)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	collect(t, drv, 1, 3*time.Second)
+
+	if reporter.disconnects.Load() == 0 {
+		t.Error("a silent stream was never treated as a disconnection")
+	}
+}
+
+func TestMJPEGProxyRejectsBadConfiguration(t *testing.T) {
+	for _, url := range []string{"", "   ", "ftp://camera/", "://bad"} {
+		if _, err := NewMJPEGProxy(MJPEGConfig{URL: url}, discardLogger(), nil); err == nil {
+			t.Errorf("NewMJPEGProxy(%q) = nil error, want a rejection", url)
+		}
+	}
+}
+
+func TestMJPEGProxyReportsAnErrorStatus(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	reporter := &countingReporter{}
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL}, discardLogger(), reporter)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	if got := collect(t, drv, 1, 2*time.Second); len(got) != 0 {
+		t.Errorf("got %d frames from a 404, want none", len(got))
+	}
+	if reporter.disconnects.Load() == 0 {
+		t.Error("a 404 was not reported as a failure")
+	}
+}
+
+func TestMJPEGProxyName(t *testing.T) {
+	drv, err := NewMJPEGProxy(MJPEGConfig{URL: "http://example.invalid/"}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+	if drv.Name() != "mjpeg" {
+		t.Errorf("Name() = %q, want mjpeg", drv.Name())
+	}
+}

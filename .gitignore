@@ -1,0 +1,20 @@
+# ビルド成果物
+/paperbridge
+/paperbridge.exe
+/dist/
+/build/
+
+# 同梱配布用の ffmpeg (リポジトリには含めない)
+/ffmpeg.exe
+/ffmpeg
+
+# テスト・カバレッジ
+*.test
+*.out
+coverage.html
+
+# エディタ / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

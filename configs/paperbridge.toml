@@ -1,0 +1,73 @@
+## PaperBridge の既定設定
+##
+## 実行時の設定ファイルは初回起動時に
+## %APPDATA%\PaperBridge\paperbridge.toml へ自動生成されます。
+## このファイルは参照用のサンプルであり、そのままコピーして使えます。
+##
+## 優先順位: コマンドライン引数 > 環境変数 (PAPERBRIDGE_*) > このファイル > 既定値
+
+[server]
+# 待受アドレス。既定はループバックのみで、LAN 公開はオプトインです。
+# ループバック以外にバインドすると管理 API (/api/v1/*) は自動的に無効になります。
+listen = "127.0.0.1:18080"
+
+# multipart の boundary 文字列。
+# PaperTracker クライアントはクローズドソースでバージョンにより
+# パーサーの挙動が異なるため、再ビルドなしで調整できるようにしています。
+boundary = "paperbridge"
+
+# 各パートに追加するヘッダ。上と同じ理由で用意しています。
+# [server.extra_headers]
+# X-Timestamp = "0"
+
+# ソース切断中もストリーム接続を維持するかどうか。
+# false だと接続を切ってクライアント側の再接続を促します。
+# 短い瞬断であれば維持したほうが復帰が速くなります。
+hold_on_source_loss = false
+
+[source]
+# "uvc" | "serial" | "mjpeg"
+type = "uvc"
+
+# 1 フレームの上限バイト数。0 で既定値 (4 MiB)。
+max_frame_size = 0
+
+[source.uvc]
+# Windows は DirectShow のフレンドリ名、Linux は /dev/video* のパス。
+# 一覧は `paperbridge -list-devices` で確認できます。
+device = "USB Camera"
+size = "240x240"
+framerate = 30
+# 空なら実行ファイルと同じフォルダの ffmpeg.exe、次に PATH を探します。
+ffmpeg_path = ""
+
+[source.serial]
+# "COM5" のような固定指定、または "auto" で VID による自動探索。
+port = "auto"
+baud = 3000000
+# パケットのプリアンブル。ファームウェアのバージョン差を
+# コード変更なしで吸収するために設定可能にしています。
+header = [0xFF, 0xA0, 0xFF, 0xA1]
+
+[source.mjpeg]
+url = "http://192.168.1.50/"
+
+[transform]
+# すべて既定値のままなら変換は行わず、入力 JPEG をバイト列のまま転送します
+# (再エンコードによる画質劣化と CPU 消費を避けるため)。
+rotate = 0          # 0 / 90 / 180 / 270 (時計回り)
+flip_h = false
+flip_v = false
+crop_square = false
+reencode_quality = 0 # 0 = 再エンコードなし、1-100 で品質指定
+
+[papertracker]
+# PaperTracker クライアントのインストールフォルダ。
+# write_cache を有効にすると起動時に wifi_cache.txt を本アプリ宛に書き換えます。
+# 元の内容は wifi_cache.txt.bak へ (初回のみ) 退避します。
+install_dir = ""
+write_cache = false
+
+[log]
+level = "info"      # debug / info / warn / error
+dir = ""            # 空なら %APPDATA%\PaperBridge\logs
