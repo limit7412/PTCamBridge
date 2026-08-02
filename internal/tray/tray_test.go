@@ -160,17 +160,24 @@ func TestPauseActionDoesNotCollideWithASourceType(t *testing.T) {
 // and the button looks broken.
 func TestCommandQueueReportsWhetherAnActionWasTaken(t *testing.T) {
 	// Nothing runs until the worker is released, so the queue fills up.
+	const depth = 2
+	running := make(chan struct{})
 	release := make(chan struct{})
-	q := newCommandQueue(discardLogger(), 2)
+	q := newCommandQueue(discardLogger(), depth)
 	defer close(release)
 
-	if !q.submit("first", func() { <-release }) {
+	if !q.submit("first", func() { close(running); <-release }) {
 		t.Fatal("the first action was refused by an empty queue")
 	}
-	// The worker may or may not have picked the first one up yet, so fill
-	// past the depth rather than assuming.
-	for i := 0; i < 8; i++ {
-		q.submit("filler", func() {})
+	// Waiting for the worker to be inside the first action is what makes the
+	// count below exact: until then it may or may not have taken it off the
+	// queue, and a slot freed in between would leave room for one more.
+	<-running
+
+	for i := 0; i < depth; i++ {
+		if !q.submit("filler", func() {}) {
+			t.Fatalf("filler %d was refused by a queue with room for it", i+1)
+		}
 	}
 	if q.submit("overflow", func() {}) {
 		t.Error("an action was accepted by a queue that is already full")
