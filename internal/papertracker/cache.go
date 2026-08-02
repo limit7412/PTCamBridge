@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -405,15 +406,34 @@ func FindInstallDir() (string, error) {
 // is named after it: the search runs on machines the bridge may never have
 // touched.
 func FindRestoreDir() (string, error) {
+	dirs, err := FindRestoreDirs()
+	if err != nil {
+		return "", err
+	}
+	if len(dirs) == 0 {
+		return "", fmt.Errorf("%w in any of the usual PaperTracker folders", ErrNoBackup)
+	}
+	return dirs[0], nil
+}
+
+// FindRestoreDirs lists every folder the bridge left a record in.
+//
+// There can be more than one. install_dir is allowed to change while
+// write_cache is on -- the client is reinstalled or moved -- and the folder
+// left behind still holds a client pointed at the bridge, with a record beside
+// it saying what it used to be. Restoring only the first would leave that one
+// as it is, and nothing later would look again.
+func FindRestoreDirs() ([]string, error) {
+	var dirs []string
 	for _, dir := range candidateDirs() {
-		if dir == "" {
+		if dir == "" || slices.Contains(dirs, dir) {
 			continue
 		}
 		if hasBackup(dir) {
-			return dir, nil
+			dirs = append(dirs, dir)
 		}
 	}
-	return "", fmt.Errorf("%w in any of the usual PaperTracker folders", ErrNoBackup)
+	return dirs, nil
 }
 
 // hasBackup reports whether the bridge recorded a pre-bridge state in dir,

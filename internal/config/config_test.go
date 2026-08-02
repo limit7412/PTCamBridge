@@ -183,6 +183,11 @@ func TestValidate(t *testing.T) {
 		want   string
 	}{
 		{"bad listen", func(c *Config) { c.Server.Listen = "not-an-address" }, "server.listen"},
+		// Port 0 is a different port on every start, so the client's cached
+		// address goes stale and the bind stops being the single-instance
+		// guard: a second copy takes a port of its own and rewrites the cache.
+		{"ephemeral port", func(c *Config) { c.Server.Listen = "127.0.0.1:0" }, "server.listen"},
+		{"ephemeral port on a wildcard bind", func(c *Config) { c.Server.Listen = ":0" }, "server.listen"},
 		{"bad boundary", func(c *Config) { c.Server.Boundary = "has space" }, "server.boundary"},
 		{"bad source", func(c *Config) { c.Source.Type = "webcam" }, "source.type"},
 		{"bad rotate", func(c *Config) { c.Transform.Rotate = 45 }, "transform"},
@@ -450,5 +455,43 @@ func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
 	}
 	if got := effective.Source.UVC.Device; got != "from the environment" {
 		t.Errorf("Load device = %q, want the environment to win", got)
+	}
+}
+
+// Restoring the client's address has to work on a settings file the bridge
+// itself would refuse to start on. The folder is right there in the file, and
+// the alternative is telling someone uninstalling PaperBridge that nothing was
+// changed while their client still points at it.
+func TestInstallDirFromFileIgnoresTheRestOfTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "paperbridge.toml")
+	settings := "[server]\nlsiten = 'oops'\nboundary = 'has space'\n\n" +
+		"[source.serial]\nbaud = -1\n\n[papertracker]\ninstall_dir = 'C:\\PaperTracker'\n"
+	if err := os.WriteFile(path, []byte(settings), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// The strict reading refuses it, which is right for starting up.
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("LoadFile accepted a file with a key that does not exist")
+	}
+
+	got, err := InstallDirFromFile(path)
+	if err != nil {
+		t.Fatalf("InstallDirFromFile: %v", err)
+	}
+	if got != `C:\PaperTracker` {
+		t.Errorf("InstallDirFromFile() = %q, want the folder named in the file", got)
+	}
+}
+
+// A file that is not TOML at all has no folder in it, and saying so beats
+// guessing.
+func TestInstallDirFromFileReportsAnUnparsableFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "paperbridge.toml")
+	if err := os.WriteFile(path, []byte("[server\nlisten ="), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := InstallDirFromFile(path); err == nil {
+		t.Error("expected an error for a file that cannot be parsed")
 	}
 }

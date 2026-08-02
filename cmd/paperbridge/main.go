@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -439,38 +440,52 @@ func decodeJSON(r io.Reader, v any) error {
 // a machine the bridge has not touched, and logging them as errors would cry
 // wolf on every boot.
 func restoreCacheQuietly(log *slog.Logger, installDir string) {
-	switch dir, err := restoreWhereverItWas(installDir); {
-	case err == nil:
+	restored, err := restoreEverywhereItWas(installDir)
+	for _, dir := range restored {
 		log.Info("PaperTracker address cache restored", "dir", dir)
-	case errors.Is(err, papertracker.ErrNoBackup), errors.Is(err, papertracker.ErrNotFound):
-	default:
-		log.Error("could not restore the PaperTracker address cache", "dir", dir, "error", err)
+	}
+	if err != nil {
+		log.Error("could not restore the PaperTracker address cache", "error", err)
 	}
 }
 
-// restoreWhereverItWas puts the client back: in the folder the settings name if
-// the bridge wrote there, and otherwise in whichever folder it did write to.
+// restoreEverywhereItWas puts back every client the bridge changed, and returns
+// the folders it restored. Finding nothing to do is not an error and shows up
+// as an empty list.
 //
-// The settings can name a folder the bridge never touched. A client that is
-// reinstalled or moved while write_cache is on gets a new install_dir, and the
-// record stays behind in the old folder -- still pointing that copy at a bridge
-// which is about to stop. Reading "no backup here" as the end of the matter
-// would leave it that way for good.
+// Every folder, not the first one: install_dir can be changed while
+// write_cache is on -- the client is reinstalled or moved -- and the bridge
+// then leaves a record in the old folder as well as the new one. Stopping at
+// the first success is what leaves the other copy of the client pointing at a
+// bridge that is no longer running, with nothing left to notice it.
 //
-// The search asks which folder holds the bridge's own record, not which folder
-// holds a client, so it cannot pick an installation the bridge never changed.
-func restoreWhereverItWas(installDir string) (string, error) {
-	if installDir != "" {
-		err := papertracker.RestoreCache(installDir)
-		if !errors.Is(err, papertracker.ErrNoBackup) {
-			return installDir, err
+// The search asks which folders hold the bridge's own record, not which ones
+// hold a client, so it cannot touch an installation the bridge never changed.
+func restoreEverywhereItWas(installDir string) ([]string, error) {
+	dirs, err := papertracker.FindRestoreDirs()
+	if err != nil {
+		return nil, err
+	}
+	// The folder the settings name goes first and is tried even when the search
+	// did not turn it up, so an installation somewhere unusual is still undone.
+	if installDir != "" && !slices.Contains(dirs, installDir) {
+		dirs = append([]string{installDir}, dirs...)
+	}
+
+	var restored []string
+	var errs []error
+	for _, dir := range dirs {
+		switch err := papertracker.RestoreCache(dir); {
+		case err == nil:
+			restored = append(restored, dir)
+		case errors.Is(err, papertracker.ErrNoBackup):
+			// Nothing here to undo, which is the ordinary answer for the folder
+			// the settings name on a machine the bridge wrote to elsewhere.
+		default:
+			errs = append(errs, err)
 		}
 	}
-	dir, err := papertracker.FindRestoreDir()
-	if err != nil {
-		return "", err
-	}
-	return dir, papertracker.RestoreCache(dir)
+	return restored, errors.Join(errs...)
 }
 
 // restoreCache puts the PaperTracker client back on the address it had before
@@ -480,19 +495,20 @@ func restoreWhereverItWas(installDir string) (string, error) {
 // next start, but someone removing PaperBridge deletes the settings file and
 // the executable together, and there is no next start to notice.
 func restoreCache(opts options) error {
-	switch dir, err := restoreWhereverItWas(configuredInstallDir(opts)); {
-	case err == nil:
+	restored, err := restoreEverywhereItWas(configuredInstallDir(opts))
+	for _, dir := range restored {
 		fmt.Println("PaperTracker address cache restored in", dir)
-		return nil
-	case errors.Is(err, papertracker.ErrNoBackup), errors.Is(err, papertracker.ErrNotFound):
+	}
+	if err != nil {
+		return err
+	}
+	if len(restored) == 0 {
 		// The search covers every usual folder, so this says the bridge has not
 		// written to any of them.
 		fmt.Println("Nothing to restore: PaperBridge has not changed the PaperTracker address cache.")
 		fmt.Println("If the client is installed somewhere unusual, set papertracker.install_dir or pass -config.")
-		return nil
-	default:
-		return err
 	}
+	return nil
 }
 
 // configuredInstallDir is the folder the settings name, or empty when there is
@@ -503,6 +519,12 @@ func restoreCache(opts options) error {
 // one when it is not, and creates %APPDATA%\PaperBridge to hold it -- so the
 // command meant to be run while uninstalling would put back the folder the
 // user was in the middle of removing.
+// Only that one setting is read, and it is read without validating anything
+// else. A file the bridge would refuse to start on -- a misspelled key, a
+// baud rate out of range, an environment variable that does not parse -- still
+// names the folder perfectly well, and refusing to look would send someone
+// uninstalling PaperBridge away with "nothing was changed" while their client
+// still points at it.
 func configuredInstallDir(opts options) string {
 	cfgPath, err := resolveConfigPath(opts.configPath)
 	if err != nil {
@@ -511,9 +533,13 @@ func configuredInstallDir(opts options) string {
 	if _, err := os.Stat(cfgPath); err != nil {
 		return ""
 	}
-	cfg, err := config.Load(cfgPath)
+	dir, err := config.InstallDirFromFile(cfgPath)
 	if err != nil {
+		// Said out loud rather than swallowed: the search below still runs, and
+		// it covers the usual folders, but not one named only in a file that
+		// cannot be read.
+		fmt.Fprintln(os.Stderr, "paperbridge:", err)
 		return ""
 	}
-	return cfg.PaperTracker.InstallDir
+	return dir
 }

@@ -210,6 +210,30 @@ func LoadFile(path string) (Config, error) {
 	return cfg, nil
 }
 
+// InstallDirFromFile reads papertracker.install_dir and nothing else.
+//
+// Restoring the client's address has to work on a settings file the bridge
+// would refuse to start on. The strict reading above rejects a file with a
+// misspelled key or an out-of-range value anywhere in it, and undoing what the
+// bridge did to somebody else's application is not the place to insist on
+// that: the folder is right there in the file, and the alternative is telling
+// the user nothing was changed while their client still points at a bridge
+// they are removing.
+//
+// A file that cannot be parsed at all is still an error. There is no folder to
+// read out of it, and saying so beats guessing.
+func InstallDirFromFile(path string) (string, error) {
+	var doc struct {
+		PaperTracker struct {
+			InstallDir string `toml:"install_dir"`
+		} `toml:"papertracker"`
+	}
+	if _, err := toml.DecodeFile(path, &doc); err != nil {
+		return "", fmt.Errorf("read papertracker.install_dir from %s: %w", path, err)
+	}
+	return strings.TrimSpace(doc.PaperTracker.InstallDir), nil
+}
+
 // ErrNotSaved marks a settings change that took effect but could not be
 // written to disk, and so will be lost on the next restart. Callers wrap it so
 // that the difference from "the change was rejected" survives the trip out to
@@ -338,8 +362,20 @@ func (c *Config) Normalise() {
 
 // Validate reports settings that would fail at runtime.
 func (c Config) Validate() error {
-	if _, _, err := net.SplitHostPort(c.Server.Listen); err != nil {
+	_, port, err := net.SplitHostPort(c.Server.Listen)
+	if err != nil {
 		return fmt.Errorf("server.listen %q is not a host:port address: %w", c.Server.Listen, err)
+	}
+	// Port 0 asks the operating system for whichever port is free, and that is
+	// two problems at once. Binding is what stops a second copy starting -- the
+	// port is this application's identity -- and a port nobody else can take is
+	// no identity at all: a second copy binds happily, rewrites the client's
+	// cache to its own address, and whichever of the two is closed first leaves
+	// the client pointed at a port that is gone. It also means the address
+	// changes on every start, so anything that wrote it down is wrong by the
+	// next sign-in.
+	if port == "0" {
+		return errors.New("server.listen must name a fixed port: 0 asks for a different one on every start, which leaves the client pointing at an address that no longer exists and lets a second copy of PaperBridge run alongside this one")
 	}
 	if err := core.ValidateBoundary(c.Server.Boundary); err != nil {
 		return fmt.Errorf("server.boundary: %w", err)

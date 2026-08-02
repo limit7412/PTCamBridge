@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -661,5 +662,42 @@ func TestBackupIsNeverVisibleHalfWritten(t *testing.T) {
 	}
 	if string(backup) != original {
 		t.Errorf("backup = %q, want the whole original address %q", backup, original)
+	}
+}
+
+// install_dir can change while write_cache is on, and the bridge then holds a
+// record in the folder it used to write to as well as the one it writes to now.
+// Restoring has to find both, or the client left behind keeps pointing at a
+// bridge that has stopped.
+func TestFindRestoreDirsFindsEveryFolderTheBridgeWroteTo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	first := filepath.Join(home, "PaperTracker")
+	second := filepath.Join(home, ".local", "share", "PaperTracker")
+	// A third folder that looks like an installation but was never touched.
+	untouched := filepath.Join(home, ".wine", "drive_c", "PaperTracker")
+
+	for _, dir := range []string{first, second, untouched} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(CachePath(dir), []byte("192.168.1.50"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	for _, dir := range []string{first, second} {
+		if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+			t.Fatalf("WriteCache: %v", err)
+		}
+	}
+
+	dirs, err := FindRestoreDirs()
+	if err != nil {
+		t.Fatalf("FindRestoreDirs: %v", err)
+	}
+	if len(dirs) != 2 || !slices.Contains(dirs, first) || !slices.Contains(dirs, second) {
+		t.Errorf("FindRestoreDirs() = %q, want exactly %q and %q", dirs, first, second)
 	}
 }

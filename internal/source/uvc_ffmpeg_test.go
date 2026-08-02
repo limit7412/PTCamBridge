@@ -190,21 +190,62 @@ func TestUVCCodecChoice(t *testing.T) {
 		}
 	})
 
-	t.Run("re-encoding that works settles it", func(t *testing.T) {
+	t.Run("re-encoding that works is confirmed before it settles", func(t *testing.T) {
+		const noMJPEG = "Selected video codec mjpeg is not supported by the device"
 		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
 
-		u.chooseCodec(0, "Selected video codec mjpeg is not supported by the device", failed)
+		u.chooseCodec(0, noMJPEG, failed)
 		if u.copyCodec {
 			t.Fatal("re-encoding was never tried")
 		}
+		// Frames under re-encoding say the camera works, not that it has no
+		// MJPEG: the passthrough attempt before this one may have caught it
+		// busy. Passthrough gets one more try against a device known to work.
 		u.chooseCodec(12, "", nil)
-		if !u.reencodeReal {
-			t.Fatal("frames arrived under re-encoding, which is what proves the camera has no MJPEG")
+		if !u.copyCodec {
+			t.Fatal("passthrough was written off on a single comparison")
+		}
+		if u.reencodeReal {
+			t.Fatal("one working re-encode settled it")
+		}
+
+		// It fails again, and now the two results are about the same device in
+		// the same state.
+		u.chooseCodec(0, noMJPEG, failed)
+		if u.copyCodec || !u.reencodeReal {
+			t.Fatal("a second passthrough failure did not settle it")
 		}
 		// The camera being unplugged later must not undo that.
 		u.chooseCodec(0, busy, failed)
 		if u.copyCodec {
 			t.Error("passthrough came back after re-encoding had been proven necessary")
+		}
+		u.chooseCodec(12, "", nil)
+		if u.copyCodec {
+			t.Error("a working re-encode reopened the question")
+		}
+	})
+
+	// The case the confirmation exists for: the camera was busy when
+	// passthrough ran and free when re-encoding did, so the comparison proves
+	// nothing. Passthrough works on the retry and stays.
+	t.Run("a device that was merely busy keeps passthrough", func(t *testing.T) {
+		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
+
+		u.chooseCodec(0, busy, failed)
+		u.chooseCodec(12, "", nil) // re-encoding, on a camera that has recovered
+		if !u.copyCodec {
+			t.Fatal("passthrough was not tried again")
+		}
+		u.chooseCodec(12, "", nil) // and passthrough works
+		if !u.copyCodec || u.reencodeReal {
+			t.Error("a working passthrough was given up")
+		}
+		// A later dropout must not resurrect the earlier guess.
+		u.chooseCodec(0, busy, failed)
+		u.chooseCodec(12, "", nil)
+		if !u.copyCodec {
+			t.Error("passthrough was written off on the strength of an old failure")
 		}
 	})
 

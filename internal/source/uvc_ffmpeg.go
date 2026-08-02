@@ -68,9 +68,14 @@ type UVC struct {
 	// when passthrough produces nothing, and set again if re-encoding produces
 	// nothing either -- see chooseCodec.
 	copyCodec bool
-	// reencodeReal records that re-encoding is what made this camera work,
-	// which is the only positive evidence that it has no MJPEG output of its
-	// own. Until then, clearing copyCodec is a guess being tested.
+	// reencodeWorked records that re-encoding has produced frames from this
+	// camera at least once. On its own that is not proof the camera has no
+	// MJPEG: the passthrough attempt before it may simply have caught the
+	// device busy, with the camera free again by the time re-encoding ran.
+	reencodeWorked bool
+	// reencodeReal records that passthrough failed a second time, on a device
+	// known by then to work. That is the comparison the two modes exist to
+	// make, and it is what settles the question for good.
 	reencodeReal bool
 }
 
@@ -114,17 +119,31 @@ func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 // only move the guess somewhere harder to see.
 //
 // What does distinguish the two is what happens next. Re-encoding asks for a
-// different output format from the same device: if that works, the format was
-// the problem and passthrough is put away for good. If it produces nothing
-// either, the device was the problem all along, and passthrough is tried again
-// so that a camera which comes back later is not decoded and re-encoded for the
-// rest of the process -- costing CPU and image quality for a guess made while
-// it was unplugged.
+// different output format from the same device: if it produces nothing either,
+// the device was the problem all along and passthrough is tried again, so a
+// camera that comes back later is not decoded and re-encoded for the rest of
+// the process.
+//
+// Re-encoding that works is not the end of it either. The camera may have been
+// busy for the passthrough attempt and free by the time this one ran, and the
+// two results are minutes apart on a device whose state changed in between. So
+// the next attempt asks passthrough once more, on a device now known to work,
+// and only a second failure settles it. That costs one attempt after the first
+// disconnect on a camera that really has no MJPEG, and it is what keeps a
+// momentary conflict from turning every later frame into a decode and re-encode.
 func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 	if frames > 0 {
-		if !u.copyCodec && !u.reencodeReal {
-			u.reencodeReal = true
-			u.log.Info("camera has no MJPEG output of its own, re-encoding from here on", "device", u.cfg.Device)
+		switch {
+		case u.copyCodec:
+			// Passthrough works, so whatever went wrong before was the device.
+			u.reencodeWorked = false
+		case !u.reencodeWorked:
+			// Worth knowing, but not yet worth believing: try passthrough once
+			// more when this attempt ends, now that the camera has proven it
+			// can deliver frames at all.
+			u.reencodeWorked = true
+			u.copyCodec = true
+			u.log.Debug("re-encoding worked; passthrough gets one more try on the next attempt", "device", u.cfg.Device)
 		}
 		return
 	}
@@ -136,6 +155,15 @@ func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 		if deviceUnavailable(diag) {
 			// The device never opened, so nothing was learned about its
 			// formats. Trying the re-encode is pointless as well as misleading.
+			return
+		}
+		if u.reencodeWorked {
+			// Twice now, either side of a re-encode that delivered frames from
+			// this same camera. That is as close to a positive answer as this
+			// can get.
+			u.copyCodec = false
+			u.reencodeReal = true
+			u.log.Info("camera has no MJPEG output of its own, re-encoding from here on", "device", u.cfg.Device)
 			return
 		}
 		u.copyCodec = false
