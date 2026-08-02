@@ -53,6 +53,9 @@ type UVC struct {
 	// copyCodec is cleared once a camera has proven it cannot deliver MJPEG
 	// natively, after which frames are re-encoded instead.
 	copyCodec bool
+	// delivered records that this driver has produced at least one frame, so
+	// a device that worked once is retried rather than given up on.
+	delivered bool
 }
 
 // NewUVC builds the driver. The device must be set.
@@ -72,8 +75,26 @@ func (u *UVC) Name() string { return "uvc" }
 // Run implements Source.
 func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 	return runWithBackoff(ctx, u.log, u.Name(), u.reporter, func(ctx context.Context) error {
-		frames, err := u.capture(ctx, out, u.copyCodec)
-		if err != nil && frames == 0 && u.copyCodec {
+		frames, diag, err := u.capture(ctx, out, u.copyCodec)
+		if frames > 0 {
+			u.delivered = true
+		}
+		switch {
+		case err == nil || ctx.Err() != nil:
+			return err
+
+		case !u.delivered && deviceUnavailable(diag):
+			// ffmpeg named the device itself, so neither waiting nor a
+			// different codec is going to help. Reporting this as fatal is
+			// what lets Apply put the previous source back instead of
+			// retrying a camera that is not there.
+			//
+			// The check is skipped once a frame has arrived: the same
+			// message then means a working camera was unplugged, and that is
+			// exactly the case the reconnect loop exists for.
+			return fatalf(err)
+
+		case frames == 0 && u.copyCodec:
 			// The camera never produced a frame in passthrough mode, so it
 			// most likely has no MJPEG output format. Re-encode from here on.
 			u.copyCodec = false
@@ -83,12 +104,38 @@ func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 	})
 }
 
+// deviceUnavailableSigns are the ffmpeg diagnostics that mean the configured
+// device could not be opened at all, as opposed to a capture that started and
+// then broke. Matching text is a heuristic -- ffmpeg has no exit code for
+// this -- so an unrecognised message costs only the previous behaviour of
+// retrying, and /healthz still reports 503 while no frames arrive.
+var deviceUnavailableSigns = []string{
+	"could not find video device",       // dshow
+	"could not enumerate video devices", // dshow
+	"cannot open video device",          // v4l2
+	"no such file or directory",         // v4l2
+	"could not open video device",
+	"video device not found", // avfoundation
+}
+
+// deviceUnavailable reports whether an ffmpeg diagnostic blames the device.
+func deviceUnavailable(diag string) bool {
+	lower := strings.ToLower(diag)
+	for _, sign := range deviceUnavailableSigns {
+		if strings.Contains(lower, sign) {
+			return true
+		}
+	}
+	return false
+}
+
 // capture runs one ffmpeg process to completion and returns how many frames it
-// yielded.
-func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, error) {
+// yielded along with ffmpeg's diagnostic output, which is the only thing that
+// says why a run ended.
+func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, string, error) {
 	path, err := u.ffmpegPath()
 	if err != nil {
-		return 0, fatalf(err)
+		return 0, "", fatalf(err)
 	}
 	args := u.args(copyCodec)
 	u.log.Debug("starting ffmpeg", "path", path, "args", strings.Join(args, " "))
@@ -100,30 +147,31 @@ func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return 0, fmt.Errorf("uvc: stdout pipe: %w", err)
+		return 0, "", fmt.Errorf("uvc: stdout pipe: %w", err)
 	}
 	diag := &tailWriter{max: stderrTail}
 	cmd.Stderr = diag
 
 	if err := cmd.Start(); err != nil {
-		return 0, fatalf(fmt.Errorf("uvc: start ffmpeg: %w", err))
+		return 0, "", fatalf(fmt.Errorf("uvc: start ffmpeg: %w", err))
 	}
 
 	frames, readErr := u.pump(ctx, stdout, out)
 	waitErr := cmd.Wait()
+	stderr := diag.String()
 
 	// Waiting for the child guarantees the device is released before a source
 	// switch opens it again; UVC access is exclusive.
 	if ctx.Err() != nil {
-		return frames, nil
+		return frames, stderr, nil
 	}
 	switch {
 	case readErr != nil:
-		return frames, fmt.Errorf("uvc: %w (ffmpeg: %s)", readErr, diag.String())
+		return frames, stderr, fmt.Errorf("uvc: %w (ffmpeg: %s)", readErr, stderr)
 	case waitErr != nil:
-		return frames, fmt.Errorf("uvc: ffmpeg exited: %w (%s)", waitErr, diag.String())
+		return frames, stderr, fmt.Errorf("uvc: ffmpeg exited: %w (%s)", waitErr, stderr)
 	default:
-		return frames, fmt.Errorf("uvc: ffmpeg exited without error (%s)", diag.String())
+		return frames, stderr, fmt.Errorf("uvc: ffmpeg exited without error (%s)", stderr)
 	}
 }
 
@@ -266,8 +314,19 @@ func ListDevices(ctx context.Context, ffmpegPath string) ([]Device, error) {
 	configureChildProcess(cmd)
 	diag := &tailWriter{max: 64 << 10}
 	cmd.Stderr = diag
-	// A non-zero exit is expected: "dummy" is not a real device.
-	_ = cmd.Run()
+	runErr := cmd.Run()
+
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("uvc: listing capture devices did not finish: %w", ctx.Err())
+	}
+	// A non-zero exit is expected here: "dummy" is not a real device, and the
+	// listing itself goes to stderr. Anything that is not an exit status means
+	// ffmpeg never ran, which is worth reporting rather than showing the user
+	// an empty camera list.
+	var exitErr *exec.ExitError
+	if runErr != nil && !errors.As(runErr, &exitErr) {
+		return nil, fmt.Errorf("uvc: run ffmpeg to list devices: %w", runErr)
+	}
 
 	return parseDshowDevices(diag.String()), nil
 }

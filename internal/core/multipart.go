@@ -49,14 +49,33 @@ func NewMultipartEncoder(boundary string, extra []StreamHeader) (MultipartEncode
 		return MultipartEncoder{}, err
 	}
 	for _, h := range extra {
-		if strings.ContainsAny(h.Name, ":\r\n") || h.Name == "" {
-			return MultipartEncoder{}, fmt.Errorf("invalid extra header name %q", h.Name)
-		}
-		if strings.ContainsAny(h.Value, "\r\n") {
-			return MultipartEncoder{}, fmt.Errorf("invalid extra header value for %q", h.Name)
+		if err := ValidateStreamHeader(h.Name, h.Value); err != nil {
+			return MultipartEncoder{}, err
 		}
 	}
 	return MultipartEncoder{boundary: boundary, extra: append([]StreamHeader(nil), extra...)}, nil
+}
+
+// reservedPartHeaders are the part headers the encoder writes itself. A second
+// copy with a different value would leave the client choosing between them,
+// and picking the wrong Content-Length loses the frame boundary for good.
+var reservedPartHeaders = []string{"Content-Type", "Content-Length"}
+
+// ValidateStreamHeader reports whether a name and value are usable as an extra
+// part header.
+func ValidateStreamHeader(name, value string) error {
+	if name == "" || strings.ContainsAny(name, ":\r\n") {
+		return fmt.Errorf("invalid extra header name %q", name)
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("invalid extra header value for %q", name)
+	}
+	for _, reserved := range reservedPartHeaders {
+		if strings.EqualFold(strings.TrimSpace(name), reserved) {
+			return fmt.Errorf("extra header %q is written by the encoder itself and cannot be overridden", name)
+		}
+	}
+	return nil
 }
 
 // ValidateBoundary reports whether s is usable as a multipart delimiter.

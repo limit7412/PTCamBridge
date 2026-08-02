@@ -87,6 +87,10 @@ type rotatingWriter struct {
 	maxBackups int
 	file       *os.File
 	size       int64
+	// closed marks a deliberate shutdown, which is the only reason to stop
+	// accepting writes. A missing file on its own means the last rotation
+	// could not reopen one, and that is recoverable.
+	closed bool
 }
 
 func newRotatingWriter(path string, maxSize int64, maxBackups int) (*rotatingWriter, error) {
@@ -124,13 +128,22 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.file == nil {
+	if w.closed {
 		return 0, os.ErrClosed
 	}
-	if w.size+int64(len(p)) > w.maxSize {
+	if w.file != nil && w.size+int64(len(p)) > w.maxSize {
 		if err := w.rotate(); err != nil {
 			// Losing rotation is better than losing the log line.
 			fmt.Fprintf(os.Stderr, "paperbridge: log rotation failed: %v\n", err)
+		}
+	}
+	if w.file == nil {
+		// A rotation closed the old file and could not open a new one -- a
+		// full disk, or a scanner holding the file open on Windows. Opening
+		// here is what stops that moment from wedging logging for the rest of
+		// the run, which is what happens if writes only ever fail from then on.
+		if err := w.open(); err != nil {
+			return 0, err
 		}
 	}
 	n, err := w.file.Write(p)
@@ -140,10 +153,14 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 
 // rotate shifts the existing generations up by one and starts a fresh file.
 func (w *rotatingWriter) rotate() error {
-	if err := w.file.Close(); err != nil {
+	// Clear the handle whatever Close reports: the descriptor is gone either
+	// way, and leaving it in place would have later writes go to a closed
+	// file instead of taking the reopen path in Write.
+	err := w.file.Close()
+	w.file = nil
+	if err != nil {
 		return err
 	}
-	w.file = nil
 
 	// Drop the oldest, then shift each remaining generation up.
 	_ = os.Remove(fmt.Sprintf("%s.%d", w.path, w.maxBackups))
@@ -166,6 +183,7 @@ func (w *rotatingWriter) rotate() error {
 func (w *rotatingWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.closed = true
 	if w.file == nil {
 		return nil
 	}

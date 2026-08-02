@@ -70,7 +70,7 @@ func onReady(ctx context.Context, opts Options) {
 	autostartItem := systray.AddMenuItemCheckbox("Start with Windows", "Launch PaperBridge at sign-in", false)
 	if !autostart.Supported() {
 		autostartItem.Hide()
-	} else if on, err := autostart.Enabled(); err != nil {
+	} else if on, err := autostart.Enabled(opts.ConfigFlag); err != nil {
 		opts.Log.Warn("could not read the autostart entry", "error", err)
 	} else if on {
 		autostartItem.Check()
@@ -219,7 +219,7 @@ func toggleAutostart(opts Options, m menu) {
 	if m.autostart.Checked() {
 		err = autostart.Disable()
 	} else {
-		err = autostart.Enable()
+		err = autostart.Enable(opts.ConfigFlag)
 	}
 	if err != nil {
 		opts.Log.Error("could not change the autostart entry", "error", err)

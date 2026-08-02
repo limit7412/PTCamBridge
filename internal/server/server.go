@@ -227,8 +227,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	lastFrame := time.Now()
 
 	// Send whatever is current straight away so a reconnecting client sees an
-	// image without waiting for the next capture.
-	if latest, ok := s.opts.Hub.Latest(); ok {
+	// image without waiting for the next capture. A frame older than the loss
+	// timeout is withheld: the hub keeps the last image indefinitely, and
+	// replaying it to every reconnect while the camera is down would feed the
+	// tracker a stale mouth shape over and over.
+	if latest, ok := s.opts.Hub.Latest(); ok && time.Since(latest.RecvedAt) <= sourceLossTimeout {
 		buf = stream.encoder.AppendPart(buf[:0], latest.Data)
 		if _, err := w.Write(buf); err != nil {
 			return

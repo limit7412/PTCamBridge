@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
@@ -16,16 +17,29 @@ const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 const supported = true
 
 // command is the Run value: the quoted executable path, so a path containing
-// spaces still launches.
-func command() (string, error) {
+// spaces still launches, followed by the settings file when one was named.
+//
+// Carrying -config through matters because the registered command is all the
+// next sign-in gets. Without it a bridge set up against a settings file
+// elsewhere would come back on the default one, quietly running a different
+// source and port than the user configured.
+func command(configPath string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("autostart: locate the executable: %w", err)
 	}
-	return `"` + exe + `"`, nil
+	value := `"` + exe + `"`
+	if configPath = strings.TrimSpace(configPath); configPath != "" {
+		abs, err := filepath.Abs(configPath)
+		if err != nil {
+			return "", fmt.Errorf("autostart: resolve the settings path %q: %w", configPath, err)
+		}
+		value += ` -config "` + abs + `"`
+	}
+	return value, nil
 }
 
-func enabled() (bool, error) {
+func enabled(configPath string) (bool, error) {
 	key, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.QUERY_VALUE)
 	if errors.Is(err, registry.ErrNotExist) {
 		return false, nil
@@ -41,7 +55,7 @@ func enabled() (bool, error) {
 		return false, fmt.Errorf("autostart: read the Run value: %w", err)
 	}
 
-	want, err := command()
+	want, err := command(configPath)
 	if err != nil {
 		return false, err
 	}
@@ -51,8 +65,8 @@ func enabled() (bool, error) {
 	return strings.EqualFold(strings.TrimSpace(value), want), nil
 }
 
-func enable() error {
-	value, err := command()
+func enable(configPath string) error {
+	value, err := command(configPath)
 	if err != nil {
 		return err
 	}

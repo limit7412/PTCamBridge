@@ -286,8 +286,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("server.boundary: %w", err)
 	}
 	for name, value := range c.Server.ExtraHeaders {
-		if strings.ContainsAny(name, ":\r\n") || name == "" || strings.ContainsAny(value, "\r\n") {
-			return fmt.Errorf("server.extra_headers contains an unusable entry %q", name)
+		if err := core.ValidateStreamHeader(name, value); err != nil {
+			return fmt.Errorf("server.extra_headers: %w", err)
 		}
 	}
 	switch c.Source.Type {

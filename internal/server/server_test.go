@@ -687,3 +687,63 @@ func TestManyStreamClients(t *testing.T) {
 	}
 	t.Fatalf("Subscribers() = %d, want 3", h.Subscribers())
 }
+
+// The hub keeps the last image indefinitely. Replaying it to every reconnect
+// while the camera is down would feed the tracker the same stale mouth shape
+// over and over, so a frame older than the loss timeout is withheld.
+func TestStreamWithholdsAStaleOpeningFrame(t *testing.T) {
+	frames := hub.New()
+	s, _, _ := newTestServer(t, Options{Hub: frames})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	frames.Publish(core.Frame{
+		Data:     testJPEG(t),
+		RecvedAt: time.Now().Add(-time.Minute),
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/stream", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	read := make(chan int, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := io.ReadFull(resp.Body, buf)
+		read <- n
+	}()
+
+	select {
+	case n := <-read:
+		t.Errorf("the stream opened with %d bytes, want the stale frame withheld", n)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// A frame that just arrived is still what a reconnecting client should see
+// straight away, rather than waiting for the next capture.
+func TestStreamSendsAFreshOpeningFrame(t *testing.T) {
+	frames := hub.New()
+	s, _, _ := newTestServer(t, Options{Hub: frames})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	frames.Publish(core.Frame{Data: testJPEG(t), RecvedAt: time.Now()})
+
+	resp, err := http.Get(ts.URL + "/stream")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 32)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		t.Fatalf("read the opening part: %v", err)
+	}
+	if !bytes.Contains(buf, []byte("--"+core.DefaultBoundary)) {
+		t.Errorf("opening bytes = %q, want the current frame", buf)
+	}
+}

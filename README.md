@@ -101,6 +101,10 @@ write_cache = true
 
 `curl` やトレイのように `Origin` を送らないクライアントはそのまま利用できます。
 
+`server.extra_headers` に `Content-Type` と `Content-Length` は指定できません。
+これらはエンコーダが自分で出力するため、同名ヘッダを重複させるとクライアントが
+どちらを採用するかで multipart の同期が崩れます。
+
 ### 再起動が必要な設定
 
 `server.listen`、`log.*`、`papertracker.*` はプロセス起動時にのみ読まれます。
@@ -133,6 +137,10 @@ write_cache = true
 -list-devices              デバイス一覧を表示して終了
 -install-autostart         サインイン時の自動起動を登録して終了
 ```
+
+`-config` を併せて指定して `-install-autostart` した場合、その設定ファイルのパスも
+Run キーに記録されます。次回サインイン時に既定の `%APPDATA%` 側へ戻ってしまい、
+意図しないソースやポートで起動するのを防ぐためです。
 
 ## 制約
 

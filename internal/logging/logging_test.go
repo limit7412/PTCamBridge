@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -157,5 +158,49 @@ func TestWriteAfterCloseDoesNotPanic(t *testing.T) {
 	}
 	if err := w.Close(); err != nil {
 		t.Errorf("closing twice should be safe, got %v", err)
+	}
+}
+
+// A rotation that closes the old file and cannot open a new one must not wedge
+// logging for the rest of the run: the next write opens the file again.
+func TestRotatingWriterRecoversFromAFailedRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "paperbridge.log")
+	w, err := newRotatingWriter(path, 1<<20, 3)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	defer w.Close()
+
+	// Stand in for a rotation whose reopen failed, which is the state a full
+	// disk or a file lock leaves behind.
+	w.mu.Lock()
+	_ = w.file.Close()
+	w.file, w.size = nil, 0
+	w.mu.Unlock()
+
+	if _, err := w.Write([]byte("after the failure\n")); err != nil {
+		t.Fatalf("Write after a failed rotation: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	if !strings.Contains(string(data), "after the failure") {
+		t.Errorf("log = %q, want the line written after recovery", data)
+	}
+}
+
+// Close is the one reason to stop accepting writes, and it has to stick.
+func TestRotatingWriterRejectsWritesAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "paperbridge.log")
+	w, err := newRotatingWriter(path, 1<<20, 3)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := w.Write([]byte("nope\n")); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("Write after Close = %v, want os.ErrClosed", err)
 	}
 }

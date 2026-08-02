@@ -92,7 +92,9 @@ func run() error {
 	}
 	switch {
 	case opts.autostartOn:
-		return autostart.Enable()
+		// The -config the user gave here is registered alongside the
+		// executable, so the next sign-in starts on the same settings file.
+		return autostart.Enable(opts.configPath)
 	case opts.autostartNo:
 		return autostart.Disable()
 	}
@@ -190,7 +192,15 @@ func run() error {
 	defer app.Stop()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ctx, listener) }()
+	go func() {
+		serveErr <- srv.Serve(ctx, listener)
+		// A listener that dies takes the stream endpoint with it. Cancelling
+		// brings the tray or the headless wait down too, so the process exits
+		// and a supervisor can restart it, rather than staying up looking
+		// healthy while serving nothing. The error is still buffered for the
+		// shutdown wait below to report.
+		stop()
+	}()
 
 	logDir, _ := cfg.LogDir()
 	if opts.headless {
@@ -207,6 +217,7 @@ func run() error {
 			Address:    address,
 			LogDir:     logDir,
 			ConfigPath: cfgPath,
+			ConfigFlag: opts.configPath,
 			OnQuit:     stop,
 		})
 	}

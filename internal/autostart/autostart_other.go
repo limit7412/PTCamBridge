@@ -4,6 +4,6 @@ package autostart
 
 const supported = false
 
-func enabled() (bool, error) { return false, nil }
-func enable() error          { return ErrUnsupported }
-func disable() error         { return ErrUnsupported }
+func enabled(string) (bool, error) { return false, nil }
+func enable(string) error          { return ErrUnsupported }
+func disable() error               { return ErrUnsupported }

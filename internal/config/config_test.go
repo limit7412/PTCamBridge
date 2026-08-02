@@ -272,3 +272,11 @@ func TestSaveIsAtomicAndReadable(t *testing.T) {
 		t.Errorf("Device = %q, want it to survive the round trip", reloaded.Source.UVC.Device)
 	}
 }
+
+func TestValidateRejectsReservedExtraHeaders(t *testing.T) {
+	cfg := Default()
+	cfg.Server.ExtraHeaders = map[string]string{"content-length": "0"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected an extra header that shadows Content-Length to be rejected")
+	}
+}

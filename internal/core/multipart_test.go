@@ -147,3 +147,20 @@ func TestContentTypeQuotesANonTokenBoundary(t *testing.T) {
 		t.Errorf("BoundaryFromContentType = %q (ok=%v), want a:b/c", got, ok)
 	}
 }
+
+// The encoder writes Content-Type and Content-Length itself. A second copy
+// with a different value would leave the client choosing between them, and the
+// wrong Content-Length costs it the frame boundary for the rest of the stream.
+func TestExtraHeadersCannotOverrideTheEncodersOwn(t *testing.T) {
+	for _, name := range []string{"Content-Length", "content-length", "Content-Type", " CONTENT-TYPE "} {
+		if err := ValidateStreamHeader(name, "0"); err == nil {
+			t.Errorf("ValidateStreamHeader(%q) accepted a reserved header", name)
+		}
+		if _, err := NewMultipartEncoder("", []StreamHeader{{Name: name, Value: "0"}}); err == nil {
+			t.Errorf("NewMultipartEncoder accepted the reserved header %q", name)
+		}
+	}
+	if err := ValidateStreamHeader("X-Frame-Source", "paperbridge"); err != nil {
+		t.Errorf("ValidateStreamHeader rejected an ordinary header: %v", err)
+	}
+}

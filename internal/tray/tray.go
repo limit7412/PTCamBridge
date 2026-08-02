@@ -41,6 +41,10 @@ type Options struct {
 	LogDir string
 	// ConfigPath is opened by the "edit settings" item; empty hides it.
 	ConfigPath string
+	// ConfigFlag is the settings path the user named on the command line, if
+	// any. The autostart toggle registers it so a sign-in launch uses the same
+	// file; empty means the default location.
+	ConfigFlag string
 	// OnQuit is called when the user chooses Quit, before the tray exits.
 	OnQuit func()
 }
