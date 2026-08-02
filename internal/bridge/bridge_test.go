@@ -1480,3 +1480,38 @@ func TestBridgeUnsavedChangesDoNotRevertLaterFileEdits(t *testing.T) {
 		t.Errorf("device = %q, want the newer hand edit kept", base.Source.UVC.Device)
 	}
 }
+
+// A settings file deleted while a write is pending has to be recreated from
+// the newest thing known about it, which is what the pending write recorded --
+// not the snapshot taken at startup. Otherwise an edit made before the file
+// went missing comes back undone.
+func TestBridgeRecreatesADeletedFileFromTheNewestKnownContents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), config.FileName)
+	// Deliberately not written: the file is gone.
+
+	whenItFailed := config.Default()
+	whenItFailed.Server.Listen = "127.0.0.1:11111"
+	whenItFailed.Source.UVC.Device = "edited by hand"
+
+	wanted := whenItFailed
+	wanted.Server.Boundary = "from-the-bridge"
+
+	b := New(config.Default(), path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(config.Default())
+	b.holdPendingForTest(whenItFailed, wanted)
+
+	base, err := b.saveBaseForTest()
+	if err != nil {
+		t.Fatalf("saveBase: %v", err)
+	}
+
+	if base.Server.Boundary != "from-the-bridge" {
+		t.Errorf("boundary = %q, want the pending change carried forward", base.Server.Boundary)
+	}
+	if base.Server.Listen != "127.0.0.1:11111" {
+		t.Errorf("listen = %q, want the hand edit the pending write recorded", base.Server.Listen)
+	}
+	if base.Source.UVC.Device != "edited by hand" {
+		t.Errorf("device = %q, want the hand edit the pending write recorded", base.Source.UVC.Device)
+	}
+}

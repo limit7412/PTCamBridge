@@ -70,9 +70,14 @@ install_dir = 'C:\Program Files\PaperTracker'
 write_cache = true
 ```
 
-元の内容は `wifi_cache.txt.bak` へ退避します。退避は初回のみです
+元の内容は `wifi_cache.txt.paperbridge-backup` へ退避します。退避は初回のみです
 (毎回取り直すとバックアップがブリッジ自身のアドレスで上書きされ、
 本来戻したい値が失われるため)。
+
+退避先の名前に PaperBridge が入っているのは意図的です。復元は `write_cache` が
+false の起動ごとに走り、設定に無ければフォルダも自動探索するため、`.bak` のような
+一般的な名前だと、別の何かが置いたファイルを読み戻して現在のキャッシュを壊し、
+そのファイルまで消してしまいます。
 
 `write_cache` を `false` に戻して起動すると、退避した内容を書き戻します。
 `install_dir` も併せて消した場合は自動探索で対象を探します。

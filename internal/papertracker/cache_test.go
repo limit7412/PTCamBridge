@@ -220,3 +220,75 @@ func TestWriteCachePreservesARealOriginal(t *testing.T) {
 		t.Errorf("restored %q, want the camera address back", got)
 	}
 }
+
+// Restoring runs on every start once write_cache is off, and the folder is
+// searched for when the settings do not name one. A backup named so generally
+// that anything could have written it would be read back on a machine where
+// the bridge was never enabled -- replacing the client's cache with a stranger's
+// file, and deleting that file on the way out.
+func TestRestoreCacheIgnoresABackupTheBridgeDidNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	cache := CachePath(dir)
+	foreign := cache + ".bak"
+
+	if err := os.WriteFile(cache, []byte("192.168.1.50:80"), 0o644); err != nil {
+		t.Fatalf("write the cache: %v", err)
+	}
+	// Somebody else's backup, sitting in the same folder.
+	if err := os.WriteFile(foreign, []byte("something else entirely"), 0o644); err != nil {
+		t.Fatalf("write the foreign backup: %v", err)
+	}
+
+	if err := RestoreCache(dir); !errors.Is(err, ErrNoBackup) {
+		t.Fatalf("RestoreCache = %v, want ErrNoBackup: the bridge wrote nothing here", err)
+	}
+
+	got, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatalf("read the cache back: %v", err)
+	}
+	if string(got) != "192.168.1.50:80" {
+		t.Errorf("cache = %q, want it untouched", got)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("the foreign backup was removed: %v", err)
+	}
+}
+
+// A backup only counts once it is complete. Half of one is worse than none:
+// backupOnce would see it and decide the pre-bridge address was already safe,
+// so the real one would be overwritten and only a truncated copy left to
+// restore.
+func TestBackupIsNeverVisibleHalfWritten(t *testing.T) {
+	dir := t.TempDir()
+	cache := CachePath(dir)
+	original := "192.168.1.50:80"
+	if err := os.WriteFile(cache, []byte(original), 0o644); err != nil {
+		t.Fatalf("write the cache: %v", err)
+	}
+
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	// Nothing under a temporary name is left lying about, and the backup that
+	// is there holds the whole address.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read the directory: %v", err)
+	}
+	want := map[string]bool{CacheFileName: true, CacheFileName + BackupSuffix: true}
+	for _, e := range entries {
+		if !want[e.Name()] {
+			t.Errorf("unexpected leftover file %q", e.Name())
+		}
+	}
+
+	backup, err := os.ReadFile(cache + BackupSuffix)
+	if err != nil {
+		t.Fatalf("read the backup: %v", err)
+	}
+	if string(backup) != original {
+		t.Errorf("backup = %q, want the whole original address %q", backup, original)
+	}
+}

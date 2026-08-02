@@ -19,7 +19,14 @@ const CacheFileName = "wifi_cache.txt"
 
 // BackupSuffix is appended to preserve the address the client had before the
 // bridge took over.
-const BackupSuffix = ".bak"
+//
+// The name says PaperBridge in it on purpose. Restoring runs on every start
+// once write_cache is off, and the folder is searched for when the settings do
+// not name one, so a plain ".bak" would be read back on a machine where the
+// bridge had never been enabled -- overwriting whatever the client had with a
+// file somebody else left there, and deleting that file afterwards. Only a
+// name nothing else would choose can stand for "the bridge put this here".
+const BackupSuffix = ".paperbridge-backup"
 
 // NoOriginalSuffix marks that the client had no cached address at all when the
 // bridge first wrote one.
@@ -28,7 +35,7 @@ const BackupSuffix = ".bak"
 // bridge's own address sitting there and preserves that as "the original".
 // Restoring would then hand the user back the bridge instead of the state they
 // started from, and there would be no way to get to "no cache" again.
-const NoOriginalSuffix = ".bak.none"
+const NoOriginalSuffix = ".paperbridge-backup.none"
 
 // ErrNotFound means no PaperTracker installation was located.
 var ErrNotFound = errors.New("papertracker: no installation directory found")
@@ -94,15 +101,44 @@ func backupOnce(path string) error {
 	if errors.Is(err, os.ErrNotExist) {
 		// The client had no cached address. Recording that is what makes the
 		// state restorable at all.
-		if err := os.WriteFile(marker, nil, 0o644); err != nil {
-			return fmt.Errorf("papertracker: write %s: %w", marker, err)
+		if err := writeAtomic(marker, nil); err != nil {
+			return err
 		}
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("papertracker: read %s: %w", path, err)
 	}
-	if err := os.WriteFile(backup, original, 0o644); err != nil {
-		return fmt.Errorf("papertracker: write %s: %w", backup, err)
+	// Written to a temporary name and renamed, so the backup only ever exists
+	// complete. A half-written one is worse than none: the check above would
+	// see it and decide the pre-bridge state was already safe, and restoring
+	// would hand back a truncated address.
+	if err := writeAtomic(backup, original); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeAtomic writes data to path via a temporary file in the same directory,
+// so a reader never sees a partial file under that name.
+func writeAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return fmt.Errorf("papertracker: create a temporary file for %s: %w", path, err)
+	}
+	defer os.Remove(tmp.Name())
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("papertracker: write %s: %w", tmp.Name(), err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("papertracker: close %s: %w", tmp.Name(), err)
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return fmt.Errorf("papertracker: chmod %s: %w", tmp.Name(), err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("papertracker: rename onto %s: %w", path, err)
 	}
 	return nil
 }

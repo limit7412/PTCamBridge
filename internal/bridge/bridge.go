@@ -361,7 +361,14 @@ func (b *Bridge) holdUnsavedLocked(base, previous, cfg config.Config) {
 // when it can be read again, because the first is already in the running
 // configuration and so no longer shows up as a difference.
 func (b *Bridge) saveBaseLocked() (config.Config, error) {
+	// The last thing known about the file, in order of freshness. A pending
+	// write recorded what the file held when it was built, which is newer than
+	// the startup snapshot -- and it is what a recreated file has to be built
+	// from, or an edit made before the file went missing comes back undone.
 	base := b.persistBase
+	if b.unsaved != nil {
+		base = b.unsaved.from
+	}
 	var readErr error
 	if _, err := os.Stat(b.cfgPath); err == nil {
 		onDisk, err := config.LoadFile(b.cfgPath)
