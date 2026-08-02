@@ -35,6 +35,15 @@ const readHeaderTimeout = 10 * time.Second
 // streamBufferSize preallocates the per-client encode buffer.
 const streamBufferSize = 64 << 10
 
+// writeTimeout bounds a single frame write to one client.
+//
+// The response as a whole is endless, so the server has no WriteTimeout; that
+// leaves a client which stops reading able to block the write forever once the
+// socket buffer fills, and a blocked write reaches neither the watchdog nor
+// the cancelled context. A frame that cannot be handed over in this long says
+// the client is gone whether or not it has closed the connection.
+const writeTimeout = 5 * time.Second
+
 // Devices is what the management API reports for the source pickers.
 type Devices struct {
 	Cameras     []source.Device     `json:"cameras"`
@@ -222,6 +231,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	frames, unsubscribe := s.opts.Hub.Subscribe()
 	defer unsubscribe()
 
+	// A deadline per frame is the only thing that unblocks a write to a client
+	// that has stopped reading. Not every ResponseWriter supports one; where it
+	// does not, the behaviour is what it was before.
+	rc := http.NewResponseController(w)
+	writeFrame := func(b []byte) error {
+		if err := rc.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		_, err := w.Write(b)
+		return err
+	}
+
 	ctx := r.Context()
 	buf := make([]byte, 0, streamBufferSize)
 	lastFrame := time.Now()
@@ -233,7 +254,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// tracker a stale mouth shape over and over.
 	if latest, ok := s.opts.Hub.Latest(); ok && time.Since(latest.RecvedAt) <= sourceLossTimeout {
 		buf = stream.encoder.AppendPart(buf[:0], latest.Data)
-		if _, err := w.Write(buf); err != nil {
+		if err := writeFrame(buf); err != nil {
 			return
 		}
 		flusher.Flush()
@@ -254,7 +275,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			buf = stream.encoder.AppendPart(buf[:0], frame.Data)
-			if _, err := w.Write(buf); err != nil {
+			if err := writeFrame(buf); err != nil {
 				s.log.Debug("stream client went away", "remote", r.RemoteAddr, "error", err)
 				return
 			}

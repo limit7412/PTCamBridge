@@ -30,8 +30,8 @@ const readChunk = 64 << 10
 // failure.
 const stderrTail = 4 << 10
 
-// defaultUVCStallTimeout is how long ffmpeg may produce nothing before the
-// child is killed and the attempt retried.
+// defaultUVCStallTimeout is how long ffmpeg may go without producing a frame
+// before the child is killed and the attempt retried.
 //
 // A wedged USB camera or DirectShow filter leaves ffmpeg running and silent
 // rather than exiting, and a blocking read on its stdout never returns. The
@@ -53,8 +53,9 @@ type UVCConfig struct {
 	FFmpegPath string
 	// MaxFrameSize bounds a single JPEG; zero selects the core default.
 	MaxFrameSize int
-	// StallTimeout is how long ffmpeg may produce nothing before it is killed
-	// and the attempt retried; zero selects defaultUVCStallTimeout.
+	// StallTimeout is how long ffmpeg may go without producing a frame before
+	// it is killed and the attempt retried; zero selects
+	// defaultUVCStallTimeout.
 	StallTimeout time.Duration
 }
 
@@ -157,7 +158,7 @@ func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool
 	}
 	switch {
 	case runCtx.Err() != nil:
-		return frames, stderr, fmt.Errorf("uvc: %s produced nothing for %s (ffmpeg: %s)", u.cfg.Device, u.cfg.StallTimeout, stderr)
+		return frames, stderr, fmt.Errorf("uvc: %s produced no frame for %s (ffmpeg: %s)", u.cfg.Device, u.cfg.StallTimeout, stderr)
 	case readErr != nil:
 		return frames, stderr, fmt.Errorf("uvc: %w (ffmpeg: %s)", readErr, stderr)
 	case waitErr != nil:
@@ -194,8 +195,7 @@ func deviceUnavailable(diag string) bool {
 }
 
 // pump reads ffmpeg's MJPEG stdout and forwards each complete image, calling
-// alive whenever bytes arrive so the caller can tell a slow camera from a
-// wedged one.
+// alive for every frame so the caller can tell a slow camera from a wedged one.
 func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame, alive func()) (uint64, error) {
 	assembler := newFrameAssembler(core.SplitJPEGStream, u.cfg.MaxFrameSize)
 	buf := make([]byte, readChunk)
@@ -204,8 +204,11 @@ func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame,
 	for {
 		n, err := stdout.Read(buf)
 		if n > 0 {
-			alive()
 			for _, f := range assembler.feed(buf[:n]) {
+				// Frames, not bytes: ffmpeg writing something that never
+				// assembles into an image is as dead as ffmpeg writing
+				// nothing, and only one of those would be noticed otherwise.
+				alive()
 				if count == 0 {
 					u.reporter.Connected(u.Name())
 				}

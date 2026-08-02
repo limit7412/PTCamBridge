@@ -178,13 +178,17 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 
 	if b.cfgPath != "" {
 		saved := mergeChanges(b.persistBase, previous, cfg)
-		b.persistBase = saved
 		if err := config.Save(b.cfgPath, saved); err != nil {
 			// The running configuration is already correct, so nothing is torn
 			// down; the caller is told so it can say the change is temporary.
+			//
+			// persistBase deliberately stays where it was. Moving it here
+			// would fold this change into the next successful save, quietly
+			// writing out the very thing this error says will be lost.
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
 			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
+		b.persistBase = saved
 	}
 	return nil
 }

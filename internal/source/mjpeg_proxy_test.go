@@ -415,3 +415,52 @@ func TestMJPEGProxyStallTimerStartsAfterTheResponse(t *testing.T) {
 		t.Fatal("no frame arrived: the stall budget was spent before the response")
 	}
 }
+
+// Bytes arriving is not the same as frames arriving. An upstream that keeps
+// the socket busy with data no parser can use would otherwise hold the session
+// open forever while /healthz reported the source as lost.
+func TestMJPEGProxyGivesUpOnDataThatNeverBecomesFrames(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for {
+			// Well-formed enough to keep reading, never a whole image.
+			if _, err := io.WriteString(w, "--frame\r\nContent-Type: image/jpeg\r\n"); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}))
+	defer ts.Close()
+
+	p, err := NewMJPEGProxy(MJPEGConfig{URL: ts.URL, StallTimeout: 500 * time.Millisecond}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- p.session(ctx, make(chan core.Frame, 4)) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the session ended without reporting the stall")
+		}
+		if !strings.Contains(err.Error(), "went quiet") {
+			t.Errorf("error = %v, want the stall to be reported", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the session stayed open on data that never became a frame")
+	}
+}

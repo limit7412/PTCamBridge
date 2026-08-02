@@ -1,12 +1,12 @@
 package config
 
 import (
-	"github.com/limit7412/PTCamBridge/internal/core"
-
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
 func TestDefaultIsValid(t *testing.T) {
@@ -301,5 +301,48 @@ func TestValidateRejectsATinyMaxFrameSize(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("max_frame_size = %d rejected: %v", size, err)
 		}
+	}
+}
+
+// A misspelled key would decode into nothing and leave the default in place,
+// so the bridge would start on an address or a source the user did not ask for
+// while their file looked accepted.
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	body := "[server]\nlsiten = \"127.0.0.1:9\"\n\n[source.uvc]\ndevcie = \"cam\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write the settings file: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected misspelled keys to be rejected")
+	}
+	for _, want := range []string{"server.lsiten", "source.uvc.devcie"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// Strict decoding makes the shipped sample a liability if it ever drifts from
+// the struct, so it is checked here rather than by whoever copies it.
+func TestSampleConfigLoads(t *testing.T) {
+	if _, err := Load("../../configs/paperbridge.toml"); err != nil {
+		t.Fatalf("the sample settings file does not load: %v", err)
+	}
+}
+
+// What Save writes has to be what Load accepts, or the first settings change
+// would leave a file the next run refuses.
+func TestSavedConfigLoadsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	cfg := Default()
+	cfg.Server.ExtraHeaders = map[string]string{"X-Frame-Source": "paperbridge"}
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("a saved config did not load back: %v", err)
 	}
 }

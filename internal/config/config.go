@@ -170,8 +170,19 @@ func Load(path string) (Config, error) {
 	case err != nil:
 		return cfg, fmt.Errorf("read %s: %w", path, err)
 	default:
-		if _, err := toml.Decode(string(data), &cfg); err != nil {
+		md, err := toml.Decode(string(data), &cfg)
+		if err != nil {
 			return cfg, fmt.Errorf("parse %s: %w", path, err)
+		}
+		// A misspelled key would otherwise decode into nothing and leave the
+		// default in place, so the bridge would start on an address or a
+		// source the user did not ask for while their file looked accepted.
+		if unknown := md.Undecoded(); len(unknown) > 0 {
+			names := make([]string, 0, len(unknown))
+			for _, key := range unknown {
+				names = append(names, key.String())
+			}
+			return cfg, fmt.Errorf("%s has settings that do not exist: %s", path, strings.Join(names, ", "))
 		}
 	}
 

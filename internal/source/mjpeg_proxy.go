@@ -29,8 +29,8 @@ type MJPEGConfig struct {
 	// and the wait for response headers.
 	// The stream body itself is unbounded.
 	ConnectTimeout time.Duration
-	// StallTimeout is how long the stream may go quiet before it counts as
-	// disconnected.
+	// StallTimeout is how long the stream may go without producing a frame
+	// before it counts as disconnected.
 	StallTimeout time.Duration
 	// MaxFrameSize bounds a single JPEG; zero selects the core default.
 	MaxFrameSize int
@@ -174,8 +174,12 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			stall.Reset(p.cfg.StallTimeout)
+			// Frames, not bytes: an upstream dribbling malformed parts keeps
+			// the socket busy without ever producing an image, and resetting
+			// on arrival alone would hold that session open forever while
+			// /healthz reported the source as lost.
 			for _, f := range assembler.feed(buf[:n]) {
+				stall.Reset(p.cfg.StallTimeout)
 				if count == 0 {
 					p.reporter.Connected(p.Name())
 				}

@@ -870,3 +870,53 @@ func TestCaptureUnchangedIgnoresTheInactiveSources(t *testing.T) {
 		t.Error("changing the transform was not treated as a capture change")
 	}
 }
+
+// A save that failed is reported as "this will be lost on restart". Advancing
+// the base anyway would fold the change into the next successful save and
+// write out the very thing that error promised was temporary.
+func TestBridgeApplyDoesNotPersistAChangeThatFailedToSave(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.FileName)
+
+	// A directory where the file belongs fails the rename.
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	b := New(mjpegConfig(upstream.URL), path, hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// This one cannot be written.
+	lost := b.Snapshot()
+	lost.Server.Boundary = "lost-on-restart"
+	if err := b.Apply(ctx, lost); !errors.Is(err, config.ErrNotSaved) {
+		t.Fatalf("Apply error = %v, want config.ErrNotSaved", err)
+	}
+
+	// Clear the obstruction and make an unrelated change that does save.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove the obstruction: %v", err)
+	}
+	kept := b.Snapshot()
+	kept.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, kept); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !saved.Server.HoldOnSourceLoss {
+		t.Error("the change that did save is missing from the file")
+	}
+	if saved.Server.Boundary == "lost-on-restart" {
+		t.Error("the change reported as unsaved was written out by the next save")
+	}
+}

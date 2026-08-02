@@ -223,3 +223,26 @@ func TestSplitMultipartBoundsUnterminatedHeaders(t *testing.T) {
 		t.Errorf("carried %d bytes forward, want at most %d", len(rest), maxPartHeaderBytes)
 	}
 }
+
+// A run of fill bytes ending in EOI is structurally a JPEG of whatever length
+// the run happens to be, so the ceiling has to be applied inside the run too --
+// otherwise source.max_frame_size is bypassed and the frame reaches the hub.
+func TestScanJPEGAppliesMaxSizeToFillBytes(t *testing.T) {
+	padded := []byte{markerPrefix, markerSOI}
+	padded = append(padded, bytes.Repeat([]byte{markerPrefix}, 40<<10)...)
+	padded = append(padded, markerEOI)
+
+	if n, err := ScanJPEG(padded, 4); err == nil {
+		t.Errorf("ScanJPEG accepted a %d byte frame under a 4 byte limit", n)
+	}
+
+	frames, _ := SplitJPEGStream(padded, 4)
+	if len(frames) != 0 {
+		t.Errorf("SplitJPEGStream produced %d frames past the limit", len(frames))
+	}
+
+	// A generous limit still accepts it: fill bytes are legal.
+	if _, err := ScanJPEG(padded, 1<<20); err != nil {
+		t.Errorf("ScanJPEG rejected legal fill bytes under a large limit: %v", err)
+	}
+}

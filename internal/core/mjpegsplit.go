@@ -51,6 +51,13 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 		for i < len(buf) && buf[i] == markerPrefix {
 			i++
 		}
+		// The run above is unbounded, so the ceiling has to be rechecked
+		// after it: a stream of fill bytes ending in EOI would otherwise
+		// return a length far past maxSize and hand the caller a frame the
+		// limit was supposed to have stopped.
+		if i > maxSize {
+			return 0, ErrNotJPEG
+		}
 		if i >= len(buf) {
 			return 0, ErrIncompleteJPEG
 		}
@@ -59,6 +66,9 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 
 		switch {
 		case marker == markerEOI:
+			if i > maxSize {
+				return 0, ErrNotJPEG
+			}
 			return i, nil
 		case marker == markerSOI, marker == markerTEM, marker == 0x00,
 			marker >= markerRST0 && marker <= markerRST7:
