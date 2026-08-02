@@ -1343,3 +1343,35 @@ func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
 	}
 	waitForFrame(t, frames, 5*time.Second)
 }
+
+// Settings that cannot produce a driver at all are a dead end, not a retry:
+// there is nothing running to reconnect. Left unrecorded, the tray says
+// "connecting..." and /healthz says only that the source is not connected --
+// both describing something that is trying. The default settings name no UVC
+// device, so this is what a new user meets first.
+func TestBridgeRecordsSettingsThatCannotBuildADriver(t *testing.T) {
+	cfg := config.Default() // uvc, with no device name
+	tracker := status.New()
+	b := New(cfg, "", hub.New(), tracker, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err == nil {
+		t.Fatal("expected settings with no capture device to fail")
+	}
+	defer b.Stop()
+
+	snapshot := tracker.Snapshot()
+	if snapshot.Connected {
+		t.Error("the status says connected with no driver built")
+	}
+	if snapshot.Source != config.SourceUVC {
+		t.Errorf("source = %q, want the selected type so the reason has something to hang on", snapshot.Source)
+	}
+	if snapshot.LastError == "" {
+		t.Fatal("nothing was recorded, so the tray and /healthz show a source that is merely connecting")
+	}
+	if !strings.Contains(snapshot.LastError, "capture device") {
+		t.Errorf("last error = %q, want it to name what is missing", snapshot.LastError)
+	}
+}

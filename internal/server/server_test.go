@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -21,6 +20,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
@@ -365,8 +365,8 @@ type fakeController struct {
 	applied  bool
 	// applyErr is what Apply returns, for the failure mappings.
 	applyErr error
-	// devicesErr is what Devices returns.
-	devicesErr error
+	// devices is what Devices returns.
+	devices Devices
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
@@ -386,9 +386,7 @@ func (c *fakeController) Switch(_ context.Context, sourceType string) error {
 	return nil
 }
 
-func (c *fakeController) Devices(context.Context) (Devices, error) {
-	return Devices{}, c.devicesErr
-}
+func (c *fakeController) Devices(context.Context) Devices { return c.devices }
 
 func TestManagementAPIIsAbsentUnlessEnabled(t *testing.T) {
 	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: false})
@@ -754,9 +752,14 @@ func TestStreamSendsAFreshOpeningFrame(t *testing.T) {
 }
 
 // An enumeration that failed is not an empty machine, and only the caller can
-// tell the user which it was.
-func TestDevicesReportsAnEnumerationFailure(t *testing.T) {
-	ctrl := &fakeController{cfg: config.Default(), devicesErr: errors.New("ffmpeg is not executable")}
+// tell the user which it was. The two lists fail independently, so one failing
+// must not take the other's results with it: a machine with no ffmpeg still
+// has serial ports, and a picker that showed neither would be wrong about both.
+func TestDevicesReportsAPartialListWithItsError(t *testing.T) {
+	ctrl := &fakeController{cfg: config.Default(), devices: Devices{
+		CameraError: "ffmpeg is not executable",
+		SerialPorts: []source.SerialPort{{Name: "COM5", Vendor: "Espressif"}},
+	}}
 	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
@@ -767,12 +770,21 @@ func TestDevicesReportsAnEnumerationFailure(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500 when enumeration failed", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200: half an answer is still an answer", resp.StatusCode)
 	}
-	out, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(out), "not executable") {
-		t.Errorf("body = %q, want the enumeration error", out)
+	var got Devices
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(got.CameraError, "not executable") {
+		t.Errorf("camera_error = %q, want the enumeration error", got.CameraError)
+	}
+	if len(got.SerialPorts) != 1 || got.SerialPorts[0].Name != "COM5" {
+		t.Errorf("serial_ports = %+v, want the list that did enumerate", got.SerialPorts)
+	}
+	if got.SerialError != "" {
+		t.Errorf("serial_error = %q, want it empty: that enumeration worked", got.SerialError)
 	}
 }
 

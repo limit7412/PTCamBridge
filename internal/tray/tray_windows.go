@@ -100,25 +100,16 @@ func run(ctx context.Context, opts Options, m menu) {
 	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 
-	// A click on any source entry arrives on its own channel; funnel them all
-	// into one so the select below stays a fixed size.
-	//
-	// One goroutine watching every channel, rather than one per entry. With a
-	// goroutine each, two clicks are received independently and then race to
-	// forward, so the order they reach the worker in is the scheduler's
-	// choice: picking UVC and then MJPEG could settle on UVC.
-	//
-	// It hands the click on without blocking and goes straight back to
-	// watching, because systray's send is a select with a default -- a click
-	// lands only if a receiver is parked on that exact channel at that
-	// moment, and is dropped otherwise. Anything slow here would lose clicks
-	// rather than reorder them, which is the worse of the two.
-	switches := make(chan string, commandQueueDepth)
-	clicks := make(map[string]<-chan struct{}, len(m.sources))
+	// Every entry that changes the bridge is watched in one place, so the
+	// order they reach the worker in is the order they were clicked. See
+	// watchClicks for why a case each in the select below would not do.
+	actions := make(chan string, commandQueueDepth)
+	clicks := make(map[string]<-chan struct{}, len(m.sources)+1)
 	for kind, item := range m.sources {
 		clicks[kind] = item.ClickedCh
 	}
-	go watchSourceClicks(ctx, opts.Log, clicks, switches)
+	clicks[actionPause] = m.pause.ClickedCh
+	go watchClicks(ctx, opts.Log, clicks, actions)
 
 	// Everything that changes the bridge goes through one worker, in the
 	// order it was clicked.
@@ -163,30 +154,31 @@ func run(ctx context.Context, opts Options, m menu) {
 		case <-ticker.C:
 			refresh(opts, m)
 
-		case kind := <-switches:
+		case action := <-actions:
 			// Nothing is refreshed on completion. The ticker redraws once a
 			// second from state the bridge exposes without a lock, so the menu
-			// catches up on its own whichever way the switch goes.
-			submit("switch source", func() {
-				if err := opts.Controller.Switch(ctx, kind); err != nil {
-					opts.Log.Error("could not switch source", "source", kind, "error", err)
-				}
-			})
-			refresh(opts, m)
-
-		case <-m.pause.ClickedCh:
-			// The toggle is against what the last click asked for, not what
-			// the bridge currently reports. Two clicks in quick succession
-			// both see the old state otherwise -- the first has not reached
-			// SetPaused yet -- so they ask for the same thing twice and the
-			// pair does not cancel out.
-			wantPaused = !wantPaused
-			paused := wantPaused
-			submit("pause", func() {
-				if err := opts.Controller.SetPaused(paused); err != nil {
-					opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
-				}
-			})
+			// catches up on its own whichever way the action goes.
+			if action == actionPause {
+				// The toggle is against what the last click asked for, not
+				// what the bridge currently reports. Two clicks in quick
+				// succession both see the old state otherwise -- the first has
+				// not reached SetPaused yet -- so they ask for the same thing
+				// twice and the pair does not cancel out.
+				wantPaused = !wantPaused
+				paused := wantPaused
+				submit(actionPause, func() {
+					if err := opts.Controller.SetPaused(paused); err != nil {
+						opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
+					}
+				})
+			} else {
+				kind := action
+				submit("switch source", func() {
+					if err := opts.Controller.Switch(ctx, kind); err != nil {
+						opts.Log.Error("could not switch source", "source", kind, "error", err)
+					}
+				})
+			}
 			refresh(opts, m)
 
 		case <-m.address.ClickedCh:

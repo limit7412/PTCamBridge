@@ -46,9 +46,20 @@ const streamBufferSize = 64 << 10
 const writeTimeout = 5 * time.Second
 
 // Devices is what the management API reports for the source pickers.
+//
+// The two lists are gathered independently and each carries its own error,
+// because they fail independently: a machine with no ffmpeg cannot enumerate
+// cameras and can still enumerate serial ports perfectly well. Failing the
+// whole request on either would hide the devices the user does have.
+//
+// An empty list with no error means there is nothing attached. An empty list
+// with an error means nobody knows, which is the distinction a picker has to
+// show rather than swallow.
 type Devices struct {
 	Cameras     []source.Device     `json:"cameras"`
+	CameraError string              `json:"camera_error,omitempty"`
 	SerialPorts []source.SerialPort `json:"serial_ports"`
+	SerialError string              `json:"serial_error,omitempty"`
 }
 
 // Controller lets the management API drive the bridge without the server
@@ -60,8 +71,9 @@ type Controller interface {
 	Apply(ctx context.Context, cfg config.Config) error
 	// Switch changes the active source type.
 	Switch(ctx context.Context, sourceType string) error
-	// Devices lists the cameras and serial ports available right now.
-	Devices(ctx context.Context) (Devices, error)
+	// Devices lists the cameras and serial ports available right now, with
+	// whatever went wrong reported per list rather than as one error.
+	Devices(ctx context.Context) Devices
 }
 
 // Options configures a Server.
@@ -505,12 +517,9 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	devices, err := s.opts.Controller.Devices(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, r, http.StatusOK, devices)
+	// No error return: a half-answer is still an answer, and which half
+	// failed is reported inside the body.
+	writeJSON(w, r, http.StatusOK, s.opts.Controller.Devices(r.Context()))
 }
 
 // decodeStrict rejects a body carrying fields the target does not have, or

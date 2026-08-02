@@ -204,16 +204,18 @@ func run() error {
 			log.Info("PaperTracker address cache updated", "dir", cfg.PaperTracker.InstallDir, "address", address)
 		}
 
-	case cfg.PaperTracker.InstallDir != "":
+	default:
 		// Turning write_cache off has to undo what turning it on did.
 		// Otherwise the client keeps its cached loopback address and, once the
 		// bridge is gone, connects to nothing at all -- a setting the user
 		// switched off would still be in force with no way to lift it.
-		if err := papertracker.RestoreCache(cfg.PaperTracker.InstallDir); err == nil {
-			log.Info("PaperTracker address cache restored", "dir", cfg.PaperTracker.InstallDir)
-		} else if !errors.Is(err, papertracker.ErrNoBackup) {
-			log.Error("could not restore the PaperTracker address cache", "error", err)
-		}
+		//
+		// The folder is searched for when the settings no longer name one.
+		// Going back to the defaults usually means deleting the whole
+		// [papertracker] section, which clears install_dir along with
+		// write_cache -- and that is exactly when the backup still needs
+		// putting back.
+		restoreCacheQuietly(log, cfg.PaperTracker.InstallDir)
 	}
 
 	if err := app.Start(ctx); err != nil {
@@ -427,6 +429,31 @@ func isAddrInUse(err error) bool {
 // import at the top of an otherwise wiring-only file.
 func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(io.LimitReader(r, 1<<20)).Decode(v)
+}
+
+// restoreCacheQuietly puts the client's address back if the bridge ever
+// changed it, saying nothing when there is nothing to undo.
+//
+// This runs on every start with write_cache off, so "no backup here" and "no
+// PaperTracker here" are ordinary answers rather than failures: they describe
+// a machine the bridge has not touched, and logging them as errors would cry
+// wolf on every boot.
+func restoreCacheQuietly(log *slog.Logger, installDir string) {
+	dir := installDir
+	if dir == "" {
+		found, err := papertracker.FindInstallDir()
+		if err != nil {
+			return
+		}
+		dir = found
+	}
+	switch err := papertracker.RestoreCache(dir); {
+	case err == nil:
+		log.Info("PaperTracker address cache restored", "dir", dir)
+	case errors.Is(err, papertracker.ErrNoBackup):
+	default:
+		log.Error("could not restore the PaperTracker address cache", "dir", dir, "error", err)
+	}
 }
 
 // restoreCache puts the PaperTracker client back on the address it had before

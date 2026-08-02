@@ -16,13 +16,18 @@ func discardLogger() *slog.Logger {
 
 // clickSources builds one unblocked click channel per source type, the shape
 // systray hands over.
-func clickSources() (map[string]chan struct{}, map[string]<-chan struct{}) {
+func clickSources(extra ...string) (map[string]chan struct{}, map[string]<-chan struct{}) {
 	send := map[string]chan struct{}{}
 	watch := map[string]<-chan struct{}{}
+	keys := make([]string, 0, len(sourceChoices)+len(extra))
 	for _, choice := range sourceChoices {
+		keys = append(keys, choice.kind)
+	}
+	keys = append(keys, extra...)
+	for _, key := range keys {
 		ch := make(chan struct{})
-		send[choice.kind] = ch
-		watch[choice.kind] = ch
+		send[key] = ch
+		watch[key] = ch
 	}
 	return send, watch
 }
@@ -40,7 +45,7 @@ func TestSourceClicksArriveInTheOrderTheyWereClicked(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watchSourceClicks(ctx, discardLogger(), watch, out)
+	go watchClicks(ctx, discardLogger(), watch, out)
 
 	// The channels are unblocked, so each send returns only once the watcher
 	// has taken it. That is the same handover systray does.
@@ -74,7 +79,7 @@ func TestSourceClickWatcherKeepsListeningWhenNobodyDrains(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watchSourceClicks(ctx, discardLogger(), watch, out)
+	go watchClicks(ctx, discardLogger(), watch, out)
 
 	for i := 0; i < 4; i++ {
 		select {
@@ -92,7 +97,7 @@ func TestSourceClickWatcherStopsWithTheContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		watchSourceClicks(ctx, discardLogger(), watch, out)
+		watchClicks(ctx, discardLogger(), watch, out)
 		close(done)
 	}()
 
@@ -101,5 +106,50 @@ func TestSourceClickWatcherStopsWithTheContext(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the watcher did not stop when the context was cancelled")
+	}
+}
+
+// Pause and the source entries share one ordered input, not a case each in the
+// event loop. Go picks among ready select cases at random, so a case each
+// would let a pause overtake the source click before it -- and since a source
+// cannot be changed while paused, that pauses the old source instead of the
+// new one the user had just chosen.
+func TestPauseAndSourceClicksShareOneOrder(t *testing.T) {
+	want := []string{config.SourceMJPEG, actionPause, config.SourceUVC, actionPause}
+
+	send, watch := clickSources(actionPause)
+	out := make(chan string, len(want))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchClicks(ctx, discardLogger(), watch, out)
+
+	for _, action := range want {
+		select {
+		case send[action] <- struct{}{}:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("the watcher was not listening for a %s click", action)
+		}
+	}
+
+	for i, expected := range want {
+		select {
+		case got := <-out:
+			if got != expected {
+				t.Fatalf("click %d = %q, want %q", i+1, got, expected)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("click %d (%s) never arrived", i+1, expected)
+		}
+	}
+}
+
+// The pause key shares a namespace with the source type names, so it has to
+// stay distinct from all of them.
+func TestPauseActionDoesNotCollideWithASourceType(t *testing.T) {
+	for _, choice := range sourceChoices {
+		if choice.kind == actionPause {
+			t.Fatalf("actionPause %q is also a source type", actionPause)
+		}
 	}
 }

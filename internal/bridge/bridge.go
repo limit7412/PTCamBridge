@@ -432,26 +432,33 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 }
 
 // Devices lists the cameras and serial ports available right now.
-func (b *Bridge) Devices(ctx context.Context) (server.Devices, error) {
+//
+// The two are gathered independently and reported that way. They fail
+// independently -- a machine with no ffmpeg still has serial ports -- and one
+// error is not a reason to withhold the other list.
+//
+// Enumeration failing is also not the same as finding nothing, and the caller
+// is the only one that can tell the user which it was. Swallowing it here
+// leaves the tray and the API showing an empty list as if the machine had no
+// camera at all.
+func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	var devices server.Devices
 
-	cameras, cameraErr := source.ListDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
-	if cameraErr != nil {
-		b.log.Warn("could not list capture devices", "error", cameraErr)
+	cameras, err := source.ListDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
+	if err != nil {
+		b.log.Warn("could not list capture devices", "error", err)
+		devices.CameraError = err.Error()
 	}
 	devices.Cameras = cameras
 
-	ports, serialErr := source.ListSerialPorts()
-	if serialErr != nil {
-		b.log.Warn("could not list serial ports", "error", serialErr)
+	ports, err := source.ListSerialPorts()
+	if err != nil {
+		b.log.Warn("could not list serial ports", "error", err)
+		devices.SerialError = err.Error()
 	}
 	devices.SerialPorts = ports
 
-	// Enumeration failing is not the same as finding nothing, and the caller
-	// is the only one that can tell the user which it was. Swallowing it here
-	// leaves the tray and the API showing an empty list as if the machine had
-	// no camera at all.
-	return devices, errors.Join(cameraErr, serialErr)
+	return devices
 }
 
 // SetPaused stops or resumes capture. Pausing releases the camera, which
@@ -522,6 +529,14 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 
 	drv, err := b.newSource()
 	if err != nil {
+		// Nothing will retry this: the settings themselves are unusable, so
+		// there is no driver to reconnect. Without recording it the tray shows
+		// "connecting..." and /healthz says only that the source is not
+		// connected, both of which describe something that is trying. The
+		// default settings have no UVC device name, so this is the first thing
+		// a new user meets.
+		b.status.SetSource(b.cfg.Source.Type)
+		b.status.Disconnected(b.cfg.Source.Type, err)
 		return err
 	}
 
