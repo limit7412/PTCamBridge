@@ -66,6 +66,12 @@ type Bridge struct {
 	// the user had chosen it permanently.
 	persistBase config.Config
 
+	// unsaved is what the file should contain but does not, because a save
+	// failed. It is nil while the file is up to date. Keeping it means a retry
+	// writes the settings that were lost rather than diffing against a running
+	// configuration that already has them and finding nothing to do.
+	unsaved *config.Config
+
 	// stream is told about settings the HTTP server has to reapply itself.
 	// It is set once during wiring, before anything can call Apply.
 	stream StreamConfigurator
@@ -112,7 +118,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 	b.root = ctx
 	// Startup does not verify: a camera that is not plugged in yet has to be
 	// picked up when it appears, and tearing the driver down would stop that.
-	return b.startLocked(false)
+	return b.startLocked()
 }
 
 // Stop halts capture and waits for the driver to finish releasing its device.
@@ -137,7 +143,7 @@ func (b *Bridge) Snapshot() config.Config {
 // and quietly ignored; see restartRequired. A failure to persist is reported
 // as an error wrapping config.ErrNotSaved, because the caller has to know that
 // what it just changed will not survive a restart.
-func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
+func (b *Bridge) Apply(ctx context.Context, cfg config.Config) error {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -145,7 +151,14 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.applyLocked(ctx, cfg)
+}
 
+// applyLocked is Apply with mu already held, so that a caller which has to
+// read the current settings first can do the whole read-modify-apply without
+// letting anything in between. The caller has already normalised and
+// validated cfg.
+func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	previous := b.cfg
 	if err := restartRequired(previous, cfg); err != nil {
 		return err
@@ -169,12 +182,12 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 		b.stopLocked()
 		b.cfg = cfg
 
-		if err := b.startLocked(true); err != nil {
+		if err := b.verifyStartLocked(ctx); err != nil {
 			b.log.Error("new settings could not start a source, reverting", "error", err)
 			b.cfg = previous
 			// The previous source was working, so it is put back without being
 			// made to prove itself again.
-			if revertErr := b.startLocked(false); revertErr != nil {
+			if revertErr := b.startLocked(); revertErr != nil {
 				return fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
 			}
 			return err
@@ -186,18 +199,27 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 	}
 
 	if b.cfgPath != "" {
-		saved := mergeChanges(b.persistBase, previous, cfg)
+		// Changes are merged onto whatever is still waiting to be written, not
+		// onto the file's last known contents. After a failed save the two are
+		// not the same, and building on the file would drop the earlier change
+		// on the floor -- including when the caller reacts to the error by
+		// sending the very same settings again, which diffs to nothing against
+		// the running configuration and would otherwise rewrite the stale file
+		// and report success.
+		base := b.persistBase
+		if b.unsaved != nil {
+			base = *b.unsaved
+		}
+		saved := mergeChanges(base, previous, cfg)
 		if err := config.Save(b.cfgPath, saved); err != nil {
 			// The running configuration is already correct, so nothing is torn
 			// down; the caller is told so it can say the change is temporary.
-			//
-			// persistBase deliberately stays where it was. Moving it here
-			// would fold this change into the next successful save, quietly
-			// writing out the very thing this error says will be lost.
+			b.unsaved = &saved
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
 			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
 		b.persistBase = saved
+		b.unsaved = nil
 	}
 	return nil
 }
@@ -276,14 +298,22 @@ func restartRequired(previous, next config.Config) error {
 }
 
 // Switch changes the active source type, leaving everything else alone.
+//
+// Reading the current settings and applying the modified copy is one exclusive
+// operation. Split in two, a settings change that lands in the gap is undone:
+// Switch would go on to apply a whole configuration it read before that
+// change, and save it.
 func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
-	cfg := b.Snapshot()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	cfg := b.cfg
 	cfg.Source.Type = sourceType
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	return b.Apply(ctx, cfg)
+	return b.applyLocked(ctx, cfg)
 }
 
 // Devices lists the cameras and serial ports available right now.
@@ -328,7 +358,7 @@ func (b *Bridge) SetPaused(paused bool) error {
 		return nil
 	}
 	b.log.Info("capture resumed")
-	return b.startLocked(false)
+	return b.startLocked()
 }
 
 // Paused reports whether capture is currently paused.
@@ -338,15 +368,34 @@ func (b *Bridge) Paused() bool {
 	return b.paused
 }
 
-// startLocked builds and launches the configured driver. The caller holds mu.
+// startLocked builds and launches the configured driver, leaving it to retry
+// in the background. That is what startup and resume want: a camera plugged in
+// after sign-in still has to be picked up. The caller holds mu.
+func (b *Bridge) startLocked() error {
+	return b.launchLocked(nil)
+}
+
+// verifyStartLocked launches the configured driver and waits for it to deliver
+// a frame, returning an error with nothing running if it does not. That is
+// what Apply needs: only a frame proves a source works, since a driver that
+// cannot reach its camera reconnects rather than failing.
 //
-// With verify set it waits for the source to deliver a frame, and returns an
-// error if it does not, leaving nothing running. That is what Apply needs:
-// only a frame proves a source works, since a driver that cannot reach its
-// camera reconnects rather than failing. Without verify the driver is left to
-// retry in the background, which is what startup wants -- a camera plugged in
-// after sign-in still has to be picked up.
-func (b *Bridge) startLocked(verify bool) error {
+// The wait also ends if ctx does. ctx is the request that asked for the
+// change, and once the client behind it has gone there is nobody left to tell
+// that the new source came up -- carrying on would persist a setting the
+// caller was told nothing about. The context bounds only the wait; the source
+// itself lives on the bridge's own root context.
+func (b *Bridge) verifyStartLocked(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return b.launchLocked(ctx)
+}
+
+// launchLocked builds and launches the configured driver. A non-nil verifyCtx
+// asks it to wait for the first published frame; nil returns as soon as the
+// driver is running. The caller holds mu.
+func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	if b.root == nil || b.paused || b.root.Err() != nil {
 		// Nothing is going to run, but the settings still have to be able to
 		// produce a driver. Accepting them unchecked while paused would save a
@@ -410,7 +459,7 @@ func (b *Bridge) startLocked(verify bool) error {
 		close(stopped)
 	}()
 
-	if !verify {
+	if verifyCtx == nil {
 		b.log.Info("source started", "source", drv.Name())
 		return nil
 	}
@@ -425,6 +474,12 @@ func (b *Bridge) startLocked(verify bool) error {
 	case <-timer.C:
 		b.stopLocked()
 		return fmt.Errorf("bridge: %s produced no frame within %s", drv.Name(), startVerifyTimeout)
+	case <-verifyCtx.Done():
+		// The caller gave up waiting. It is going to report a failure, so
+		// finishing the change behind its back would leave the running bridge
+		// and the settings file on a source nobody was ever told about.
+		b.stopLocked()
+		return fmt.Errorf("bridge: %s was still starting when the request ended: %w", drv.Name(), verifyCtx.Err())
 	case <-b.root.Done():
 		// Shutting down is not proof that anything works. Reporting success
 		// here would persist a configuration nothing ever verified, and the

@@ -504,16 +504,28 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, devices)
 }
 
-// decodeStrict rejects a body carrying fields the target does not have.
+// decodeStrict rejects a body carrying fields the target does not have, or
+// anything at all after the first JSON value.
 //
 // The settings file already refuses unknown keys; without the same rule here a
 // misspelled field over the API is silently dropped, the value it was meant to
 // set stays at its zero value, and the caller gets a 200 for a change that did
 // something other than what it asked for.
+//
+// The trailing check is the same argument one step out. A body of
+// {"type":"uvc"}{"type":"mjpeg"} is not a request with a typo in it, it is two
+// requests; decoding only the first and reporting success tells the caller the
+// second one was honoured.
 func decodeStrict(r io.Reader, target any) error {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
-	return dec.Decode(target)
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected content after the JSON body")
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, r *http.Request, code int, body any) {

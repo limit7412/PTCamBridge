@@ -829,3 +829,51 @@ func TestManagementAPIRejectsUnknownFields(t *testing.T) {
 		}
 	})
 }
+
+// Two JSON values in one body are two requests, not one with a typo. Decoding
+// the first and stopping there reports success for a change the caller asked
+// for and never got.
+func TestManagementAPIRejectsTrailingContent(t *testing.T) {
+	bodies := map[string]string{
+		"a second value":   `{"type":"uvc"}{"type":"mjpeg"}`,
+		"trailing junk":    `{"type":"uvc"} oops`,
+		"a trailing array": `{"type":"uvc"}[1]`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			ctrl := &fakeController{cfg: config.Default()}
+			s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			resp, err := http.Post(ts.URL+"/api/v1/source", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", resp.StatusCode)
+			}
+			if ctrl.switched != "" {
+				t.Errorf("the controller switched to %q from a rejected body", ctrl.switched)
+			}
+		})
+	}
+}
+
+// Whitespace after the value is just formatting, not a second request.
+func TestManagementAPIAcceptsTrailingWhitespace(t *testing.T) {
+	ctrl := &fakeController{cfg: config.Default()}
+	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/v1/source", "application/json", strings.NewReader("{\"type\":\"serial\"}\n\n"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}

@@ -141,6 +141,7 @@ func TestValidate(t *testing.T) {
 		{"bad level", func(c *Config) { c.Log.Level = "verbose" }, "log.level"},
 		{"bad header byte", func(c *Config) { c.Source.Serial.Header = []int{0x1FF} }, "source.serial.header"},
 		{"negative frame size", func(c *Config) { c.Source.MaxFrameSize = -1 }, "source.max_frame_size"},
+		{"negative baud", func(c *Config) { c.Source.Serial.Baud = -1 }, "source.serial.baud"},
 		{"cache without dir", func(c *Config) { c.PaperTracker.WriteCache = true }, "install_dir"},
 		{"header injection", func(c *Config) { c.Server.ExtraHeaders = map[string]string{"X": "a\r\nY: b"} }, "extra_headers"},
 	}
@@ -159,6 +160,21 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// Only zero asks for the default. A negative rate has to reach Validate as
+// written, or a typo comes back as a port that opens and never sends anything.
+func TestNormaliseLeavesANegativeBaudForValidate(t *testing.T) {
+	cfg := Default()
+	cfg.Source.Serial.Baud = -1
+	cfg.Normalise()
+
+	if cfg.Source.Serial.Baud != -1 {
+		t.Fatalf("Baud = %d, want the bad value left alone", cfg.Source.Serial.Baud)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() = nil, want a negative baud rejected")
+	}
+}
+
 func TestNormaliseFillsBlanks(t *testing.T) {
 	cfg := Config{Server: Server{Listen: " 127.0.0.1:1 "}, Source: Source{Type: "  UVC  "}}
 	cfg.Normalise()
@@ -172,7 +188,7 @@ func TestNormaliseFillsBlanks(t *testing.T) {
 	if cfg.Server.Boundary != "paperbridge" {
 		t.Errorf("Boundary = %q, want the default", cfg.Server.Boundary)
 	}
-	if cfg.Source.Serial.Port != "auto" || cfg.Source.Serial.Baud != 3000000 {
+	if cfg.Source.Serial.Port != "auto" || cfg.Source.Serial.Baud != DefaultSerialBaud {
 		t.Errorf("serial defaults not filled in: %+v", cfg.Source.Serial)
 	}
 	if cfg.Log.Level != "info" {

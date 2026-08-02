@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,6 +60,20 @@ type Serial struct {
 	parser   core.ETVRParser
 	log      *slog.Logger
 	reporter Reporter
+
+	// tried remembers which ports AutoPort has already handed out and been
+	// brought back from, so the search moves on instead of returning the same
+	// candidate on every reconnect. proven is the last port that actually
+	// produced a frame, which earns it one retry ahead of the rotation.
+	//
+	// Only Run touches either, and Run is single threaded.
+	tried  map[string]struct{}
+	proven string
+
+	// listPorts is ListSerialPorts, replaced in tests: the rotation is the
+	// part worth checking and it cannot be reached without control over what
+	// enumeration returns.
+	listPorts func() ([]SerialPort, error)
 }
 
 // NewSerial builds the driver and validates the packet header up front, since
@@ -77,7 +92,14 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 	if reporter == nil {
 		reporter = NopReporter{}
 	}
-	return &Serial{cfg: cfg, parser: parser, log: log, reporter: reporter}, nil
+	return &Serial{
+		cfg:       cfg,
+		parser:    parser,
+		log:       log,
+		reporter:  reporter,
+		tried:     map[string]struct{}{},
+		listPorts: ListSerialPorts,
+	}, nil
 }
 
 // Name implements Source.
@@ -136,6 +158,9 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 		for _, f := range assembler.feed(buf[:n]) {
 			lastFrame = time.Now()
 			if count == 0 {
+				// This port has proved itself, so the auto search should come
+				// back to it first rather than rotating past it.
+				s.proven = name
 				s.reporter.Connected(s.Name())
 			}
 			count++
@@ -154,25 +179,81 @@ func (s *Serial) splitPackets(buf []byte, _ int) ([][]byte, []byte) {
 
 // resolvePort returns the configured port, or searches for one when set to
 // AutoPort.
+//
+// The search does not just take the head of the list. Two known-vendor boards
+// can be plugged in at once -- a Babble board and an unrelated CP210x dongle,
+// say -- and always returning the first one means the wrong device is opened,
+// stalled out and reopened forever while the camera sitting next to it is
+// never tried. So each candidate is used once, and the next reconnect moves
+// on to the one after it.
 func (s *Serial) resolvePort() (string, error) {
 	if !strings.EqualFold(s.cfg.Port, AutoPort) {
 		return s.cfg.Port, nil
 	}
-	ports, err := ListSerialPorts()
+	ports, err := s.listPorts()
 	if err != nil {
 		return "", fmt.Errorf("serial: enumerate ports: %w", err)
 	}
-	for _, p := range ports {
-		if p.Vendor != "" {
-			s.log.Info("auto-selected serial port", "port", p.Name, "vendor", p.Vendor)
-			return p.Name, nil
+
+	candidates := autoCandidates(ports)
+	if len(candidates) == 0 {
+		return "", errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
+	}
+
+	// A port that has already delivered frames goes first after a drop: a
+	// tugged cable is far more likely than the board having moved. It only
+	// gets the one attempt, so if it really is gone the rotation continues.
+	if s.proven != "" {
+		name := s.proven
+		s.proven = ""
+		if slices.Contains(candidates, name) {
+			clear(s.tried)
+			s.tried[name] = struct{}{}
+			s.log.Info("reopening the serial port that was working", "port", name)
+			return name, nil
 		}
 	}
-	if len(ports) == 1 {
-		s.log.Info("auto-selected the only serial port available", "port", ports[0].Name)
-		return ports[0].Name, nil
+
+	name, ok := s.firstUntried(candidates)
+	if !ok {
+		// Every candidate has had a turn. Start the rotation again rather than
+		// giving up: a board can be unplugged and put back, and the port that
+		// failed a minute ago may be the right one now.
+		s.log.Info("every candidate serial port has been tried, starting over", "ports", len(candidates))
+		clear(s.tried)
+		name, _ = s.firstUntried(candidates)
 	}
-	return "", errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
+	s.tried[name] = struct{}{}
+	s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	return name, nil
+}
+
+// firstUntried returns the first candidate this driver has not opened yet.
+func (s *Serial) firstUntried(candidates []string) (string, bool) {
+	for _, name := range candidates {
+		if _, seen := s.tried[name]; !seen {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// autoCandidates lists the ports AutoPort is willing to open, best first.
+//
+// A recognised vendor ID is the only positive evidence available, so those
+// come first and in the order ListSerialPorts put them. The lone port on the
+// machine is the fallback: with nothing else it could be, it is worth a try.
+func autoCandidates(ports []SerialPort) []string {
+	var names []string
+	for _, p := range ports {
+		if p.Vendor != "" {
+			names = append(names, p.Name)
+		}
+	}
+	if len(names) == 0 && len(ports) == 1 {
+		names = append(names, ports[0].Name)
+	}
+	return names
 }
 
 // SerialPort describes a port offered in the tray menu and over the management

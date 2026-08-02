@@ -26,6 +26,10 @@ const AppName = "PaperBridge"
 // FileName is the settings file written inside that folder.
 const FileName = "paperbridge.toml"
 
+// DefaultSerialBaud is the rate Babble wired firmware runs at, used when
+// source.serial.baud is left at zero.
+const DefaultSerialBaud = 3000000
+
 // Source type identifiers accepted by source.type and by the management API.
 const (
 	SourceUVC    = "uvc"
@@ -130,7 +134,7 @@ func Default() Config {
 			},
 			Serial: Serial{
 				Port:   "auto",
-				Baud:   3000000,
+				Baud:   DefaultSerialBaud,
 				Header: []int{0xFF, 0xA0, 0xFF, 0xA1},
 			},
 		},
@@ -296,8 +300,12 @@ func (c *Config) Normalise() {
 	if strings.TrimSpace(c.Source.Serial.Port) == "" {
 		c.Source.Serial.Port = "auto"
 	}
-	if c.Source.Serial.Baud <= 0 {
-		c.Source.Serial.Baud = 3000000
+	// Only zero asks for the default. A negative rate is a mistake, and
+	// quietly turning it into 3000000 hides it: the user reads back a value
+	// they never wrote, and if the board wanted a different rate the only
+	// symptom is a port that opens and never produces a frame.
+	if c.Source.Serial.Baud == 0 {
+		c.Source.Serial.Baud = DefaultSerialBaud
 	}
 }
 
@@ -329,6 +337,12 @@ func (c Config) Validate() error {
 	if c.Source.MaxFrameSize > 0 && c.Source.MaxFrameSize < core.MinJPEGSize {
 		return fmt.Errorf("source.max_frame_size %d is below the %d bytes of the smallest possible JPEG; use 0 for the default",
 			c.Source.MaxFrameSize, core.MinJPEGSize)
+	}
+	// Normalise has already turned zero into the default, so anything left at
+	// or below zero here was written that way on purpose and is wrong.
+	if c.Source.Serial.Baud <= 0 {
+		return fmt.Errorf("source.serial.baud must be positive, got %d; use 0 for the default of %d",
+			c.Source.Serial.Baud, DefaultSerialBaud)
 	}
 	for i, b := range c.Source.Serial.Header {
 		if b < 0 || b > 0xFF {

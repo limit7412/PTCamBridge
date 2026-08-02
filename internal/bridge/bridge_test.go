@@ -570,6 +570,61 @@ func TestBridgeApplyRevertsWhenTheNewSourceNeverDelivers(t *testing.T) {
 	t.Fatal("the restored source is not producing frames")
 }
 
+// The request that asked for the change is what the verification is being run
+// for. Once it has gone -- a client that disconnected, or an HTTP timeout --
+// finishing the change anyway leaves the bridge and the settings file on a
+// source the caller was told nothing about, and was told had failed.
+func TestBridgeApplyStopsWhenTheRequestIsCancelled(t *testing.T) {
+	// Long enough that the test would hang on it rather than pass by accident.
+	shortenVerify(t, time.Minute)
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	// Accepts the connection, then says nothing: verification would wait.
+	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		<-r.Context().Done()
+	}))
+	defer silent.Close()
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	req, cancelReq := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancelReq)
+	defer cancelReq()
+
+	broken := b.Snapshot()
+	broken.Source.MJPEG.URL = silent.URL
+
+	done := make(chan error, 1)
+	go func() { done <- b.Apply(req, broken) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Apply to fail once the request was cancelled")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Apply error = %v, want it to carry context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Apply kept verifying after the request that asked for it had gone")
+	}
+
+	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
+		t.Errorf("URL = %q, want the working upstream restored", got)
+	}
+}
+
 // Startup is the opposite case: a camera that is not there yet must be left to
 // reconnect, because nothing will start it a second time.
 func TestBridgeStartLeavesAnUnreachableSourceRetrying(t *testing.T) {
@@ -874,10 +929,14 @@ func TestCaptureUnchangedIgnoresTheInactiveSources(t *testing.T) {
 // A save that failed is reported as "this will be lost on restart". Advancing
 // the base anyway would fold the change into the next successful save and
 // write out the very thing that error promised was temporary.
-func TestBridgeApplyDoesNotPersistAChangeThatFailedToSave(t *testing.T) {
+// startWithAnUnwritableConfig runs a bridge whose settings file cannot be
+// written, and returns it along with the path once the obstruction has been
+// cleared, so the caller can watch what the next save does.
+func startWithAnUnwritableConfig(t *testing.T, ctx context.Context) (*Bridge, string) {
+	t.Helper()
+
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
-	dir := t.TempDir()
-	path := filepath.Join(dir, config.FileName)
+	path := filepath.Join(t.TempDir(), config.FileName)
 
 	// A directory where the file belongs fails the rename.
 	if err := os.Mkdir(path, 0o755); err != nil {
@@ -885,27 +944,56 @@ func TestBridgeApplyDoesNotPersistAChangeThatFailedToSave(t *testing.T) {
 	}
 
 	b := New(mjpegConfig(upstream.URL), path, hub.New(), status.New(), discardLogger())
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer b.Stop()
+	t.Cleanup(b.Stop)
 
-	// This one cannot be written.
 	lost := b.Snapshot()
-	lost.Server.Boundary = "lost-on-restart"
+	lost.Server.Boundary = "unwritable"
 	if err := b.Apply(ctx, lost); !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("Apply error = %v, want config.ErrNotSaved", err)
 	}
 
-	// Clear the obstruction and make an unrelated change that does save.
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove the obstruction: %v", err)
 	}
-	kept := b.Snapshot()
-	kept.Server.HoldOnSourceLoss = true
-	if err := b.Apply(ctx, kept); err != nil {
+	return b, path
+}
+
+// Retrying is the obvious thing to do with a change that was applied but not
+// saved, and it has to actually write it. The retry sends settings the running
+// bridge already has, so there is nothing to diff against it -- the pending
+// write is the only record that the file is behind.
+func TestBridgeApplyRetryPersistsAChangeThatFailedToSave(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b, path := startWithAnUnwritableConfig(t, ctx)
+
+	if err := b.Apply(ctx, b.Snapshot()); err != nil {
+		t.Fatalf("retrying the same settings: %v", err)
+	}
+
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if saved.Server.Boundary != "unwritable" {
+		t.Errorf("saved boundary = %q, want the change the retry was asking to persist", saved.Server.Boundary)
+	}
+}
+
+// The same pending write also rides along with the next unrelated change. The
+// running bridge has been using the value all along, so leaving it out would
+// keep the file describing a configuration that is not the one in effect.
+func TestBridgeApplyCarriesAnUnsavedChangeIntoTheNextSave(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b, path := startWithAnUnwritableConfig(t, ctx)
+
+	next := b.Snapshot()
+	next.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, next); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 
@@ -916,7 +1004,7 @@ func TestBridgeApplyDoesNotPersistAChangeThatFailedToSave(t *testing.T) {
 	if !saved.Server.HoldOnSourceLoss {
 		t.Error("the change that did save is missing from the file")
 	}
-	if saved.Server.Boundary == "lost-on-restart" {
-		t.Error("the change reported as unsaved was written out by the next save")
+	if saved.Server.Boundary != "unwritable" {
+		t.Errorf("saved boundary = %q, want the earlier change that is still in effect", saved.Server.Boundary)
 	}
 }
