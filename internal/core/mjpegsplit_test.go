@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // A thumbnail inside an APP1 segment contains its own SOI/EOI pair. A scanner
@@ -260,5 +261,35 @@ func TestSplitMultipartSurvivesAnEnormousContentLength(t *testing.T) {
 	}
 	if len(rest) == 0 {
 		t.Error("the incomplete part was dropped rather than held for more data")
+	}
+}
+
+// Resynchronising has to cost each byte one step in total, not one scan.
+//
+// A bare upstream can send an SOI every two bytes. Treating each of those as a
+// harmless standalone marker made a scan walk to the size ceiling before
+// failing, and resuming the search two bytes along made the next one do it all
+// again: quadratic in the read. The driver cannot check its context inside
+// that, so a source switch or a quit would be left waiting on it.
+func TestSplitJPEGStreamResyncIsLinear(t *testing.T) {
+	// Nothing but image starts, overrunning the ceiling.
+	const size = 1 << 20
+	buf := bytes.Repeat([]byte{markerPrefix, markerSOI}, size/2)
+
+	done := make(chan int, 1)
+	go func() {
+		frames, _ := SplitJPEGStream(buf, size/2)
+		done <- len(frames)
+	}()
+
+	select {
+	case n := <-done:
+		if n != 0 {
+			t.Errorf("got %d frames from a run of image starts", n)
+		}
+	case <-time.After(2 * time.Second):
+		// Linear is a few milliseconds here. Quadratic is upwards of
+		// 10^11 steps, so this is not a close call to make.
+		t.Fatal("resynchronising over 1 MiB of image starts did not finish in 2s")
 	}
 }

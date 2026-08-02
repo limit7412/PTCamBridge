@@ -254,11 +254,17 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		// sending the very same settings again, which diffs to nothing against
 		// the running configuration and would otherwise rewrite the stale file
 		// and report success.
-		base := b.saveBaseLocked()
+		base, baseErr := b.saveBaseLocked()
 		saved := mergeChanges(base, previous, cfg)
-		if err := config.Save(b.cfgPath, saved); err != nil {
+		err := baseErr
+		if err == nil {
+			err = config.Save(b.cfgPath, saved)
+		}
+		if err != nil {
 			// The running configuration is already correct, so nothing is torn
 			// down; the caller is told so it can say the change is temporary.
+			// The pending write is kept so a retry, or the next change, writes
+			// it once the file can be read again.
 			b.unsaved = &saved
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
 			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
@@ -278,18 +284,22 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 // anything in the tray before restarting would have had that edit written back
 // over from a base captured at startup.
 //
-// A file that is missing, unreadable or unparsable falls back to the last
-// known contents. There is nothing to merge onto in those cases, and refusing
-// to save would lose a change that is already in effect on top of it.
-func (b *Bridge) saveBaseLocked() config.Config {
+// A file that exists but cannot be read or parsed is an error rather than a
+// reason to fall back: the likeliest way to get one is the user part way
+// through editing it, and writing over that would destroy the edit to save a
+// change that is already in effect and can be written later.
+//
+// A file that is not there at all is different. Nothing is being lost, so the
+// last known contents are the right base and Save recreates the file from
+// them.
+func (b *Bridge) saveBaseLocked() (config.Config, error) {
 	base := b.persistBase
 	if _, err := os.Stat(b.cfgPath); err == nil {
-		if onDisk, err := config.LoadFile(b.cfgPath); err != nil {
-			b.log.Warn("could not re-read the settings file before saving; merging onto the last known contents",
-				"path", b.cfgPath, "error", err)
-		} else {
-			base = onDisk
+		onDisk, err := config.LoadFile(b.cfgPath)
+		if err != nil {
+			return base, fmt.Errorf("re-read %s before saving: %w", b.cfgPath, err)
 		}
+		base = onDisk
 	}
 	if b.unsaved != nil {
 		// Lay the pending write back on top of whatever the file says now.
@@ -297,7 +307,7 @@ func (b *Bridge) saveBaseLocked() config.Config {
 		// this copies exactly the leaves it was trying to change.
 		base = mergeChanges(base, b.persistBase, *b.unsaved)
 	}
-	return base
+	return base, nil
 }
 
 // mergeChanges returns base with every value this change actually touched

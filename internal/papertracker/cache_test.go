@@ -107,9 +107,16 @@ func TestRestoreCache(t *testing.T) {
 	}
 }
 
+// "Nothing was ever changed here" has to be distinguishable from "the restore
+// failed": the bridge restores on every start with write_cache off, and would
+// otherwise log an error each time on a machine it never touched.
 func TestRestoreCacheWithoutABackup(t *testing.T) {
-	if err := RestoreCache(t.TempDir()); err == nil {
+	err := RestoreCache(t.TempDir())
+	if err == nil {
 		t.Fatal("expected an error when there is no backup to restore")
+	}
+	if !errors.Is(err, ErrNoBackup) {
+		t.Errorf("error = %v, want it to wrap ErrNoBackup", err)
 	}
 }
 

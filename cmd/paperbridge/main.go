@@ -49,19 +49,20 @@ func main() {
 // options are the command line flags, which sit above the environment and the
 // settings file in the precedence order.
 type options struct {
-	configPath  string
-	listen      string
-	sourceType  string
-	device      string
-	serialPort  string
-	mjpegURL    string
-	logLevel    string
-	headless    bool
-	console     bool
-	listDevices bool
-	showVersion bool
-	autostartOn bool
-	autostartNo bool
+	configPath   string
+	listen       string
+	sourceType   string
+	device       string
+	serialPort   string
+	mjpegURL     string
+	logLevel     string
+	headless     bool
+	console      bool
+	listDevices  bool
+	showVersion  bool
+	autostartOn  bool
+	autostartNo  bool
+	restoreCache bool
 }
 
 func parseFlags() options {
@@ -79,6 +80,7 @@ func parseFlags() options {
 	flag.BoolVar(&o.showVersion, "version", false, "print the version and exit")
 	flag.BoolVar(&o.autostartOn, "install-autostart", false, "register to start at sign-in, then exit")
 	flag.BoolVar(&o.autostartNo, "uninstall-autostart", false, "remove the sign-in registration, then exit")
+	flag.BoolVar(&o.restoreCache, "restore-cache", false, "put the PaperTracker address back the way it was, then exit")
 	flag.Parse()
 	return o
 }
@@ -100,6 +102,12 @@ func run() error {
 	}
 	if opts.listDevices {
 		return listDevices(opts)
+	}
+	if opts.restoreCache {
+		// Separate from turning write_cache off, because uninstalling is the
+		// case where the settings file is about to be deleted too and there
+		// will never be another start to notice the change.
+		return restoreCache(opts)
 	}
 
 	cfgPath, err := resolveConfigPath(opts.configPath)
@@ -186,13 +194,25 @@ func run() error {
 	// going through a restart.
 	app.SetStreamConfigurator(srv)
 
-	if cfg.PaperTracker.WriteCache {
+	switch {
+	case cfg.PaperTracker.WriteCache:
 		if err := papertracker.WriteCache(cfg.PaperTracker.InstallDir, connectAddress(address)); err != nil {
 			// The bridge still works; the user just has to point the client at
 			// it by hand.
 			log.Error("could not update the PaperTracker address cache", "error", err)
 		} else {
 			log.Info("PaperTracker address cache updated", "dir", cfg.PaperTracker.InstallDir, "address", address)
+		}
+
+	case cfg.PaperTracker.InstallDir != "":
+		// Turning write_cache off has to undo what turning it on did.
+		// Otherwise the client keeps its cached loopback address and, once the
+		// bridge is gone, connects to nothing at all -- a setting the user
+		// switched off would still be in force with no way to lift it.
+		if err := papertracker.RestoreCache(cfg.PaperTracker.InstallDir); err == nil {
+			log.Info("PaperTracker address cache restored", "dir", cfg.PaperTracker.InstallDir)
+		} else if !errors.Is(err, papertracker.ErrNoBackup) {
+			log.Error("could not restore the PaperTracker address cache", "error", err)
 		}
 	}
 
@@ -407,4 +427,42 @@ func isAddrInUse(err error) bool {
 // import at the top of an otherwise wiring-only file.
 func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(io.LimitReader(r, 1<<20)).Decode(v)
+}
+
+// restoreCache puts the PaperTracker client back on the address it had before
+// the bridge first wrote to its cache.
+//
+// This exists for uninstalling. Turning write_cache off restores it on the
+// next start, but someone removing PaperBridge deletes the settings file and
+// the executable together, and there is no next start to notice.
+func restoreCache(opts options) error {
+	dir, err := restoreDir(opts)
+	if err != nil {
+		return err
+	}
+	if err := papertracker.RestoreCache(dir); err != nil {
+		if errors.Is(err, papertracker.ErrNoBackup) {
+			fmt.Println("Nothing to restore: PaperBridge has not changed the PaperTracker address cache.")
+			return nil
+		}
+		return err
+	}
+	fmt.Println("PaperTracker address cache restored in", dir)
+	return nil
+}
+
+// restoreDir finds the client folder, preferring what the settings say. The
+// search is the fallback so the flag still works once the settings file has
+// been deleted, which is the situation it is for.
+func restoreDir(opts options) (string, error) {
+	if cfgPath, err := resolveConfigPath(opts.configPath); err == nil {
+		if cfg, err := config.Load(cfgPath); err == nil && cfg.PaperTracker.InstallDir != "" {
+			return cfg.PaperTracker.InstallDir, nil
+		}
+	}
+	dir, err := papertracker.FindInstallDir()
+	if err != nil {
+		return "", fmt.Errorf("could not find the PaperTracker folder; set papertracker.install_dir or pass -config: %w", err)
+	}
+	return dir, nil
 }

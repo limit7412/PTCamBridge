@@ -26,6 +26,11 @@ var (
 // end-of-image terminates the scan.
 //
 // A maxSize of zero selects DefaultMaxFrameSize.
+//
+// With ErrNotJPEG the returned length is how far the scan got before giving
+// up, so a caller resynchronising can skip what has already been ruled out
+// rather than starting again a couple of bytes along. With ErrIncompleteJPEG
+// it is zero: nothing has been ruled out, the bytes simply have not arrived.
 func ScanJPEG(buf []byte, maxSize int) (int, error) {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxFrameSize
@@ -39,13 +44,13 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 	i := 2
 	for {
 		if i > maxSize {
-			return 0, ErrNotJPEG
+			return i, ErrNotJPEG
 		}
 		if i >= len(buf) {
 			return 0, ErrIncompleteJPEG
 		}
 		if buf[i] != markerPrefix {
-			return 0, ErrNotJPEG
+			return i, ErrNotJPEG
 		}
 		// Any number of 0xFF fill bytes may precede a marker.
 		for i < len(buf) && buf[i] == markerPrefix {
@@ -56,7 +61,7 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 		// return a length far past maxSize and hand the caller a frame the
 		// limit was supposed to have stopped.
 		if i > maxSize {
-			return 0, ErrNotJPEG
+			return i, ErrNotJPEG
 		}
 		if i >= len(buf) {
 			return 0, ErrIncompleteJPEG
@@ -67,10 +72,17 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 		switch {
 		case marker == markerEOI:
 			if i > maxSize {
-				return 0, ErrNotJPEG
+				return i, ErrNotJPEG
 			}
 			return i, nil
-		case marker == markerSOI, marker == markerTEM, marker == 0x00,
+		case marker == markerSOI:
+			// An image cannot contain another one at this level. A thumbnail
+			// lives inside an APPn segment, which is skipped whole by its
+			// declared length, so the scan never walks over one. Treating a
+			// second SOI as harmless instead would make it a resynchronisation
+			// point in the middle of a scan the caller is about to redo.
+			return i, ErrNotJPEG
+		case marker == markerTEM, marker == 0x00,
 			marker >= markerRST0 && marker <= markerRST7:
 			// Standalone marker: no length field follows.
 			continue
@@ -81,11 +93,11 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 		}
 		segLen := int(buf[i])<<8 | int(buf[i+1])
 		if segLen < 2 {
-			return 0, ErrNotJPEG
+			return i, ErrNotJPEG
 		}
 		i += segLen
 		if i > maxSize {
-			return 0, ErrNotJPEG
+			return i, ErrNotJPEG
 		}
 		if marker != markerSOS {
 			continue
@@ -118,7 +130,7 @@ func ScanJPEG(buf []byte, maxSize int) (int, error) {
 				goto nextMarker
 			}
 			if i > maxSize {
-				return 0, ErrNotJPEG
+				return i, ErrNotJPEG
 			}
 		}
 	nextMarker:
@@ -160,7 +172,19 @@ func SplitJPEGStream(buf []byte, maxSize int) (frames [][]byte, rest []byte) {
 			}
 			return frames, buf[start:]
 		default:
-			pos = start + 2
+			// Resynchronise past everything the failed scan walked, not two
+			// bytes along. Rescanning inside it is what makes a garbage
+			// upstream quadratic: a buffer can carry a fresh SOI every few
+			// bytes, and each one would be scanned to the ceiling again, so
+			// the driver spins on a single read instead of noticing that its
+			// context was cancelled. Advancing by the scanned length makes
+			// every byte cost one step in total.
+			//
+			// What that gives up is finding an image that begins inside bytes
+			// already shown to be part of something invalid. In a real stream
+			// those bytes are junk between frames, and the next SOI after them
+			// is the one worth trying.
+			pos = min(start+max(n, 2), len(buf))
 		}
 	}
 }

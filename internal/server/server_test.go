@@ -882,7 +882,7 @@ func TestManagementAPIAcceptsTrailingWhitespace(t *testing.T) {
 // further down: Normalise reads it as unset and fills in uvc, so a request
 // with no type would move a working source rather than being rejected.
 func TestManagementAPIRejectsAnEmptySourceType(t *testing.T) {
-	for _, body := range []string{`{}`, `{"type":""}`} {
+	for _, body := range []string{`{}`, `{"type":""}`, `{"type":"   "}`} {
 		t.Run(body, func(t *testing.T) {
 			ctrl := &fakeController{cfg: config.Default()}
 			s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})

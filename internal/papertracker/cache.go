@@ -107,6 +107,11 @@ func backupOnce(path string) error {
 	return nil
 }
 
+// ErrNoBackup means there is nothing to put back: the bridge never wrote this
+// cache, or it has already been restored. Callers that restore on every start
+// use it to tell that apart from a restore that failed.
+var ErrNoBackup = errors.New("papertracker: no backup to restore")
+
 // RestoreCache puts the pre-bridge address back and removes the backup, so a
 // user who stops using PaperBridge can return the client to its own camera.
 func RestoreCache(installDir string) error {
@@ -130,7 +135,7 @@ func RestoreCache(installDir string) error {
 
 	original, err := os.ReadFile(backup)
 	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("papertracker: no backup at %s", backup)
+		return fmt.Errorf("%w at %s", ErrNoBackup, backup)
 	} else if err != nil {
 		return fmt.Errorf("papertracker: read %s: %w", backup, err)
 	}

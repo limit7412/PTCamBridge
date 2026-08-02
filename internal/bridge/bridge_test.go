@@ -1211,3 +1211,67 @@ func TestBridgeApplyAllowsAServerChangeWhilePaused(t *testing.T) {
 		t.Error("the server-only change was not applied")
 	}
 }
+
+// A settings file that will not parse is most likely one the user is part way
+// through editing. Writing over it to persist a change that is already in
+// effect trades their edit for something that could just as well be written a
+// moment later.
+func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	cfg := mjpegConfig(upstream.URL)
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// Mid-edit: a half-typed table header.
+	halfEdited := "[server\nlisten = '127.0.0.1:18080'\n"
+	if err := os.WriteFile(path, []byte(halfEdited), 0o644); err != nil {
+		t.Fatalf("write the half-edited file: %v", err)
+	}
+
+	next := b.Snapshot()
+	next.Server.HoldOnSourceLoss = true
+	err := b.Apply(ctx, next)
+	if !errors.Is(err, config.ErrNotSaved) {
+		t.Fatalf("Apply error = %v, want config.ErrNotSaved", err)
+	}
+
+	// The change is in effect even though it could not be written.
+	if !b.Snapshot().Server.HoldOnSourceLoss {
+		t.Error("the change was not applied to the running settings")
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(onDisk) != halfEdited {
+		t.Errorf("the file was rewritten:\n%s", onDisk)
+	}
+
+	// Once the file parses again, the held change is written.
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save the finished edit: %v", err)
+	}
+	if err := b.Apply(ctx, b.Snapshot()); err != nil {
+		t.Fatalf("retry after the edit was finished: %v", err)
+	}
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if !saved.Server.HoldOnSourceLoss {
+		t.Error("the held change was not written once the file could be read")
+	}
+}
