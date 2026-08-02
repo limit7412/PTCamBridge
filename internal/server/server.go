@@ -265,12 +265,20 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// timeout is withheld: the hub keeps the last image indefinitely, and
 	// replaying it to every reconnect while the camera is down would feed the
 	// tracker a stale mouth shape over and over.
+	//
+	// The sequence number of whatever goes out here is kept. Subscribing and
+	// reading the latest frame are two steps, and a frame published in between
+	// lands in this client's queue and becomes the latest at the same moment --
+	// so without this the stream would open by sending that one image twice in
+	// a row, and the tracker would see the same mouth shape as two samples.
+	var sent uint64
 	if latest, ok := s.opts.Hub.Latest(); ok && time.Since(latest.RecvedAt) <= sourceLossTimeout {
 		buf = stream.encoder.AppendPart(buf[:0], latest.Data)
 		if err := writeFrame(buf); err != nil {
 			return
 		}
 		flusher.Flush()
+		sent = latest.Seq
 	}
 
 	// The ticker only exists to notice a source that stopped producing; it
@@ -286,6 +294,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		case frame, open := <-frames:
 			if !open {
 				return
+			}
+			if frame.Seq != 0 && frame.Seq <= sent {
+				// Already sent above, straight after subscribing.
+				continue
 			}
 			buf = stream.encoder.AppendPart(buf[:0], frame.Data)
 			if err := writeFrame(buf); err != nil {

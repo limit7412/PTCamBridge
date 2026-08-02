@@ -757,3 +757,142 @@ func TestWrittenDirsIgnoresAnEmptyRequest(t *testing.T) {
 		t.Errorf("WrittenDirs(\"\") = %q, %v, want nothing", dirs, err)
 	}
 }
+
+// Removing the working file is the last step of a restore and the one most
+// likely to fail on its own. What is left then has to say that its address is
+// already back in the cache, because a file under the working name alone is
+// indistinguishable from a restore that never wrote anything.
+func TestRestoreCacheMarksALeftoverAsApplied(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	if err := os.WriteFile(path, []byte("127.0.0.1:18080"), 0o644); err != nil {
+		t.Fatalf("write the cache: %v", err)
+	}
+	// A record that cannot be removed: a directory with something in it. The
+	// marker is empty in normal use, so nothing reads its contents.
+	marker := path + NoOriginalSuffix
+	if err := os.MkdirAll(filepath.Join(marker, "in-the-way"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defer os.RemoveAll(marker + AppliedSuffix)
+
+	err := RestoreCache(dir)
+	if err == nil {
+		t.Fatal("expected the removal to be reported")
+	}
+	// The restore itself happened: there was no cache before the bridge.
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the cache is still there: %v", err)
+	}
+	if _, err := os.Stat(marker + AppliedSuffix); err != nil {
+		t.Errorf("the leftover was not marked as applied: %v", err)
+	}
+	if _, err := os.Stat(marker + RestoringSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the working name is still in use: %v", err)
+	}
+}
+
+// A record marked as applied is litter. Reclaiming it as "what the client had"
+// would file an address the client has already moved on from, and the next
+// restore would undo the user's own choice.
+func TestWriteCacheDoesNotReclaimAnAppliedRestore(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+
+	// The state a restore leaves when only its own file could not be removed.
+	if err := os.WriteFile(path+BackupSuffix+AppliedSuffix, []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+	// The client has since picked a camera of its own.
+	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
+		t.Fatalf("write the new address: %v", err)
+	}
+
+	if err := WriteCache(dir, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	backup, err := os.ReadFile(path + BackupSuffix)
+	if err != nil {
+		t.Fatalf("read the backup: %v", err)
+	}
+	if string(backup) != "192.168.1.77" {
+		t.Errorf("backup = %q, want the address the client had just before the bridge", backup)
+	}
+	if _, err := os.Stat(path + BackupSuffix + AppliedSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the applied leftover was kept: %v", err)
+	}
+
+	// And restoring hands back what the user chose, not the older address.
+	if err := RestoreCache(dir); err != nil {
+		t.Fatalf("RestoreCache: %v", err)
+	}
+	if got, _ := ReadCache(dir); got != "192.168.1.77" {
+		t.Errorf("restored %q, want the camera the user chose", got)
+	}
+}
+
+// Restoring runs on every start with write_cache off, so it meets the same
+// leftover. There is nothing to put back, and the client's cache is not to be
+// touched.
+func TestRestoreCacheIgnoresAnAppliedLeftover(t *testing.T) {
+	dir := t.TempDir()
+	path := CachePath(dir)
+	if err := os.WriteFile(path+BackupSuffix+AppliedSuffix, []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write the leftover: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
+		t.Fatalf("write the cache: %v", err)
+	}
+
+	if err := RestoreCache(dir); !errors.Is(err, ErrNoBackup) {
+		t.Fatalf("RestoreCache = %v, want ErrNoBackup", err)
+	}
+	if got, _ := ReadCache(dir); got != "192.168.1.77" {
+		t.Errorf("cache = %q, want it left alone", got)
+	}
+	if _, err := os.Stat(path + BackupSuffix + AppliedSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the leftover was not cleaned up: %v", err)
+	}
+}
+
+// A relative install_dir means a different folder depending on where the
+// bridge was started from, and the record is read back by a later run started
+// somewhere else entirely -- at sign-in, or from wherever the uninstaller
+// happens to run.
+func TestRememberWrittenDirRecordsAnAbsolutePath(t *testing.T) {
+	state := t.TempDir()
+	install := t.TempDir()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Chdir(filepath.Dir(install))
+	defer func() { _ = os.Chdir(wd) }()
+
+	if err := RememberWrittenDir(state, filepath.Base(install)); err != nil {
+		t.Fatalf("RememberWrittenDir: %v", err)
+	}
+	dirs, err := WrittenDirs(state)
+	if err != nil {
+		t.Fatalf("WrittenDirs: %v", err)
+	}
+	if len(dirs) != 1 {
+		t.Fatalf("WrittenDirs() = %q, want one entry", dirs)
+	}
+	if !filepath.IsAbs(dirs[0]) {
+		t.Errorf("recorded %q, want an absolute path", dirs[0])
+	}
+	// It has to name the folder that was actually written to.
+	same, err := filepath.EvalSymlinks(dirs[0])
+	if err != nil {
+		t.Fatalf("resolve the record: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(install)
+	if err != nil {
+		t.Fatalf("resolve the install dir: %v", err)
+	}
+	if same != want {
+		t.Errorf("recorded %q, want %q", same, want)
+	}
+}

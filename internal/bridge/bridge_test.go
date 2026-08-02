@@ -1834,3 +1834,77 @@ func hugeDimensions(t *testing.T, jpg []byte) []byte {
 	t.Fatal("no SOF0 marker in the fixture")
 	return nil
 }
+
+// A transform slower than the camera would otherwise leave the driver blocked
+// on a full slot, and a blocked driver stops reading its socket: the images
+// queue up there instead and the stream falls further behind live with every
+// one. Only the newest frame is worth keeping for mouth tracking.
+func TestLatestOnlyKeepsOnlyTheNewestFrameWaiting(t *testing.T) {
+	in := make(chan core.Frame)
+	out := latestOnly(in, discardLogger())
+
+	// Three frames with nothing reading yet: the first fills the slot, the
+	// next two replace what is waiting.
+	for i := 1; i <= 3; i++ {
+		in <- core.Frame{Seq: uint64(i)}
+	}
+	// The forwarder may still be moving the last one across.
+	deadline := time.Now().Add(2 * time.Second)
+	var got core.Frame
+	for time.Now().Before(deadline) {
+		got = <-out
+		if got.Seq == 3 {
+			break
+		}
+		in <- core.Frame{Seq: 3}
+	}
+	if got.Seq != 3 {
+		t.Fatalf("read frame %d, want the newest one", got.Seq)
+	}
+
+	// Nothing else is queued behind it.
+	select {
+	case extra := <-out:
+		t.Errorf("frame %d was still waiting, want the older ones dropped", extra.Seq)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Closing the driver's channel closes this one, which is what lets the
+	// pump finish and the capture goroutines exit.
+	close(in)
+	select {
+	case _, open := <-out:
+		if open {
+			t.Error("expected the forwarded channel to be closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the forwarded channel was never closed")
+	}
+}
+
+// The driver must not be left waiting for the transform. This is the property
+// the queue exists for: a send goes through even while nothing downstream is
+// reading.
+func TestLatestOnlyNeverBlocksTheDriver(t *testing.T) {
+	in := make(chan core.Frame)
+	out := latestOnly(in, discardLogger())
+	defer func() {
+		close(in)
+		for range out {
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			in <- core.Frame{Seq: uint64(i + 1)}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the driver was blocked by a consumer that never read")
+	}
+}

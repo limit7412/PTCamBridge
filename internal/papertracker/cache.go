@@ -53,6 +53,17 @@ const NoOriginalSuffix = ".paperbridge-backup.none"
 // a record found here may never have been applied.
 const RestoringSuffix = ".restoring"
 
+// AppliedSuffix marks a record whose address is back in the client's cache and
+// which is only waiting to be deleted.
+//
+// Removing the working file is the last step of a restore, and it is the step
+// most likely to fail on its own -- a file held open by a scanner, a folder
+// that has gone read-only. What is left then looks exactly like a restore that
+// stopped before it wrote anything, and the two call for opposite answers: one
+// is litter, the other is the client's own address and the only copy of it.
+// Renaming rather than guessing is what keeps them apart.
+const AppliedSuffix = ".applied"
+
 // ErrNotFound means no PaperTracker installation was located.
 var ErrNotFound = errors.New("papertracker: no installation directory found")
 
@@ -118,23 +129,65 @@ func backupOnce(path string) error {
 		}
 	}
 
-	// A restore that stopped part way left the record under its working name.
-	// It still holds what the client had before the bridge, and the bridge is
-	// taking the cache over again right now, so it becomes the record once more
-	// rather than being replaced by a copy of the bridge's own address. This is
-	// also what makes an interrupted restore recoverable: it is a restore
-	// waiting to happen again, not litter.
-	for _, name := range []string{backup, marker} {
-		claimed := name + RestoringSuffix
+	// A file left under a restore's working name is one of two things, and they
+	// call for opposite answers -- the same question RestoreCache has to ask.
+	//
+	// If the restore never finished, the file still holds what the client had
+	// before the bridge, and the bridge is taking the cache over again right
+	// now: it becomes the record once more, which is what makes an interrupted
+	// restore recoverable rather than litter.
+	//
+	// If the restore did finish and only the tidying up failed, the address in
+	// it is already back in the cache -- and the client may have moved on to a
+	// camera of its own since. Reclaiming it then would file that stale address
+	// as "what the client had", and the next restore would undo the user's own
+	// choice. It is litter, and the record to keep is a fresh copy of whatever
+	// the cache says now.
+	for _, record := range []struct {
+		name  string
+		erase bool
+	}{
+		{backup, false},
+		{marker, true},
+	} {
+		// Marked as applied by the restore itself: the address in it is the one
+		// the client is holding, or was until the client chose another. Either
+		// way it is not the pre-bridge state any more, and the record to keep is
+		// a fresh copy of whatever the cache says now.
+		dropped, err := dropApplied(record.name)
+		if err != nil {
+			return err
+		}
+		if dropped {
+			break
+		}
+
+		claimed := record.name + RestoringSuffix
 		switch found, err := exists(claimed); {
 		case err != nil:
 			return err
-		case found:
-			if err := os.Rename(claimed, name); err != nil {
-				return fmt.Errorf("papertracker: rename %s: %w", claimed, err)
-			}
-			return nil
+		case !found:
+			continue
 		}
+		// Not marked, so it is a restore that may never have written anything.
+		// The client holding exactly what the record says is the one reading
+		// that settles it; anything else is treated as unapplied, because the
+		// cost of being wrong that way is a stale record rather than the loss
+		// of the only copy of the client's own address.
+		done, err := restoreLooksDone(path, claimed, record.erase)
+		if err != nil {
+			return err
+		}
+		if done {
+			if err := os.Remove(claimed); err != nil {
+				return fmt.Errorf("papertracker: remove %s: %w", claimed, err)
+			}
+			break
+		}
+		if err := os.Rename(claimed, record.name); err != nil {
+			return fmt.Errorf("papertracker: rename %s: %w", claimed, err)
+		}
+		return nil
 	}
 
 	original, err := os.ReadFile(path)
@@ -218,13 +271,40 @@ func RestoreCache(installDir string) error {
 	}
 
 	if err := os.Remove(working); err != nil {
-		// The client is already back where it started; what is left is the
-		// bridge's own file, under a name nothing reads as a backup. The next
-		// start will not undo this again -- it will report that there is
-		// nothing to restore, which is true.
-		return fmt.Errorf("papertracker: %s was restored but %s could not be removed: %w", path, working, err)
+		// The client is already back where it started, so what is left is only
+		// the bridge's own file -- but a file under the working name is
+		// ambiguous, and the next start would have to guess whether the address
+		// in it had been applied. Saying so in the name is what removes the
+		// guess. If even that fails there is nothing further to try, and the
+		// caller is told either way.
+		applied := strings.TrimSuffix(working, RestoringSuffix) + AppliedSuffix
+		if renameErr := os.Rename(working, applied); renameErr != nil {
+			return errors.Join(
+				fmt.Errorf("papertracker: %s was restored but %s could not be removed: %w", path, working, err),
+				fmt.Errorf("papertracker: rename %s to %s: %w", working, applied, renameErr),
+			)
+		}
+		return fmt.Errorf("papertracker: %s was restored but %s could not be removed, so it was left as %s: %w",
+			path, working, applied, err)
 	}
 	return nil
+}
+
+// dropApplied removes a record that has already been put back, and reports
+// whether there was one. Nothing about it needs deciding: the name says the
+// address in it is the one the client is holding.
+func dropApplied(recordName string) (bool, error) {
+	applied := recordName + AppliedSuffix
+	switch found, err := exists(applied); {
+	case err != nil:
+		return false, err
+	case !found:
+		return false, nil
+	}
+	if err := os.Remove(applied); err != nil {
+		return false, fmt.Errorf("papertracker: remove %s: %w", applied, err)
+	}
+	return true, nil
 }
 
 // applyRestore puts the client back the way the claimed record describes.
@@ -282,6 +362,15 @@ func claimRestore(path string) (working string, erase bool, err error) {
 		{path + NoOriginalSuffix, true},
 		{path + BackupSuffix, false},
 	} {
+		// A record that says it was already applied is only litter, and this is
+		// the pass that clears it.
+		switch dropped, err := dropApplied(record.name); {
+		case err != nil:
+			return "", false, err
+		case dropped:
+			return "", false, fmt.Errorf("%w at %s", ErrNoBackup, record.name)
+		}
+
 		claimed := record.name + RestoringSuffix
 		switch found, err := exists(claimed); {
 		case err != nil:
@@ -364,8 +453,10 @@ func recordNames(path string) []string {
 	return []string{
 		path + BackupSuffix,
 		path + BackupSuffix + RestoringSuffix,
+		path + BackupSuffix + AppliedSuffix,
 		path + NoOriginalSuffix,
 		path + NoOriginalSuffix + RestoringSuffix,
+		path + NoOriginalSuffix + AppliedSuffix,
 	}
 }
 
@@ -453,6 +544,15 @@ func RememberWrittenDir(stateDir, installDir string) error {
 	installDir = strings.TrimSpace(installDir)
 	if strings.TrimSpace(stateDir) == "" || installDir == "" {
 		return nil
+	}
+	// Recorded as an absolute path. install_dir may be relative, and the folder
+	// it names then depends on where the bridge was started from -- a manual
+	// run from the client's own folder and the next sign-in are two different
+	// places. What is recorded has to be the folder that was actually written
+	// to, not a phrase that means something else later.
+	installDir, err := filepath.Abs(installDir)
+	if err != nil {
+		return fmt.Errorf("papertracker: resolve %s: %w", installDir, err)
 	}
 	known, err := WrittenDirs(stateDir)
 	if err != nil {

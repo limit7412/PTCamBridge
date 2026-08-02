@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -966,5 +967,96 @@ func TestManagementAPIRejectsAnEmptySourceType(t *testing.T) {
 				t.Errorf("the controller switched to %q with no type given", ctrl.switched)
 			}
 		})
+	}
+}
+
+// Subscribing and reading the latest frame are two steps. A frame published in
+// between lands in the new client's queue and becomes the latest at the same
+// moment, so it would open the stream by sending the same image twice -- two
+// samples of one mouth shape for the tracker.
+func TestStreamDoesNotResendTheFrameItOpenedWith(t *testing.T) {
+	s, h, _ := newTestServer(t, Options{HoldOnSourceLoss: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	first := testJPEG(t)
+	h.Publish(core.Frame{Data: first})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/stream", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	readPart := func() []byte {
+		t.Helper()
+		var length int
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read part header: %v", err)
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				break
+			}
+			if n, err := strconv.Atoi(strings.TrimPrefix(line, "Content-Length: ")); err == nil && strings.HasPrefix(line, "Content-Length:") {
+				length = n
+			}
+		}
+		body := make([]byte, length)
+		if _, err := io.ReadFull(reader, body); err != nil {
+			t.Fatalf("read part body: %v", err)
+		}
+		// Each part ends with a CRLF of its own, before the next delimiter.
+		trailer := make([]byte, 2)
+		if _, err := io.ReadFull(reader, trailer); err != nil {
+			t.Fatalf("read part trailer: %v", err)
+		}
+		return body
+	}
+
+	// The frame the stream opens with, which the client already had queued.
+	if got := readPart(); !bytes.Equal(got, first) {
+		t.Fatal("the stream did not open with the current frame")
+	}
+
+	// A distinguishable second frame. If the opening one were resent, this read
+	// would return it again instead.
+	second := append(bytes.Clone(first), 0x00)
+	h.Publish(core.Frame{Data: second})
+	if got := readPart(); !bytes.Equal(got, second) {
+		t.Error("the frame the stream opened with was sent a second time")
+	}
+}
+
+// The overlap the skip above is for: a frame published while a client is
+// connecting is both the hub's latest and the first thing in that client's
+// queue. The race itself cannot be staged from a test -- the publish has to
+// land between Subscribe and Latest, two calls inside one handler -- but the
+// condition it produces can be shown, and it is the sequence number that tells
+// the two apart.
+func TestHubQueuesTheFrameThatIsAlsoTheLatest(t *testing.T) {
+	h := hub.New()
+	frames, cancel := h.Subscribe()
+	defer cancel()
+
+	h.Publish(core.Frame{Data: testJPEG(t)})
+
+	latest, ok := h.Latest()
+	if !ok {
+		t.Fatal("no latest frame after publishing")
+	}
+	select {
+	case queued := <-frames:
+		if queued.Seq != latest.Seq {
+			t.Fatalf("queued frame %d, latest %d: want the same frame in both", queued.Seq, latest.Seq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the frame never reached the subscriber")
 	}
 }

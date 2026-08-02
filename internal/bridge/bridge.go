@@ -694,7 +694,7 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 
 	go func() {
 		defer wg.Done()
-		pump(frames, transform, b.hub, log, maxPixels, firstFrame)
+		pump(latestOnly(frames, log), transform, b.hub, log, maxPixels, firstFrame)
 	}()
 
 	go func() {
@@ -777,6 +777,47 @@ func (b *Bridge) stopLocked() {
 	<-b.stopped
 	b.cancel, b.stopped = nil, nil
 	b.status.SetSource("")
+}
+
+// latestOnly forwards frames and keeps only the newest one waiting while the
+// far side is busy.
+//
+// The driver hands its frames over a slot one frame deep, and it blocks when
+// that slot is taken. A transform slower than the camera -- a rotate, or a
+// re-encode -- is enough for that to happen every frame, and a blocked driver
+// is a driver that has stopped reading its socket, its pipe or its serial
+// port. The images pile up there instead, and the stream falls further behind
+// live with every one of them: the hub's latest-frame-wins only applies after
+// the transform, so it never sees them.
+//
+// Reading as fast as the driver can produce, and throwing away what the
+// transform did not get to, is what keeps that queue from forming. Dropping
+// frames is the intended answer here -- for mouth tracking the newest image is
+// the only one worth having.
+func latestOnly(in <-chan core.Frame, log *slog.Logger) <-chan core.Frame {
+	out := make(chan core.Frame, 1)
+	go func() {
+		defer close(out)
+		for frame := range in {
+			select {
+			case out <- frame:
+				continue
+			default:
+			}
+			// The slot holds a frame the transform has not taken yet, and it is
+			// older than this one.
+			select {
+			case <-out:
+				log.Debug("dropping a frame the transform did not keep up with")
+			default:
+			}
+			select {
+			case out <- frame:
+			default:
+			}
+		}
+	}()
+	return out
 }
 
 // pump applies the optional transform and publishes each frame, calling
