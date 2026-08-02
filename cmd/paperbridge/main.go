@@ -204,6 +204,11 @@ func run() error {
 			log.Error("could not update the PaperTracker address cache", "error", err)
 		} else {
 			log.Info("PaperTracker address cache updated", "dir", cfg.PaperTracker.InstallDir, "address", address)
+			// Noted so it can be undone later even if the setting naming it is
+			// gone by then, which is what going back to the defaults looks like.
+			if err := rememberWrittenDir(cfg.PaperTracker.InstallDir); err != nil {
+				log.Warn("could not record which folder was changed, so restoring may not find it", "error", err)
+			}
 		}
 
 	default:
@@ -463,18 +468,35 @@ func restoreCacheQuietly(log *slog.Logger, installDir string) {
 // The search asks which folders hold the bridge's own record, not which ones
 // hold a client, so it cannot touch an installation the bridge never changed.
 func restoreEverywhereItWas(installDir string) ([]string, error) {
-	dirs, err := papertracker.FindRestoreDirs()
+	found, err := papertracker.FindRestoreDirs()
 	if err != nil {
 		return nil, err
 	}
+
 	// The folder the settings name goes first and is tried even when the search
 	// did not turn it up, so an installation somewhere unusual is still undone.
-	if installDir != "" && !slices.Contains(dirs, installDir) {
-		dirs = append([]string{installDir}, dirs...)
+	var dirs []string
+	add := func(dir string) {
+		if dir != "" && !slices.Contains(dirs, dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+	add(installDir)
+	// The bridge's own note of where it has written covers the folder that no
+	// setting names any more: install_dir pointed somewhere unusual and has
+	// since been cleared, which is exactly what returning to the defaults does.
+	remembered, rememberErr := rememberedWrittenDirs()
+	for _, dir := range remembered {
+		add(dir)
+	}
+	for _, dir := range found {
+		add(dir)
 	}
 
 	var restored []string
-	var errs []error
+	// A note that could not be read is reported, not swallowed: it may have
+	// held the only mention of a folder the search cannot reach.
+	errs := []error{rememberErr}
 	for _, dir := range dirs {
 		switch err := papertracker.RestoreCache(dir); {
 		case err == nil:
@@ -487,6 +509,29 @@ func restoreEverywhereItWas(installDir string) ([]string, error) {
 		}
 	}
 	return restored, errors.Join(errs...)
+}
+
+// rememberWrittenDir records a folder the bridge has pointed at itself, beside
+// the bridge's own settings.
+func rememberWrittenDir(installDir string) error {
+	dir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	return papertracker.RememberWrittenDir(dir, installDir)
+}
+
+// rememberedWrittenDirs reads that record back.
+//
+// It lives with the bridge's settings, so deleting those by hand loses it --
+// and with it the only way to find an installation the search does not cover.
+// Running -restore-cache before removing the folder is what the flag is for.
+func rememberedWrittenDirs() ([]string, error) {
+	dir, err := config.Dir()
+	if err != nil {
+		return nil, err
+	}
+	return papertracker.WrittenDirs(dir)
 }
 
 // restoreCache puts the PaperTracker client back on the address it had before

@@ -131,6 +131,19 @@ func (t Transform) checkSize(src []byte) error {
 	return checkImageSize(src, t.MaxPixels)
 }
 
+// WithinPixelLimit reads only the JPEG header and reports whether the image it
+// describes is small enough to hand on. Zero selects DefaultMaxPixels.
+//
+// A frame that is forwarded untouched is never decoded here, so nothing on this
+// side would notice a small payload declaring an enormous image -- but the
+// client that receives it has to decode it, and it is the one left asking for
+// the memory. Reading the header is cheap enough to do at capture rate, which
+// is what makes the ceiling worth applying to every frame and not only to the
+// ones this process decodes itself.
+func WithinPixelLimit(src []byte, maxPixels int) error {
+	return checkImageSize(src, maxPixels)
+}
+
 // checkImageSize reads only the JPEG header and reports whether the image it
 // describes is small enough to decode.
 func checkImageSize(src []byte, maxPixels int) error {

@@ -1257,6 +1257,97 @@ func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 	}
 }
 
+// extra_headers is a set of independent settings that happens to be written as
+// one table. Treating it as a single value means changing one header through
+// the API takes out a header the user added to the file, which is the very
+// thing merging by leaf exists to prevent.
+func TestBridgeApplyKeepsHeadersAddedToTheFileByHand(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	fileCfg := mjpegConfig(upstream.URL)
+	fileCfg.Server.ExtraHeaders = map[string]string{"X-Original": "kept"}
+	if err := config.Save(path, fileCfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(fileCfg, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(fileCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// The user adds a header to the file by hand while the bridge runs.
+	edited := fileCfg
+	edited.Server.ExtraHeaders = map[string]string{"X-Original": "kept", "X-Added-By-Hand": "also kept"}
+	if err := config.Save(path, edited); err != nil {
+		t.Fatalf("Save the edit: %v", err)
+	}
+
+	// Then changes a different header through the API, whose snapshot of the
+	// table predates the edit.
+	updated := b.Snapshot()
+	updated.Server.ExtraHeaders = map[string]string{"X-Original": "changed"}
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if saved.Server.ExtraHeaders["X-Original"] != "changed" {
+		t.Errorf("X-Original = %q, want the change the caller made", saved.Server.ExtraHeaders["X-Original"])
+	}
+	if saved.Server.ExtraHeaders["X-Added-By-Hand"] != "also kept" {
+		t.Errorf("the header added to the file by hand was dropped: %v", saved.Server.ExtraHeaders)
+	}
+}
+
+// Removing a header is a change to that key like any other, and has to reach
+// the file.
+func TestBridgeApplyRemovesAHeaderTheCallerDropped(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	fileCfg := mjpegConfig(upstream.URL)
+	fileCfg.Server.ExtraHeaders = map[string]string{"X-One": "1", "X-Two": "2"}
+	if err := config.Save(path, fileCfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(fileCfg, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(fileCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	updated := b.Snapshot()
+	updated.Server.ExtraHeaders = map[string]string{"X-One": "1"}
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if _, still := saved.Server.ExtraHeaders["X-Two"]; still {
+		t.Errorf("the header the caller removed is still in the file: %v", saved.Server.ExtraHeaders)
+	}
+	if saved.Server.ExtraHeaders["X-One"] != "1" {
+		t.Errorf("the header the caller kept was lost: %v", saved.Server.ExtraHeaders)
+	}
+}
+
 // Nothing can be started while paused, so nothing can be proven. Taking the
 // change anyway would swap a working configuration for an unproven one and
 // write it out, and resume does not verify either.
@@ -1632,4 +1723,114 @@ func TestBridgeRecreatesADeletedFileFromTheNewestKnownContents(t *testing.T) {
 	if base.Source.UVC.Device != "edited by hand" {
 		t.Errorf("device = %q, want the hand edit the pending write recorded", base.Source.UVC.Device)
 	}
+}
+
+func shortenRecheck(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := undecodableRecheckInterval
+	undecodableRecheckInterval = d
+	t.Cleanup(func() { undecodableRecheckInterval = previous })
+}
+
+// Structure is not an image. A source sending SOI/EOI passes every per-frame
+// check there is, so without a decode the hub would carry it, /healthz would
+// say 200 and the tray would show an fps -- all describing a stream the tracker
+// cannot use. Nothing is published until one frame has decoded.
+func TestPumpPublishesNothingUntilAFrameDecodes(t *testing.T) {
+	shortenRecheck(t, 0)
+
+	jpg := testJPEG(t, 16, 16)
+	hollow := []byte{0xFF, 0xD8, 0xFF, 0xD9}
+
+	frames := make(chan core.Frame, 4)
+	frames <- core.Frame{Data: hollow}
+	frames <- core.Frame{Data: hollow}
+	close(frames)
+
+	h := hub.New()
+	var reported []error
+	pump(frames, core.Transform{}, h, discardLogger(), 0, func(err error) { reported = append(reported, err) })
+
+	if _, ok := h.Latest(); ok {
+		t.Error("a frame with no image in it reached the hub")
+	}
+	if len(reported) != 1 || reported[0] == nil {
+		t.Errorf("first frame reported as %v, want the decode failure exactly once", reported)
+	}
+
+	// And once something real arrives, it flows.
+	frames = make(chan core.Frame, 4)
+	frames <- core.Frame{Data: hollow}
+	frames <- core.Frame{Data: jpg}
+	close(frames)
+
+	h = hub.New()
+	reported = nil
+	pump(frames, core.Transform{}, h, discardLogger(), 0, func(err error) { reported = append(reported, err) })
+
+	got, ok := h.Latest()
+	if !ok {
+		t.Fatal("the decodable frame never reached the hub")
+	}
+	if !bytes.Equal(got.Data, jpg) {
+		t.Error("the frame on the hub is not the one that decoded")
+	}
+	if len(reported) != 1 {
+		t.Errorf("the first frame was reported %d times, want once", len(reported))
+	}
+}
+
+// A frame forwarded untouched is never decoded here, so the pixel ceiling has
+// to be applied to its header instead: the client is the one that decodes it,
+// and a few hundred bytes declaring an enormous image asks it for the
+// allocation this limit exists to refuse.
+func TestPumpDropsAnOversizedFrameEvenWithNoTransform(t *testing.T) {
+	shortenRecheck(t, 0)
+
+	jpg := testJPEG(t, 16, 16)
+	huge := hugeDimensions(t, testJPEG(t, 16, 16))
+
+	frames := make(chan core.Frame, 4)
+	// A real frame first, so the run is past the decode gate and into the
+	// per-frame path this is about.
+	frames <- core.Frame{Data: jpg}
+	frames <- core.Frame{Data: huge}
+	close(frames)
+
+	h := hub.New()
+	pump(frames, core.Transform{}, h, discardLogger(), 0, func(error) {})
+
+	got, ok := h.Latest()
+	if !ok {
+		t.Fatal("the good frame never reached the hub")
+	}
+	if !bytes.Equal(got.Data, jpg) {
+		t.Error("a frame declaring an image over the pixel limit was forwarded to the client")
+	}
+}
+
+// hugeDimensions rewrites the frame header to declare an image far past the
+// pixel limit, leaving the compressed data as small as it was. That is the
+// shape of the problem: nothing about the byte count says what decoding it
+// will ask for.
+func hugeDimensions(t *testing.T, jpg []byte) []byte {
+	t.Helper()
+	out := bytes.Clone(jpg)
+	for i := 0; i+9 < len(out); i++ {
+		// SOF0: FF C0, length, precision, then height and width.
+		if out[i] == 0xFF && out[i+1] == 0xC0 {
+			out[i+5], out[i+6] = 0xFF, 0xFF
+			out[i+7], out[i+8] = 0xFF, 0xFF
+			cfg, err := jpeg.DecodeConfig(bytes.NewReader(out))
+			if err != nil {
+				t.Fatalf("the patched header does not parse: %v", err)
+			}
+			if cfg.Width != 65535 || cfg.Height != 65535 {
+				t.Fatalf("patched header reads %dx%d, want 65535x65535", cfg.Width, cfg.Height)
+			}
+			return out
+		}
+	}
+	t.Fatal("no SOF0 marker in the fixture")
+	return nil
 }

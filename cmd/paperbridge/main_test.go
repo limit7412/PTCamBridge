@@ -231,6 +231,51 @@ func TestRestoreHonoursTheInstallDirEnvironmentVariable(t *testing.T) {
 	}
 }
 
+// Returning to the defaults means deleting the [papertracker] section, which
+// takes install_dir with it. If that named a folder the search does not cover,
+// nothing else would ever mention it again -- so the bridge keeps its own note
+// of where it has written.
+func TestRestoreFindsAFolderNoSettingNamesAnyMore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("ProgramFiles", t.TempDir())
+	t.Setenv("ProgramFiles(x86)", t.TempDir())
+	t.Setenv("APPDATA", filepath.Join(home, "config"))
+
+	// A portable copy of the client, somewhere the search will never look.
+	portable := filepath.Join(t.TempDir(), "PaperTracker Portable")
+	if err := os.MkdirAll(portable, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(papertracker.CachePath(portable), []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// What a run with write_cache on does.
+	if err := papertracker.WriteCache(portable, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	if err := rememberWrittenDir(portable); err != nil {
+		t.Fatalf("rememberWrittenDir: %v", err)
+	}
+
+	// The user then removes the whole [papertracker] section, so nothing names
+	// the folder any more.
+	restored, err := restoreEverywhereItWas("")
+	if err != nil {
+		t.Fatalf("restoreEverywhereItWas: %v", err)
+	}
+	if len(restored) != 1 || restored[0] != portable {
+		t.Errorf("restored %q, want the folder the bridge recorded %q", restored, portable)
+	}
+	if got, err := papertracker.ReadCache(portable); err != nil || got != "192.168.1.50" {
+		t.Errorf("ReadCache() = %q, %v, want the camera address back", got, err)
+	}
+}
+
 // Nothing anywhere is an ordinary answer, not a failure, and the command says
 // so rather than reporting an error.
 func TestRestoreCacheSaysThereIsNothingToUndo(t *testing.T) {

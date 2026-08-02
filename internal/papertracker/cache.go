@@ -436,6 +436,61 @@ func FindRestoreDirs() ([]string, error) {
 	return dirs, nil
 }
 
+// WrittenDirsFile is the bridge's own note of which folders it has pointed at
+// itself. It lives with the bridge's settings, not with the client.
+//
+// The search below only knows the usual places a client is installed, and
+// install_dir can name somewhere else entirely -- a portable copy in a folder
+// of the user's choosing. Once that setting goes away, and deleting the whole
+// [papertracker] section is how someone returns to the defaults, nothing would
+// ever name that folder again: the record would sit beside the client, and the
+// client would keep pointing at a bridge that has stopped.
+const WrittenDirsFile = "written-dirs.txt"
+
+// RememberWrittenDir notes installDir as somewhere to look when restoring.
+// Recording the same folder twice does nothing.
+func RememberWrittenDir(stateDir, installDir string) error {
+	installDir = strings.TrimSpace(installDir)
+	if strings.TrimSpace(stateDir) == "" || installDir == "" {
+		return nil
+	}
+	known, err := WrittenDirs(stateDir)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(known, installDir) {
+		return nil
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return fmt.Errorf("papertracker: create %s: %w", stateDir, err)
+	}
+	known = append(known, installDir)
+	return writeAtomic(filepath.Join(stateDir, WrittenDirsFile), []byte(strings.Join(known, "\n")+"\n"))
+}
+
+// WrittenDirs lists the folders recorded by RememberWrittenDir. A missing file
+// is an ordinary answer: it means the bridge has never written a cache.
+func WrittenDirs(stateDir string) ([]string, error) {
+	if strings.TrimSpace(stateDir) == "" {
+		return nil, nil
+	}
+	path := filepath.Join(stateDir, WrittenDirsFile)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("papertracker: read %s: %w", path, err)
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !slices.Contains(dirs, line) {
+			dirs = append(dirs, line)
+		}
+	}
+	return dirs, nil
+}
+
 // hasBackup reports whether the bridge recorded a pre-bridge state in dir,
 // which is either a backup of the client's address or the marker saying it had
 // none. A restore left half done counts: it still has to be finished.

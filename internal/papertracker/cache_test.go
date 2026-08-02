@@ -701,3 +701,59 @@ func TestFindRestoreDirsFindsEveryFolderTheBridgeWroteTo(t *testing.T) {
 		t.Errorf("FindRestoreDirs() = %q, want exactly %q and %q", dirs, first, second)
 	}
 }
+
+// install_dir can name a folder the search knows nothing about -- a portable
+// copy of the client anywhere the user likes. Once that setting is cleared,
+// and deleting the whole [papertracker] section is how someone returns to the
+// defaults, the bridge's own note is the only thing left that says where to
+// undo the change.
+func TestWrittenDirsRecordsFoldersTheSearchCannotFind(t *testing.T) {
+	state := t.TempDir()
+	portable := filepath.Join(t.TempDir(), "PaperTracker Portable")
+
+	if dirs, err := WrittenDirs(state); err != nil || len(dirs) != 0 {
+		t.Fatalf("WrittenDirs() = %q, %v, want nothing recorded yet", dirs, err)
+	}
+	if err := RememberWrittenDir(state, portable); err != nil {
+		t.Fatalf("RememberWrittenDir: %v", err)
+	}
+	// Recording it again on the next start must not repeat it.
+	if err := RememberWrittenDir(state, portable); err != nil {
+		t.Fatalf("RememberWrittenDir again: %v", err)
+	}
+
+	dirs, err := WrittenDirs(state)
+	if err != nil {
+		t.Fatalf("WrittenDirs: %v", err)
+	}
+	if len(dirs) != 1 || dirs[0] != portable {
+		t.Errorf("WrittenDirs() = %q, want exactly %q", dirs, portable)
+	}
+
+	// A second folder joins it rather than replacing it.
+	other := filepath.Join(t.TempDir(), "PaperTracker")
+	if err := RememberWrittenDir(state, other); err != nil {
+		t.Fatalf("RememberWrittenDir: %v", err)
+	}
+	dirs, err = WrittenDirs(state)
+	if err != nil {
+		t.Fatalf("WrittenDirs: %v", err)
+	}
+	if !slices.Contains(dirs, portable) || !slices.Contains(dirs, other) {
+		t.Errorf("WrittenDirs() = %q, want both folders", dirs)
+	}
+}
+
+// Nothing recorded and nowhere to record are ordinary answers, not failures:
+// this runs on every start.
+func TestWrittenDirsIgnoresAnEmptyRequest(t *testing.T) {
+	if err := RememberWrittenDir("", "/somewhere"); err != nil {
+		t.Errorf("RememberWrittenDir with no state directory = %v", err)
+	}
+	if err := RememberWrittenDir(t.TempDir(), "   "); err != nil {
+		t.Errorf("RememberWrittenDir with no install directory = %v", err)
+	}
+	if dirs, err := WrittenDirs(""); err != nil || dirs != nil {
+		t.Errorf("WrittenDirs(\"\") = %q, %v, want nothing", dirs, err)
+	}
+}

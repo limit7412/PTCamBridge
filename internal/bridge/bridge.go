@@ -23,6 +23,12 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
+// undecodableRecheckInterval is how often the pump tries to decode again while
+// nothing from a source has decoded yet. Frames in between are dropped: they
+// come from an upstream that has not yet produced a usable image, and decoding
+// every one of them at capture rate would cost more than the answer is worth.
+var undecodableRecheckInterval = 500 * time.Millisecond
+
 // frameQueueDepth is the slot between the driver and the transform step. One
 // frame is enough: the hub past it never blocks, and a deeper queue would only
 // add latency.
@@ -402,15 +408,66 @@ func mergeChanges(base, previous, next config.Config) config.Config {
 
 // mergeChanged walks the settings tree and copies the leaves that differ.
 func mergeChanged(out, previous, next reflect.Value) {
-	if out.Kind() == reflect.Struct {
+	switch out.Kind() {
+	case reflect.Struct:
 		for i := 0; i < out.NumField(); i++ {
 			mergeChanged(out.Field(i), previous.Field(i), next.Field(i))
 		}
+		return
+	case reflect.Map:
+		mergeChangedMap(out, previous, next)
 		return
 	}
 	if !reflect.DeepEqual(previous.Interface(), next.Interface()) {
 		out.Set(next)
 	}
+}
+
+// mergeChangedMap copies the entries this change actually touched.
+//
+// A map is not one value. server.extra_headers is a set of independent
+// settings that happens to be written as one table, and it is edited by hand
+// at least as often as it is changed through the API -- adjusting the wire
+// format for a PaperTracker release is what it exists for. Replacing it whole
+// would take a header the user added to the file and drop it because the
+// bridge changed a different one, which is the very thing merging by leaf is
+// meant to prevent.
+//
+// A key removed by the change is removed here too: that is a change to that
+// key like any other.
+func mergeChangedMap(out, previous, next reflect.Value) {
+	touched := make(map[any]reflect.Value)
+	for _, key := range next.MapKeys() {
+		was := previous.MapIndex(key)
+		now := next.MapIndex(key)
+		if !was.IsValid() || !reflect.DeepEqual(was.Interface(), now.Interface()) {
+			touched[key.Interface()] = now
+		}
+	}
+	for _, key := range previous.MapKeys() {
+		if !next.MapIndex(key).IsValid() {
+			// An invalid value stands for "this key is gone".
+			touched[key.Interface()] = reflect.Value{}
+		}
+	}
+	if len(touched) == 0 {
+		return
+	}
+
+	// Built fresh rather than written into: the map in out is the same one the
+	// base configuration holds, and the base is somebody else's copy -- the
+	// last known file contents, or a pending write. Editing it in place would
+	// change their idea of the file as a side effect of building this one.
+	merged := reflect.MakeMap(out.Type())
+	if !out.IsNil() {
+		for _, key := range out.MapKeys() {
+			merged.SetMapIndex(key, out.MapIndex(key))
+		}
+	}
+	for key, value := range touched {
+		merged.SetMapIndex(reflect.ValueOf(key), value)
+	}
+	out.Set(merged)
 }
 
 // captureUnchanged reports whether two settings would build and run the same
@@ -595,17 +652,14 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	// limit, or one the decoder rejects. Only a frame that reached the hub
 	// means a client would see anything.
 	//
-	// The frame itself is then decoded. Everything before this point checks
-	// structure, which is all a per-frame check can afford, and structure does
-	// not mean an image: a source that only ever emits SOI/EOI passes every
-	// one of those checks and gives the tracker nothing. One decode, on the
-	// one frame that decides the answer, is what separates "bytes arrived"
-	// from "the source works".
+	// The pump decides that, and it does the same work whether anyone is
+	// waiting for the answer or not: no frame is published until one has been
+	// decoded. This is where the answer is collected when the caller needs it.
 	published := make(chan error, 1)
 	var publishedOnce sync.Once
 	maxPixels := b.cfg.CoreTransform().MaxPixels
-	onPublish := func(frame core.Frame) {
-		publishedOnce.Do(func() { published <- core.DecodableJPEG(frame.Data, maxPixels) })
+	firstFrame := func(err error) {
+		publishedOnce.Do(func() { published <- err })
 	}
 
 	ctx, cancel := context.WithCancel(b.root)
@@ -640,7 +694,7 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 
 	go func() {
 		defer wg.Done()
-		pump(frames, transform, b.hub, log, onPublish)
+		pump(frames, transform, b.hub, log, maxPixels, firstFrame)
 	}()
 
 	go func() {
@@ -727,7 +781,30 @@ func (b *Bridge) stopLocked() {
 
 // pump applies the optional transform and publishes each frame, calling
 // onPublish with every frame that makes it to the hub.
-func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger, onPublish func(core.Frame)) {
+func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger, maxPixels int, firstFrame func(error)) {
+	// Nothing is published until one frame has been decoded. Everything before
+	// this point checks structure, which is all a per-frame check can afford,
+	// and a payload of SOI followed by EOI has the structure of a JPEG and no
+	// image in it. A source sending those looks healthy the whole way through
+	// -- frames counted, /healthz green, an fps in the tray -- while the
+	// tracker gets nothing it can use, so the run does not count as working
+	// until one frame proves it is.
+	decoded := false
+	// While nothing has decoded, frames are checked at intervals rather than
+	// one by one: a decode is the expensive thing here, and an upstream sending
+	// nothing usable at thirty frames a second should not cost thirty of them.
+	var nextCheck time.Time
+	// Only the first answer is passed on. It is the one a caller waiting on a
+	// source switch asked for, and by the time a later frame decodes that
+	// caller has already been told the source failed.
+	reported := false
+	report := func(err error) {
+		if !reported {
+			reported = true
+			firstFrame(err)
+		}
+	}
+
 	for frame := range frames {
 		if !transform.IsNoop() {
 			data, err := transform.Apply(frame.Data)
@@ -737,8 +814,39 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 			}
 			frame.Data = data
 		}
+
+		switch {
+		case !decoded:
+			// The decode covers the header check as well, and it has to come
+			// first: a frame with no readable header fails both, and "not a
+			// usable image" is the answer that describes it.
+			now := time.Now()
+			if now.Before(nextCheck) {
+				continue
+			}
+			if err := core.DecodableJPEG(frame.Data, maxPixels); err != nil {
+				report(err)
+				nextCheck = now.Add(undecodableRecheckInterval)
+				log.Warn("dropping a frame that is not a usable image", "error", err)
+				continue
+			}
+			report(nil)
+			decoded = true
+
+		case transform.IsNoop():
+			// A frame forwarded untouched is never decoded on this side, so the
+			// ceiling has to be applied to the header instead. The client is the
+			// one that decodes it, and a few hundred bytes declaring 65535x65535
+			// asks it for the allocation this limit exists to refuse. Reading a
+			// header is cheap enough to do at capture rate; decoding is not.
+			// Applying a transform already checks the same thing before it
+			// decodes.
+			if err := core.WithinPixelLimit(frame.Data, maxPixels); err != nil {
+				log.Warn("dropping a frame that declares an image over the pixel limit", "error", err)
+				continue
+			}
+		}
 		h.Publish(frame)
-		onPublish(frame)
 	}
 }
 
