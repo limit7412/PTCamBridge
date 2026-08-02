@@ -8,7 +8,6 @@ import (
 	"fyne.io/systray"
 
 	"github.com/limit7412/PTCamBridge/internal/autostart"
-	"github.com/limit7412/PTCamBridge/internal/config"
 )
 
 // refreshInterval paces the status line in the menu. It is a display concern
@@ -19,18 +18,6 @@ const refreshInterval = time.Second
 // arrive at human speed and the worker only falls behind while a switch is
 // being verified, so a handful is more than a real user produces.
 const commandQueueDepth = 8
-
-// sourceChoice is one entry in the source submenu.
-type sourceChoice struct {
-	kind  string
-	label string
-}
-
-var sourceChoices = []sourceChoice{
-	{config.SourceUVC, "UVC camera (USB)"},
-	{config.SourceSerial, "Wired board (serial)"},
-	{config.SourceMJPEG, "MJPEG stream (WiFi)"},
-}
 
 // Run shows the tray icon and blocks until the user quits or ctx is cancelled.
 //
@@ -115,18 +102,23 @@ func run(ctx context.Context, opts Options, m menu) {
 
 	// A click on any source entry arrives on its own channel; funnel them all
 	// into one so the select below stays a fixed size.
-	switches := make(chan string, len(m.sources))
+	//
+	// One goroutine watching every channel, rather than one per entry. With a
+	// goroutine each, two clicks are received independently and then race to
+	// forward, so the order they reach the worker in is the scheduler's
+	// choice: picking UVC and then MJPEG could settle on UVC.
+	//
+	// It hands the click on without blocking and goes straight back to
+	// watching, because systray's send is a select with a default -- a click
+	// lands only if a receiver is parked on that exact channel at that
+	// moment, and is dropped otherwise. Anything slow here would lose clicks
+	// rather than reorder them, which is the worse of the two.
+	switches := make(chan string, commandQueueDepth)
+	clicks := make(map[string]<-chan struct{}, len(m.sources))
 	for kind, item := range m.sources {
-		go func(kind string, clicked <-chan struct{}) {
-			for range clicked {
-				select {
-				case switches <- kind:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}(kind, item.ClickedCh)
+		clicks[kind] = item.ClickedCh
 	}
+	go watchSourceClicks(ctx, opts.Log, clicks, switches)
 
 	// Everything that changes the bridge goes through one worker, in the
 	// order it was clicked.
