@@ -8,9 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
@@ -52,8 +56,9 @@ type Controller interface {
 
 // Options configures a Server.
 type Options struct {
-	Hub     *hub.Hub
-	Status  *status.Tracker
+	Hub    *hub.Hub
+	Status *status.Tracker
+	// Encoder is the initial wire format; SetStreamOptions replaces it.
 	Encoder core.MultipartEncoder
 	Logger  *slog.Logger
 	// Controller enables the management API. It is ignored unless
@@ -63,15 +68,26 @@ type Options struct {
 	// listener is not on loopback, because the API has no authentication.
 	EnableAdmin bool
 	// HoldOnSourceLoss keeps stream clients connected while the camera
-	// reconnects rather than closing the response.
+	// reconnects rather than closing the response. It is the initial value;
+	// SetStreamOptions replaces it.
 	HoldOnSourceLoss bool
 	Version          string
+}
+
+// streamOptions are the response settings a running server can swap out.
+type streamOptions struct {
+	encoder core.MultipartEncoder
+	hold    bool
 }
 
 // Server serves the stream and status endpoints.
 type Server struct {
 	opts Options
 	log  *slog.Logger
+
+	// stream is replaced wholesale when the settings change, so a client that
+	// is already connected keeps the wire format it started parsing.
+	stream atomic.Pointer[streamOptions]
 }
 
 // New builds a server. Hub, Status and Logger must be set.
@@ -84,7 +100,18 @@ func New(opts Options) (*Server, error) {
 	case opts.Logger == nil:
 		return nil, errors.New("server: logger is required")
 	}
-	return &Server{opts: opts, log: opts.Logger}, nil
+	s := &Server{opts: opts, log: opts.Logger}
+	s.stream.Store(&streamOptions{encoder: opts.Encoder, hold: opts.HoldOnSourceLoss})
+	return s, nil
+}
+
+// SetStreamOptions adopts a new wire format for the streams started from here
+// on. The bridge calls it after a settings change so that adjusting the
+// boundary or the extra headers -- the knobs that exist purely to match a
+// PaperTracker release -- does not need a restart to take effect.
+func (s *Server) SetStreamOptions(encoder core.MultipartEncoder, holdOnSourceLoss bool) {
+	s.stream.Store(&streamOptions{encoder: encoder, hold: holdOnSourceLoss})
+	s.log.Info("stream settings updated", "boundary", encoder.Boundary(), "hold_on_source_loss", holdOnSourceLoss)
 }
 
 // Handler returns the routed handler.
@@ -170,8 +197,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the settings once: the boundary announced in the Content-Type has
+	// to be the one every part of this response then uses.
+	stream := s.stream.Load()
+
 	header := w.Header()
-	header.Set("Content-Type", s.opts.Encoder.ContentType())
+	header.Set("Content-Type", stream.encoder.ContentType())
 	header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	header.Set("Pragma", "no-cache")
 	header.Set("Expires", "0")
@@ -198,7 +229,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// Send whatever is current straight away so a reconnecting client sees an
 	// image without waiting for the next capture.
 	if latest, ok := s.opts.Hub.Latest(); ok {
-		buf = s.opts.Encoder.AppendPart(buf[:0], latest.Data)
+		buf = stream.encoder.AppendPart(buf[:0], latest.Data)
 		if _, err := w.Write(buf); err != nil {
 			return
 		}
@@ -219,7 +250,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			buf = s.opts.Encoder.AppendPart(buf[:0], frame.Data)
+			buf = stream.encoder.AppendPart(buf[:0], frame.Data)
 			if _, err := w.Write(buf); err != nil {
 				s.log.Debug("stream client went away", "remote", r.RemoteAddr, "error", err)
 				return
@@ -228,7 +259,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			lastFrame = time.Now()
 
 		case <-watchdog.C:
-			if s.opts.HoldOnSourceLoss || time.Since(lastFrame) <= sourceLossTimeout {
+			if stream.hold || time.Since(lastFrame) <= sourceLossTimeout {
 				continue
 			}
 			// Closing prompts the client to reconnect. Holding the connection
@@ -304,7 +335,73 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// guardAdmin rejects management API requests that a web page could have caused
+// the browser to send.
+//
+// Binding to loopback is not on its own a control: any page the user visits can
+// reach 127.0.0.1, and a form-style POST needs no preflight to do it. Reaching
+// this API is the whole authority it has, so unless a request proves it did not
+// come from a foreign page it does not get to change the source.
+func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) bool {
+	// A rebound DNS name resolves to loopback but still carries its own name
+	// in Host, which is what makes the bind address meaningful again.
+	if !isLoopbackHost(r.Host) {
+		http.Error(w, "the management API only answers requests addressed to loopback", http.StatusForbidden)
+		return false
+	}
+	// Browsers attach Origin to every cross-site request. Command line clients
+	// send none at all, which is why an absent header is allowed through.
+	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+		http.Error(w, "cross-origin requests are not accepted", http.StatusForbidden)
+		return false
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	// text/plain, form and multipart are the body types a page can post
+	// without a preflight. Insisting on JSON is what forces the preflight,
+	// which the Origin check above then fails.
+	if !hasJSONBody(r) {
+		http.Error(w, "Content-Type: application/json is required", http.StatusUnsupportedMediaType)
+		return false
+	}
+	return true
+}
+
+// isLoopbackHost reports whether an authority names this machine. The port is
+// irrelevant and a missing one is fine.
+func isLoopbackHost(authority string) bool {
+	host, _, err := net.SplitHostPort(authority)
+	if err != nil {
+		host = authority
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackOrigin reports whether an Origin header value is a page served from
+// this machine.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return isLoopbackHost(u.Host)
+}
+
+// hasJSONBody reports whether the request declares a JSON body.
+func hasJSONBody(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/json"
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdmin(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
@@ -321,7 +418,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.opts.Controller.Apply(r.Context(), cfg); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), applyStatus(err))
 			return
 		}
 		writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
@@ -333,6 +430,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdmin(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -346,13 +446,26 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.opts.Controller.Switch(r.Context(), body.Type); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), applyStatus(err))
 		return
 	}
 	writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
 }
 
+// applyStatus maps a settings failure onto a status code. A change that took
+// effect but could not be written to disk is the one case where the request
+// was fine and this side failed, so it is the only one that is not a 400.
+func applyStatus(err error) int {
+	if errors.Is(err, config.ErrNotSaved) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdmin(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

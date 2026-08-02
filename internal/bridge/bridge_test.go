@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -10,11 +11,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
+	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
@@ -270,6 +273,144 @@ func TestBridgeApplyRevertsWhenTheNewSourceCannotStart(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("the restored source is not producing frames")
+}
+
+// Building a driver only proves the settings parse. A driver that fails once
+// it is actually running -- no ffmpeg binary on disk, say -- must cost the
+// settings change rather than the source that was working a moment ago.
+func TestBridgeApplyRevertsWhenTheNewSourceFailsAsynchronously(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	// The device name is set, so the driver builds. It is ffmpeg that is
+	// missing, and UVC only finds that out inside Run.
+	broken := b.Snapshot()
+	broken.Source.Type = config.SourceUVC
+	broken.Source.UVC.Device = "camera"
+	broken.Source.UVC.FFmpegPath = filepath.Join(t.TempDir(), "no-such-ffmpeg")
+
+	if err := b.Apply(ctx, broken); err == nil {
+		t.Fatal("expected Apply to fail for a driver that cannot run")
+	}
+	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
+		t.Errorf("source type = %q, want the working mjpeg source to be restored", got)
+	}
+
+	before := frames.Stats().Published
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if frames.Stats().Published > before {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the restored source is not producing frames")
+}
+
+// Losing the write is not the same as losing the change, but the caller still
+// has to hear about it: what it just set will not survive a restart.
+func TestBridgeApplyReportsASaveFailure(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	// A directory sitting where the settings file belongs fails the rename
+	// without making anything else about the run unusual.
+	path := filepath.Join(t.TempDir(), config.FileName)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	b := New(mjpegConfig(upstream.URL), path, hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	updated := b.Snapshot()
+	updated.Transform.Rotate = 180
+
+	err := b.Apply(ctx, updated)
+	if !errors.Is(err, config.ErrNotSaved) {
+		t.Fatalf("Apply error = %v, want one wrapping config.ErrNotSaved", err)
+	}
+	// Only the write failed, so the change itself is still in effect.
+	if got := b.Snapshot().Transform.Rotate; got != 180 {
+		t.Errorf("rotate = %d, want the change to still be active", got)
+	}
+}
+
+// Settings the running process cannot adopt are refused, rather than accepted
+// and written to a file that then disagrees with what is running.
+func TestBridgeApplyRejectsSettingsThatNeedARestart(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	original := b.Snapshot().Server.Listen
+	moved := b.Snapshot()
+	moved.Server.Listen = "127.0.0.1:19999"
+
+	if err := b.Apply(ctx, moved); err == nil {
+		t.Fatal("expected a listen address change to be rejected, not silently ignored")
+	}
+	if got := b.Snapshot().Server.Listen; got != original {
+		t.Errorf("listen = %q, want it left at %q", got, original)
+	}
+}
+
+// streamConfiguratorFunc adapts a function to StreamConfigurator.
+type streamConfiguratorFunc func(core.MultipartEncoder, bool)
+
+func (f streamConfiguratorFunc) SetStreamOptions(enc core.MultipartEncoder, hold bool) {
+	f(enc, hold)
+}
+
+// The boundary and the extra headers exist to match whatever the PaperTracker
+// client parses today, so a change to them has to reach the server itself.
+func TestBridgeApplyReconfiguresTheStream(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+
+	var gotBoundary string
+	var gotHold bool
+	b.SetStreamConfigurator(streamConfiguratorFunc(func(enc core.MultipartEncoder, hold bool) {
+		gotBoundary, gotHold = enc.Boundary(), hold
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	updated := b.Snapshot()
+	updated.Server.Boundary = "othermark"
+	updated.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if gotBoundary != "othermark" || !gotHold {
+		t.Errorf("server was given boundary %q hold %v, want othermark true", gotBoundary, gotHold)
+	}
 }
 
 func TestBridgeApplyPersistsSettings(t *testing.T) {

@@ -180,6 +180,12 @@ func Load(path string) (Config, error) {
 	return cfg, cfg.Validate()
 }
 
+// ErrNotSaved marks a settings change that took effect but could not be
+// written to disk, and so will be lost on the next restart. Callers wrap it so
+// that the difference from "the change was rejected" survives the trip out to
+// the management API and the tray.
+var ErrNotSaved = errors.New("the settings are active but could not be saved")
+
 // Save writes the settings file, creating the folder if needed. The file is
 // written to a temporary name and renamed, so an interrupted write cannot
 // leave a truncated settings file behind.

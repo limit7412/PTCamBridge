@@ -82,9 +82,22 @@ func ValidateBoundary(s string) error {
 func (e MultipartEncoder) Boundary() string { return e.boundary }
 
 // ContentType is the response Content-Type for the stream endpoint.
+//
+// RFC 2046 allows delimiter characters that RFC 2045 does not allow in a bare
+// parameter token, so such a boundary is written as a quoted string. Left
+// unquoted, a value like "a:b" would make the whole media type unparsable and
+// a standards-compliant client could not find the delimiter at all.
 func (e MultipartEncoder) ContentType() string {
+	if strings.ContainsAny(e.boundary, nonTokenBoundaryChars) {
+		// ValidateBoundary rejects '"' and '\', so nothing needs escaping.
+		return `multipart/x-mixed-replace; boundary="` + e.boundary + `"`
+	}
 	return "multipart/x-mixed-replace; boundary=" + e.boundary
 }
+
+// nonTokenBoundaryChars are the characters ValidateBoundary accepts that are
+// not RFC 2045 token characters, and so force a quoted parameter.
+const nonTokenBoundaryChars = "()/:=?,"
 
 // AppendPart appends one encoded part to dst and returns the extended slice,
 // letting a writer reuse a single scratch buffer across frames.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
@@ -23,6 +24,21 @@ import (
 // add latency.
 const frameQueueDepth = 1
 
+// startGrace is how long a freshly started driver is watched for a fatal
+// error before the start counts as successful.
+//
+// A driver reports most failures asynchronously, because Run keeps retrying a
+// camera that is merely unplugged. The failures that retrying cannot fix -- no
+// ffmpeg binary, an unusable device name -- surface within a few milliseconds,
+// and Apply has to see them to be able to roll back to the previous source.
+const startGrace = 300 * time.Millisecond
+
+// StreamConfigurator receives the parts of a settings change that the HTTP
+// server owns and must adopt for itself.
+type StreamConfigurator interface {
+	SetStreamOptions(encoder core.MultipartEncoder, holdOnSourceLoss bool)
+}
+
 // Bridge owns the active source and republishes its frames on the hub.
 type Bridge struct {
 	hub    *hub.Hub
@@ -31,6 +47,10 @@ type Bridge struct {
 
 	// cfgPath is where Apply persists settings; empty disables persistence.
 	cfgPath string
+
+	// stream is told about settings the HTTP server has to reapply itself.
+	// It is set once during wiring, before anything can call Apply.
+	stream StreamConfigurator
 
 	mu      sync.Mutex
 	cfg     config.Config
@@ -44,6 +64,13 @@ type Bridge struct {
 // capturing.
 func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log *slog.Logger) *Bridge {
 	return &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg}
+}
+
+// SetStreamConfigurator registers the HTTP server so that Apply can hand it the
+// stream settings it owns. It must be called during wiring, before the
+// management API or the tray can reach Apply.
+func (b *Bridge) SetStreamConfigurator(sc StreamConfigurator) {
+	b.stream = sc
 }
 
 // Start begins capturing and keeps doing so until ctx is cancelled. The
@@ -76,6 +103,11 @@ func (b *Bridge) Snapshot() config.Config {
 // Apply adopts new settings, restarting the source, and persists them when a
 // config path was provided. The settings are only kept if the new source
 // starts, so a bad device name does not leave the bridge with nothing running.
+//
+// Settings that only take effect at startup are rejected rather than accepted
+// and quietly ignored; see restartRequired. A failure to persist is reported
+// as an error wrapping config.ErrNotSaved, because the caller has to know that
+// what it just changed will not survive a restart.
 func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
@@ -86,6 +118,17 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 	defer b.mu.Unlock()
 
 	previous := b.cfg
+	if err := restartRequired(previous, cfg); err != nil {
+		return err
+	}
+
+	// Build the encoder before anything is torn down: an unusable boundary
+	// should not cost the user the source that is running right now.
+	encoder, err := core.NewMultipartEncoder(cfg.Server.Boundary, cfg.StreamHeaders())
+	if err != nil {
+		return fmt.Errorf("server.boundary: %w", err)
+	}
+
 	b.stopLocked()
 	b.cfg = cfg
 
@@ -98,12 +141,34 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 		return err
 	}
 
+	if b.stream != nil {
+		b.stream.SetStreamOptions(encoder, cfg.Server.HoldOnSourceLoss)
+	}
+
 	if b.cfgPath != "" {
 		if err := config.Save(b.cfgPath, cfg); err != nil {
-			// The running configuration is already correct; only persistence
-			// failed, so report it without tearing anything down.
+			// The running configuration is already correct, so nothing is torn
+			// down; the caller is told so it can say the change is temporary.
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
+			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
+	}
+	return nil
+}
+
+// restartRequired rejects changes to settings that are only read while the
+// process starts. Accepting them would report success and persist the value
+// while the running bridge kept using the old one.
+func restartRequired(previous, next config.Config) error {
+	switch {
+	case previous.Server.Listen != next.Server.Listen:
+		return errors.New("server.listen cannot be changed while running: edit the settings file and restart")
+	case previous.Log.Level != next.Log.Level:
+		return errors.New("log.level cannot be changed while running: edit the settings file and restart")
+	case previous.Log.Dir != next.Log.Dir:
+		return errors.New("log.dir cannot be changed while running: edit the settings file and restart")
+	case previous.PaperTracker != next.PaperTracker:
+		return errors.New("papertracker settings are only read at startup: edit the settings file and restart")
 	}
 	return nil
 }
@@ -168,6 +233,10 @@ func (b *Bridge) Paused() bool {
 }
 
 // startLocked builds and launches the configured driver. The caller holds mu.
+//
+// It returns an error both for a driver that cannot be built and for one that
+// fails fatally within startGrace of being launched. Nothing is left running
+// in either case, so the caller is free to start a different configuration.
 func (b *Bridge) startLocked() error {
 	if b.root == nil || b.paused || b.root.Err() != nil {
 		return nil
@@ -180,6 +249,9 @@ func (b *Bridge) startLocked() error {
 	ctx, cancel := context.WithCancel(b.root)
 	frames := make(chan core.Frame, frameQueueDepth)
 	stopped := make(chan struct{})
+	// Buffered so the driver never blocks reporting a failure nobody is
+	// waiting for any more.
+	fatal := make(chan error, 1)
 
 	b.cancel = cancel
 	b.stopped = stopped
@@ -196,8 +268,11 @@ func (b *Bridge) startLocked() error {
 		// The driver owns the frame channel and closes it so the pump can
 		// drain what is already in flight before exiting.
 		defer close(frames)
+		// Run only returns on cancellation or on a failure retrying cannot
+		// fix, so any error here means this source will never produce a frame.
 		if err := drv.Run(ctx, frames); err != nil && ctx.Err() == nil {
 			log.Error("source stopped", "source", drv.Name(), "error", err)
+			fatal <- err
 		}
 	}()
 
@@ -210,6 +285,15 @@ func (b *Bridge) startLocked() error {
 		wg.Wait()
 		close(stopped)
 	}()
+
+	timer := time.NewTimer(startGrace)
+	defer timer.Stop()
+	select {
+	case err := <-fatal:
+		b.stopLocked()
+		return err
+	case <-timer.C:
+	}
 
 	b.log.Info("source started", "source", drv.Name())
 	return nil

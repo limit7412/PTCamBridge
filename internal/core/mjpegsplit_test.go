@@ -185,3 +185,41 @@ func TestBoundaryFromContentType(t *testing.T) {
 		}
 	}
 }
+
+// Without Content-Length the end of an image is found by walking its markers.
+// A frame that happens to carry the boundary bytes -- inside an EXIF blob here
+// -- must come through whole rather than being cut at the false delimiter.
+func TestSplitMultipartKeepsBoundaryBytesInsideAFrame(t *testing.T) {
+	jpg := injectAPP1(t, encodeJPEG(t, 16, 16), []byte("\r\n--b\r\nContent-Type: image/jpeg\r\n\r\n"))
+	if !bytes.Contains(jpg, []byte("--b")) {
+		t.Fatal("fixture does not contain the delimiter bytes")
+	}
+
+	var body []byte
+	body = append(body, "--b\r\nContent-Type: image/jpeg\r\n\r\n"...)
+	body = append(body, jpg...)
+	body = append(body, "\r\n--b--"...)
+
+	frames, _ := SplitMultipart(body, "b", 0)
+	if len(frames) != 1 {
+		t.Fatalf("got %d frames, want 1", len(frames))
+	}
+	if !bytes.Equal(frames[0], jpg) {
+		t.Errorf("frame is %d bytes, want the original %d", len(frames[0]), len(jpg))
+	}
+}
+
+// An upstream that sends a boundary and then dribbles header bytes without ever
+// terminating them must not be able to grow the reader's buffer without bound.
+func TestSplitMultipartBoundsUnterminatedHeaders(t *testing.T) {
+	buf := []byte("--b\r\nX-Filler: ")
+	buf = append(buf, bytes.Repeat([]byte("a"), 64<<10)...)
+
+	frames, rest := SplitMultipart(buf, "b", 0)
+	if len(frames) != 0 {
+		t.Fatalf("got %d frames, want none", len(frames))
+	}
+	if len(rest) > maxPartHeaderBytes {
+		t.Errorf("carried %d bytes forward, want at most %d", len(rest), maxPartHeaderBytes)
+	}
+}

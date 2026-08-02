@@ -362,11 +362,16 @@ type fakeController struct {
 	cfg      config.Config
 	switched string
 	applied  bool
+	// applyErr is what Apply returns, for the failure mappings.
+	applyErr error
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
 
 func (c *fakeController) Apply(_ context.Context, cfg config.Config) error {
+	if c.applyErr != nil {
+		return c.applyErr
+	}
 	c.cfg = cfg
 	c.applied = true
 	return nil
@@ -426,6 +431,7 @@ func TestManagementAPI(t *testing.T) {
 		body, _ := json.Marshal(updated)
 
 		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("put: %v", err)
@@ -443,6 +449,7 @@ func TestManagementAPI(t *testing.T) {
 
 	t.Run("put invalid config is rejected", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", strings.NewReader(`{"source":{"type":"nonsense"}}`))
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("put: %v", err)
@@ -477,6 +484,154 @@ func TestManagementAPI(t *testing.T) {
 			t.Errorf("status = %d, want 200", resp.StatusCode)
 		}
 	})
+}
+
+// Listening on loopback is not a control by itself: any page the user visits
+// can reach 127.0.0.1, and a form-style POST gets there without a preflight.
+// Such a request must not be able to take the camera away from the tracker.
+func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		origin      string
+		host        string
+		want        int
+	}{
+		{
+			// The bypass: text/plain is a simple request, so no preflight is
+			// ever made and the Origin check below never gets a chance to run.
+			name:        "simple post with a plain text body",
+			contentType: "text/plain;charset=UTF-8",
+			want:        http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "form post",
+			contentType: "application/x-www-form-urlencoded",
+			want:        http.StatusUnsupportedMediaType,
+		},
+		{
+			// A page that does send JSON triggers a preflight, and this is what
+			// the preflight fails on.
+			name:        "json post from a foreign page",
+			contentType: "application/json",
+			origin:      "https://evil.example",
+			want:        http.StatusForbidden,
+		},
+		{
+			// DNS rebinding: the name resolves to loopback but travels in Host.
+			name:        "rebound host name",
+			contentType: "application/json",
+			host:        "evil.example",
+			want:        http.StatusForbidden,
+		},
+		{
+			name:        "json post from a local page",
+			contentType: "application/json",
+			origin:      "http://127.0.0.1:18080",
+			want:        http.StatusOK,
+		},
+		{
+			// curl and the tray send no Origin at all.
+			name:        "json post with no origin",
+			contentType: "application/json",
+			want:        http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := &fakeController{cfg: config.Default()}
+			s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/source", strings.NewReader(`{"type":"serial"}`))
+			req.Header.Set("Content-Type", tc.contentType)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.host != "" {
+				req.Host = tc.host
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.want {
+				out, _ := io.ReadAll(resp.Body)
+				t.Errorf("status = %d, want %d: %s", resp.StatusCode, tc.want, out)
+			}
+			if switched := ctrl.switched != ""; switched != (tc.want == http.StatusOK) {
+				t.Errorf("controller switched = %v, but the request returned %d", switched, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// A change that took effect but could not be written is this side's failure,
+// not the caller's, and the two must not report the same way.
+func TestManagementAPIReportsASaveFailureSeparately(t *testing.T) {
+	ctrl := &fakeController{
+		cfg:      config.Default(),
+		applyErr: fmt.Errorf("%w to /nowhere: read-only file system", config.ErrNotSaved),
+	}
+	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	body, _ := json.Marshal(config.Default())
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 for a persistence failure", resp.StatusCode)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(out), "could not be saved") {
+		t.Errorf("body = %q, want it to say the settings were not saved", out)
+	}
+}
+
+// The boundary is the knob for matching a PaperTracker release, so changing it
+// has to reach the wire without a restart.
+func TestSetStreamOptionsAppliesToNewStreams(t *testing.T) {
+	s, frames, _ := newTestServer(t, Options{})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	frames.Publish(core.Frame{Data: testJPEG(t)})
+
+	updated, err := core.NewMultipartEncoder("othermark", nil)
+	if err != nil {
+		t.Fatalf("NewMultipartEncoder: %v", err)
+	}
+	s.SetStreamOptions(updated, false)
+
+	resp, err := http.Get(ts.URL + "/stream")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	boundary, ok := core.BoundaryFromContentType(resp.Header.Get("Content-Type"))
+	if !ok || boundary != "othermark" {
+		t.Fatalf("boundary = %q (ok=%v), want othermark", boundary, ok)
+	}
+
+	buf := make([]byte, 64)
+	n, _ := io.ReadFull(resp.Body, buf)
+	if !bytes.Contains(buf[:n], []byte("--othermark")) {
+		t.Errorf("first part = %q, want it delimited by the new boundary", buf[:n])
+	}
 }
 
 func TestUnknownPathIsNotFound(t *testing.T) {

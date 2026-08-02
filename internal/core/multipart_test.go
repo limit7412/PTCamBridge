@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"fmt"
+	"mime"
 	"strings"
 	"testing"
 )
@@ -118,5 +119,31 @@ func TestEncodeSplitRoundTrip(t *testing.T) {
 	}
 	if len(rest) > len("--rt") {
 		t.Errorf("leftover of %d bytes is larger than a partial delimiter", len(rest))
+	}
+}
+
+// RFC 2046 allows delimiter characters that RFC 2045 does not allow in a bare
+// parameter token. Written unquoted, such a boundary makes the whole media
+// type unparsable and a compliant client cannot find the delimiter at all.
+func TestContentTypeQuotesANonTokenBoundary(t *testing.T) {
+	enc, err := NewMultipartEncoder("a:b/c", nil)
+	if err != nil {
+		t.Fatalf("NewMultipartEncoder: %v", err)
+	}
+
+	ct := enc.ContentType()
+	if want := `multipart/x-mixed-replace; boundary="a:b/c"`; ct != want {
+		t.Errorf("ContentType() = %q, want %q", ct, want)
+	}
+
+	mediaType, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		t.Fatalf("ParseMediaType(%q): %v", ct, err)
+	}
+	if mediaType != "multipart/x-mixed-replace" || params["boundary"] != "a:b/c" {
+		t.Errorf("parsed %q %v, want the boundary back intact", mediaType, params)
+	}
+	if got, ok := BoundaryFromContentType(ct); !ok || got != "a:b/c" {
+		t.Errorf("BoundaryFromContentType = %q (ok=%v), want a:b/c", got, ok)
 	}
 }

@@ -167,6 +167,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The stream settings exist to match whatever the PaperTracker client
+	// currently parses, so a change to them has to reach the server without
+	// going through a restart.
+	app.SetStreamConfigurator(srv)
 
 	if cfg.PaperTracker.WriteCache {
 		if err := papertracker.WriteCache(cfg.PaperTracker.InstallDir, address); err != nil {

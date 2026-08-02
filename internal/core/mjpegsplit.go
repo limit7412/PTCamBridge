@@ -155,12 +155,18 @@ func SplitJPEGStream(buf []byte, maxSize int) (frames [][]byte, rest []byte) {
 	}
 }
 
+// maxPartHeaderBytes bounds the header block of a single multipart part. A
+// part whose headers are not terminated within this much data is treated as a
+// false delimiter match rather than as a part still arriving, which stops a
+// broken upstream from growing the reader's buffer without limit.
+const maxPartHeaderBytes = 8 << 10
+
 // SplitMultipart extracts JPEG frames from a multipart/x-mixed-replace body.
 //
-// Content-Length is honoured when the upstream part provides it and the body
-// is delimited by the next boundary otherwise, which keeps the reader working
-// against firmware that omits the header. Parts whose payload is not a valid
-// JPEG are dropped rather than forwarded.
+// Content-Length is honoured when the upstream part provides it. Otherwise the
+// body is measured by walking the JPEG structure, which keeps the reader
+// working against firmware that omits the header. Parts whose payload is not a
+// valid JPEG are dropped rather than forwarded.
 //
 // Frames are copies and safe to retain; rest aliases buf.
 func SplitMultipart(buf []byte, boundary string, maxSize int) (frames [][]byte, rest []byte) {
@@ -189,7 +195,14 @@ func SplitMultipart(buf []byte, boundary string, maxSize int) (frames [][]byte, 
 		}
 
 		hdrLen, bodyOff, ok := findHeaderEnd(buf[afterDelim:])
-		if !ok {
+		if !ok || hdrLen > maxPartHeaderBytes {
+			if len(buf)-afterDelim > maxPartHeaderBytes {
+				// Either these bytes are not a part header at all or the
+				// upstream is malformed; resynchronise past this delimiter
+				// instead of buffering everything that follows it.
+				pos = afterDelim
+				continue
+			}
 			return frames, buf[start:]
 		}
 		headers := buf[afterDelim : afterDelim+hdrLen]
@@ -207,22 +220,63 @@ func SplitMultipart(buf []byte, boundary string, maxSize int) (frames [][]byte, 
 			body = buf[bodyAt : bodyAt+n]
 			pos = bodyAt + n
 		} else {
-			nidx := bytes.Index(buf[bodyAt:], delim)
-			if nidx < 0 {
+			// Without Content-Length the end of the image has to be found by
+			// walking its marker structure. Searching for the next delimiter
+			// instead would truncate any frame that happens to contain the
+			// boundary bytes inside entropy-coded data or an EXIF blob.
+			n, err := ScanJPEG(buf[bodyAt:], maxSize)
+			switch {
+			case err == nil:
+				body = buf[bodyAt : bodyAt+n]
+				pos = bodyAt + n
+			case errors.Is(err, ErrIncompleteJPEG):
 				if len(buf)-bodyAt > maxSize {
 					pos = afterDelim
 					continue
 				}
 				return frames, buf[start:]
+			default:
+				// Not an image. Skip the part by finding the delimiter that
+				// ends it, anchored to the start of a line as MIME requires.
+				nidx := indexDelimiter(buf[bodyAt:], delim)
+				if nidx < 0 {
+					if len(buf)-bodyAt > maxSize {
+						pos = afterDelim
+						continue
+					}
+					return frames, buf[start:]
+				}
+				pos = bodyAt + nidx
+				continue
 			}
-			body = trimTrailingNewline(buf[bodyAt : bodyAt+nidx])
-			pos = bodyAt + nidx
 		}
 
 		if ValidateJPEG(body, maxSize) == nil {
 			frames = append(frames, bytes.Clone(body))
 		}
 	}
+}
+
+// indexDelimiter finds the next multipart delimiter that begins a line, and
+// returns the offset of the line break in front of it. A plain search would
+// also match the same bytes occurring inside a part body, which MIME does not
+// allow a delimiter to be.
+func indexDelimiter(buf, delim []byte) int {
+	for off := 0; off < len(buf); {
+		idx := bytes.Index(buf[off:], delim)
+		if idx < 0 {
+			return -1
+		}
+		at := off + idx
+		switch {
+		case at >= 2 && buf[at-2] == '\r' && buf[at-1] == '\n':
+			return at - 2
+		case at >= 1 && buf[at-1] == '\n':
+			return at - 1
+		}
+		off = at + 1
+	}
+	return -1
 }
 
 // findHeaderEnd locates the blank line separating part headers from the part
@@ -257,18 +311,6 @@ func contentLength(headers []byte) (int, bool) {
 		return n, true
 	}
 	return 0, false
-}
-
-// trimTrailingNewline removes the single line break that separates a part body
-// from the boundary that follows it.
-func trimTrailingNewline(b []byte) []byte {
-	if bytes.HasSuffix(b, []byte("\r\n")) {
-		return b[:len(b)-2]
-	}
-	if bytes.HasSuffix(b, []byte("\n")) {
-		return b[:len(b)-1]
-	}
-	return b
 }
 
 // BoundaryFromContentType pulls the boundary parameter out of a
