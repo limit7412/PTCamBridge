@@ -210,6 +210,14 @@ func LoadFile(path string) (Config, error) {
 	return cfg, nil
 }
 
+// EnvInstallDir overrides papertracker.install_dir.
+//
+// It is exported because restoring the client's address reads that one setting
+// on its own, outside the usual layering, and has to honour the same override:
+// a folder named only by this variable is a folder the bridge writes to, so it
+// is a folder the bridge has to be able to undo.
+const EnvInstallDir = "PAPERBRIDGE_PAPERTRACKER_DIR"
+
 // InstallDirFromFile reads papertracker.install_dir and nothing else.
 //
 // Restoring the client's address has to work on a settings file the bridge
@@ -293,7 +301,7 @@ func (c *Config) ApplyEnv(get envLookup) error {
 	setString(get, "PAPERBRIDGE_SERIAL_PORT", &c.Source.Serial.Port)
 	fail(setInt(get, "PAPERBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud))
 	setString(get, "PAPERBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
-	setString(get, "PAPERBRIDGE_PAPERTRACKER_DIR", &c.PaperTracker.InstallDir)
+	setString(get, EnvInstallDir, &c.PaperTracker.InstallDir)
 	fail(setBool(get, "PAPERBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
 	setString(get, "PAPERBRIDGE_LOG_LEVEL", &c.Log.Level)
 	setString(get, "PAPERBRIDGE_LOG_DIR", &c.Log.Dir)
@@ -374,8 +382,18 @@ func (c Config) Validate() error {
 	// the client pointed at a port that is gone. It also means the address
 	// changes on every start, so anything that wrote it down is wrong by the
 	// next sign-in.
-	if port == "0" {
-		return errors.New("server.listen must name a fixed port: 0 asks for a different one on every start, which leaves the client pointing at an address that no longer exists and lets a second copy of PaperBridge run alongside this one")
+	//
+	// The number is what matters, not how it is spelt: "00", "+0" and the empty
+	// port in "127.0.0.1:" all reach net.Listen as zero. A name from the
+	// services file would resolve too, and is refused for a duller reason --
+	// the address is written into another application's settings file, so it
+	// should say the same thing there as it does here.
+	number, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("server.listen %q must end in a port number", c.Server.Listen)
+	}
+	if number <= 0 || number > 65535 {
+		return fmt.Errorf("server.listen must name a fixed port between 1 and 65535, got %d: port 0 asks for a different one on every start, which leaves the client pointing at an address that no longer exists and lets a second copy of PaperBridge run alongside this one", number)
 	}
 	if err := core.ValidateBoundary(c.Server.Boundary); err != nil {
 		return fmt.Errorf("server.boundary: %w", err)

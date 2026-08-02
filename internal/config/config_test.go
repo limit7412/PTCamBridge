@@ -188,6 +188,15 @@ func TestValidate(t *testing.T) {
 		// guard: a second copy takes a port of its own and rewrites the cache.
 		{"ephemeral port", func(c *Config) { c.Server.Listen = "127.0.0.1:0" }, "server.listen"},
 		{"ephemeral port on a wildcard bind", func(c *Config) { c.Server.Listen = ":0" }, "server.listen"},
+		// net.Listen reads all of these as port 0 as well, so rejecting only the
+		// literal "0" would leave the same hole open behind a different spelling.
+		{"padded zero port", func(c *Config) { c.Server.Listen = "127.0.0.1:00" }, "server.listen"},
+		{"signed zero port", func(c *Config) { c.Server.Listen = "127.0.0.1:+0" }, "server.listen"},
+		{"missing port", func(c *Config) { c.Server.Listen = "127.0.0.1:" }, "server.listen"},
+		// A service name resolves too, and the address is written into another
+		// application's settings file, so it has to say the same thing there.
+		{"service name", func(c *Config) { c.Server.Listen = "127.0.0.1:http" }, "server.listen"},
+		{"port out of range", func(c *Config) { c.Server.Listen = "127.0.0.1:70000" }, "server.listen"},
 		{"bad boundary", func(c *Config) { c.Server.Boundary = "has space" }, "server.boundary"},
 		{"bad source", func(c *Config) { c.Source.Type = "webcam" }, "source.type"},
 		{"bad rotate", func(c *Config) { c.Transform.Rotate = 45 }, "transform"},

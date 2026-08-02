@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -526,6 +527,14 @@ func restoreCache(opts options) error {
 // uninstalling PaperBridge away with "nothing was changed" while their client
 // still points at it.
 func configuredInstallDir(opts options) string {
+	// The environment outranks the file here as it does everywhere else. A
+	// folder named only by PAPERBRIDGE_PAPERTRACKER_DIR is one the bridge has
+	// been writing to, and it is very likely not among the usual places the
+	// search covers -- so ignoring the variable would mean saying "nothing was
+	// changed" about the one client that was.
+	if dir := strings.TrimSpace(os.Getenv(config.EnvInstallDir)); dir != "" {
+		return dir
+	}
 	cfgPath, err := resolveConfigPath(opts.configPath)
 	if err != nil {
 		return ""

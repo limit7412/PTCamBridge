@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/papertracker"
 )
 
@@ -183,6 +184,44 @@ func TestRestoreReadsInstallDirFromAnOtherwiseUnusableSettingsFile(t *testing.T)
 	opts := options{configPath: cfgPath}
 	if got := configuredInstallDir(opts); got != install {
 		t.Fatalf("configuredInstallDir() = %q, want %q even though the file has a bad key", got, install)
+	}
+	if err := restoreCache(opts); err != nil {
+		t.Fatalf("restoreCache: %v", err)
+	}
+	if got, err := papertracker.ReadCache(install); err != nil || got != "192.168.1.50" {
+		t.Errorf("ReadCache() = %q, %v, want the camera address back", got, err)
+	}
+}
+
+// The folder can be named only by the environment, and a folder the bridge
+// writes to is a folder it has to be able to undo. Reading just the file here
+// would report "nothing was changed" about the one client that was.
+func TestRestoreHonoursTheInstallDirEnvironmentVariable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("ProgramFiles", t.TempDir())
+	t.Setenv("ProgramFiles(x86)", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	// Somewhere the search will not look, named only by the variable.
+	install := filepath.Join(t.TempDir(), "PaperTracker Portable")
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(papertracker.CachePath(install), []byte("192.168.1.50"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := papertracker.WriteCache(install, "127.0.0.1:18080"); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+	t.Setenv(config.EnvInstallDir, install)
+
+	// No settings file at all, as after an uninstall.
+	opts := options{configPath: filepath.Join(t.TempDir(), "gone.toml")}
+	if got := configuredInstallDir(opts); got != install {
+		t.Fatalf("configuredInstallDir() = %q, want the folder from %s", got, config.EnvInstallDir)
 	}
 	if err := restoreCache(opts); err != nil {
 		t.Fatalf("restoreCache: %v", err)
