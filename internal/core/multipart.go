@@ -1,0 +1,114 @@
+package core
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// DefaultBoundary is the multipart delimiter PaperBridge advertises.
+const DefaultBoundary = "paperbridge"
+
+// ErrInvalidBoundary is returned for a boundary that cannot be written into a
+// Content-Type header or a delimiter line.
+var ErrInvalidBoundary = errors.New("invalid multipart boundary")
+
+// StreamHeader is an extra part header appended to every frame. The PaperTracker
+// client is closed source and its parser has changed between releases, so the
+// header set is configurable rather than fixed.
+type StreamHeader struct {
+	Name  string
+	Value string
+}
+
+// MultipartEncoder renders frames in the multipart/x-mixed-replace form the
+// PaperTracker client expects:
+//
+//	--boundary\r\n
+//	Content-Type: image/jpeg\r\n
+//	Content-Length: N\r\n
+//	\r\n
+//	<N bytes of JPEG>\r\n
+//
+// Content-Length is mandatory: the client sizes each frame from it, and
+// omitting it makes the client lose frame boundaries. Chunked transfer
+// encoding is never used; the body is written as an unbounded stream.
+type MultipartEncoder struct {
+	boundary string
+	extra    []StreamHeader
+}
+
+// NewMultipartEncoder validates the boundary and returns an encoder for it. An
+// empty boundary selects DefaultBoundary.
+func NewMultipartEncoder(boundary string, extra []StreamHeader) (MultipartEncoder, error) {
+	if boundary == "" {
+		boundary = DefaultBoundary
+	}
+	if err := ValidateBoundary(boundary); err != nil {
+		return MultipartEncoder{}, err
+	}
+	for _, h := range extra {
+		if strings.ContainsAny(h.Name, ":\r\n") || h.Name == "" {
+			return MultipartEncoder{}, fmt.Errorf("invalid extra header name %q", h.Name)
+		}
+		if strings.ContainsAny(h.Value, "\r\n") {
+			return MultipartEncoder{}, fmt.Errorf("invalid extra header value for %q", h.Name)
+		}
+	}
+	return MultipartEncoder{boundary: boundary, extra: append([]StreamHeader(nil), extra...)}, nil
+}
+
+// ValidateBoundary reports whether s is usable as a multipart delimiter.
+func ValidateBoundary(s string) error {
+	if s == "" {
+		return fmt.Errorf("%w: empty", ErrInvalidBoundary)
+	}
+	if len(s) > 70 {
+		return fmt.Errorf("%w: longer than 70 characters", ErrInvalidBoundary)
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("'()+_,-./:=?", r):
+		default:
+			return fmt.Errorf("%w: character %q is not allowed", ErrInvalidBoundary, r)
+		}
+	}
+	return nil
+}
+
+// Boundary reports the delimiter in use.
+func (e MultipartEncoder) Boundary() string { return e.boundary }
+
+// ContentType is the response Content-Type for the stream endpoint.
+func (e MultipartEncoder) ContentType() string {
+	return "multipart/x-mixed-replace; boundary=" + e.boundary
+}
+
+// AppendPart appends one encoded part to dst and returns the extended slice,
+// letting a writer reuse a single scratch buffer across frames.
+func (e MultipartEncoder) AppendPart(dst, jpeg []byte) []byte {
+	dst = append(dst, "--"...)
+	dst = append(dst, e.boundary...)
+	dst = append(dst, "\r\n"...)
+	dst = append(dst, "Content-Type: image/jpeg\r\n"...)
+	dst = append(dst, "Content-Length: "...)
+	dst = strconv.AppendInt(dst, int64(len(jpeg)), 10)
+	dst = append(dst, "\r\n"...)
+	for _, h := range e.extra {
+		dst = append(dst, h.Name...)
+		dst = append(dst, ": "...)
+		dst = append(dst, h.Value...)
+		dst = append(dst, "\r\n"...)
+	}
+	dst = append(dst, "\r\n"...)
+	dst = append(dst, jpeg...)
+	dst = append(dst, "\r\n"...)
+	return dst
+}
+
+// EncodePart returns one encoded part as a fresh buffer.
+func (e MultipartEncoder) EncodePart(jpeg []byte) []byte {
+	return e.AppendPart(nil, jpeg)
+}
