@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -132,18 +133,27 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 		return fmt.Errorf("server.boundary: %w", err)
 	}
 
-	b.stopLocked()
-	b.cfg = cfg
+	if captureUnchanged(previous, cfg) {
+		// Only the server-side settings moved, so the camera is left alone.
+		// Restarting it would interrupt the stream for nothing, and the
+		// verification below would reject the change outright while the camera
+		// happened to be reconnecting -- including hold_on_source_loss, which
+		// is the setting for exactly that situation.
+		b.cfg = cfg
+	} else {
+		b.stopLocked()
+		b.cfg = cfg
 
-	if err := b.startLocked(true); err != nil {
-		b.log.Error("new settings could not start a source, reverting", "error", err)
-		b.cfg = previous
-		// The previous source was working, so it is put back without being
-		// made to prove itself again.
-		if revertErr := b.startLocked(false); revertErr != nil {
-			return fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
+		if err := b.startLocked(true); err != nil {
+			b.log.Error("new settings could not start a source, reverting", "error", err)
+			b.cfg = previous
+			// The previous source was working, so it is put back without being
+			// made to prove itself again.
+			if revertErr := b.startLocked(false); revertErr != nil {
+				return fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
+			}
+			return err
 		}
-		return err
 	}
 
 	if b.stream != nil {
@@ -159,6 +169,14 @@ func (b *Bridge) Apply(_ context.Context, cfg config.Config) error {
 		}
 	}
 	return nil
+}
+
+// captureUnchanged reports whether two settings would build and run the same
+// source, which is what decides if a change has to interrupt the camera.
+//
+// Source carries a slice, so this cannot be a plain comparison.
+func captureUnchanged(previous, next config.Config) bool {
+	return reflect.DeepEqual(previous.Source, next.Source) && previous.Transform == next.Transform
 }
 
 // restartRequired rejects changes to settings that are only read while the
@@ -251,19 +269,23 @@ func (b *Bridge) startLocked(verify bool) error {
 		// produce a driver. Accepting them unchecked while paused would save a
 		// configuration that Resume then cannot start, with the previous
 		// working one already gone.
-		_, err := b.newSource(b.status)
+		_, err := b.newSource()
 		return err
 	}
 
-	// The reporter is how a driver announces its first frame, so wrapping it
-	// is what turns "started" into "working" without the driver knowing.
-	firstFrame := make(chan struct{})
-	reporter := &frameWatcher{inner: b.status, seen: firstFrame}
-
-	drv, err := b.newSource(reporter)
+	drv, err := b.newSource()
 	if err != nil {
 		return err
 	}
+
+	// Verification watches the hub, not the driver. A driver announces a
+	// frame as soon as it has parsed one, but the transform sits between
+	// there and the hub and can still drop it -- an image over the pixel
+	// limit, or one the decoder rejects. Only a frame that reached the hub
+	// means a client would see anything.
+	published := make(chan struct{})
+	var publishedOnce sync.Once
+	onPublish := func() { publishedOnce.Do(func() { close(published) }) }
 
 	ctx, cancel := context.WithCancel(b.root)
 	frames := make(chan core.Frame, frameQueueDepth)
@@ -297,7 +319,7 @@ func (b *Bridge) startLocked(verify bool) error {
 
 	go func() {
 		defer wg.Done()
-		pump(frames, transform, b.hub, log)
+		pump(frames, transform, b.hub, log, onPublish)
 	}()
 
 	go func() {
@@ -313,7 +335,7 @@ func (b *Bridge) startLocked(verify bool) error {
 	timer := time.NewTimer(startVerifyTimeout)
 	defer timer.Stop()
 	select {
-	case <-firstFrame:
+	case <-published:
 	case err := <-failed:
 		b.stopLocked()
 		return err
@@ -321,30 +343,15 @@ func (b *Bridge) startLocked(verify bool) error {
 		b.stopLocked()
 		return fmt.Errorf("bridge: %s produced no frame within %s", drv.Name(), startVerifyTimeout)
 	case <-b.root.Done():
-		return nil
+		// Shutting down is not proof that anything works. Reporting success
+		// here would persist a configuration nothing ever verified, and the
+		// next run would start on it.
+		b.stopLocked()
+		return errors.New("bridge: shutting down before the new source produced a frame")
 	}
 
 	b.log.Info("source started", "source", drv.Name())
 	return nil
-}
-
-// frameWatcher closes seen the first time a driver reports a frame, and
-// otherwise forwards everything to the tracker unchanged.
-type frameWatcher struct {
-	inner source.Reporter
-	seen  chan struct{}
-	once  sync.Once
-}
-
-func (w *frameWatcher) Connected(name string) {
-	w.once.Do(func() { close(w.seen) })
-	w.inner.Connected(name)
-}
-
-func (w *frameWatcher) Disconnected(name string, err error) {
-	// Deliberately not a verdict: the first attempt failing is normal for a
-	// camera that has to fall back from passthrough to re-encoding.
-	w.inner.Disconnected(name, err)
 }
 
 // stopLocked cancels the running driver and waits for it to exit. Waiting is
@@ -360,8 +367,9 @@ func (b *Bridge) stopLocked() {
 	b.status.SetSource("")
 }
 
-// pump applies the optional transform and publishes each frame.
-func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger) {
+// pump applies the optional transform and publishes each frame, calling
+// onPublish for every frame that makes it to the hub.
+func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger, onPublish func()) {
 	for frame := range frames {
 		if !transform.IsNoop() {
 			data, err := transform.Apply(frame.Data)
@@ -372,12 +380,12 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 			frame.Data = data
 		}
 		h.Publish(frame)
+		onPublish()
 	}
 }
 
-// newSource builds the driver named by the current settings, reporting its
-// connection state to reporter.
-func (b *Bridge) newSource(reporter source.Reporter) (source.Source, error) {
+// newSource builds the driver named by the current settings.
+func (b *Bridge) newSource() (source.Source, error) {
 	cfg := b.cfg
 	switch cfg.Source.Type {
 	case config.SourceUVC:
@@ -387,7 +395,7 @@ func (b *Bridge) newSource(reporter source.Reporter) (source.Source, error) {
 			Framerate:    cfg.Source.UVC.Framerate,
 			FFmpegPath:   cfg.Source.UVC.FFmpegPath,
 			MaxFrameSize: cfg.Source.MaxFrameSize,
-		}, b.log, reporter)
+		}, b.log, b.status)
 
 	case config.SourceSerial:
 		return source.NewSerial(source.SerialConfig{
@@ -395,13 +403,13 @@ func (b *Bridge) newSource(reporter source.Reporter) (source.Source, error) {
 			Baud:         cfg.Source.Serial.Baud,
 			Header:       cfg.SerialHeader(),
 			MaxFrameSize: cfg.Source.MaxFrameSize,
-		}, b.log, reporter)
+		}, b.log, b.status)
 
 	case config.SourceMJPEG:
 		return source.NewMJPEGProxy(source.MJPEGConfig{
 			URL:          cfg.Source.MJPEG.URL,
 			MaxFrameSize: cfg.Source.MaxFrameSize,
-		}, b.log, reporter)
+		}, b.log, b.status)
 
 	default:
 		return nil, fmt.Errorf("bridge: unknown source type %q", cfg.Source.Type)

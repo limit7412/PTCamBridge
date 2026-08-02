@@ -111,23 +111,25 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	stall := time.AfterFunc(p.cfg.StallTimeout, cancel)
-	defer stall.Stop()
-
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, p.cfg.URL, nil)
 	if err != nil {
 		return fatalf(fmt.Errorf("mjpeg: build request: %w", err))
 	}
 	req.Header.Set("Accept", "multipart/x-mixed-replace, image/jpeg")
 
+	// Getting this far is the transport's job, bounded by its own
+	// ResponseHeaderTimeout. The stall timer must not start until the
+	// response is in hand: started any earlier it spends its budget on DNS,
+	// TCP, TLS and the header wait, and a camera that takes a moment to
+	// answer would have the body cancelled out from under it.
 	resp, err := p.client.Do(req)
 	if err != nil {
-		if ctx.Err() == nil && reqCtx.Err() != nil {
-			return fmt.Errorf("mjpeg: %s sent nothing for %s", p.safeURL, p.cfg.StallTimeout)
-		}
 		return fmt.Errorf("mjpeg: connect to %s: %w", p.safeURL, err)
 	}
 	defer resp.Body.Close()
+
+	stall := time.AfterFunc(p.cfg.StallTimeout, cancel)
+	defer stall.Stop()
 
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("mjpeg: %s returned %s", p.safeURL, resp.Status)

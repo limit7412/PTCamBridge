@@ -364,3 +364,54 @@ func TestNewMJPEGProxyRejectsAURLWithNoHost(t *testing.T) {
 		}
 	}
 }
+
+// The stall timer must not start until the response is in hand. Started before
+// the request it spends its budget on connecting, so a camera that answers
+// slowly but streams fine gets its body cancelled out from under it.
+func TestMJPEGProxyStallTimerStartsAfterTheResponse(t *testing.T) {
+	jpg := testJPEG(t)
+	// Headers after most of the stall budget, then frames at a normal rate.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for {
+			fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
+			if _, err := w.Write(jpg); err != nil {
+				return
+			}
+			fmt.Fprint(w, "\r\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}))
+	defer ts.Close()
+
+	p, err := NewMJPEGProxy(MJPEGConfig{
+		URL:            ts.URL,
+		ConnectTimeout: 2 * time.Second,
+		StallTimeout:   500 * time.Millisecond,
+	}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	out := make(chan core.Frame, 8)
+	go func() { _ = p.session(ctx, out) }()
+
+	select {
+	case <-out:
+	case <-ctx.Done():
+		t.Fatal("no frame arrived: the stall budget was spent before the response")
+	}
+}

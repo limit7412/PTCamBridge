@@ -30,6 +30,16 @@ const readChunk = 64 << 10
 // failure.
 const stderrTail = 4 << 10
 
+// defaultUVCStallTimeout is how long ffmpeg may produce nothing before the
+// child is killed and the attempt retried.
+//
+// A wedged USB camera or DirectShow filter leaves ffmpeg running and silent
+// rather than exiting, and a blocking read on its stdout never returns. The
+// reconnect loop is downstream of that read, so without this the bridge stays
+// dead until the user restarts it. The window has to cover ffmpeg's own
+// startup, which on Windows takes a second or two before the first frame.
+const defaultUVCStallTimeout = 10 * time.Second
+
 // UVCConfig configures the ffmpeg-backed camera driver.
 type UVCConfig struct {
 	// Device is the platform capture device: a DirectShow friendly name on
@@ -43,6 +53,9 @@ type UVCConfig struct {
 	FFmpegPath string
 	// MaxFrameSize bounds a single JPEG; zero selects the core default.
 	MaxFrameSize int
+	// StallTimeout is how long ffmpeg may produce nothing before it is killed
+	// and the attempt retried; zero selects defaultUVCStallTimeout.
+	StallTimeout time.Duration
 }
 
 // UVC captures from a camera by reading ffmpeg's MJPEG output.
@@ -63,6 +76,9 @@ func NewUVC(cfg UVCConfig, log *slog.Logger, reporter Reporter) (*UVC, error) {
 	if reporter == nil {
 		reporter = NopReporter{}
 	}
+	if cfg.StallTimeout <= 0 {
+		cfg.StallTimeout = defaultUVCStallTimeout
+	}
 	return &UVC{cfg: cfg, log: log, reporter: reporter, copyCodec: true}, nil
 }
 
@@ -77,10 +93,16 @@ func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 		// driver keeps retrying and a camera attached later is picked up. It
 		// is the bridge that decides whether a source is working, by waiting
 		// for the first frame when the caller needs an answer.
-		frames, err := u.capture(ctx, out, u.copyCodec)
-		if err != nil && frames == 0 && u.copyCodec {
-			// The camera never produced a frame in passthrough mode, so it
-			// most likely has no MJPEG output format. Re-encode from here on.
+		frames, diag, err := u.capture(ctx, out, u.copyCodec)
+		if err != nil && frames == 0 && u.copyCodec && !deviceUnavailable(diag) {
+			// The device opened and still produced nothing in passthrough
+			// mode, so it most likely has no MJPEG output format. Re-encode
+			// from here on.
+			//
+			// The diagnostic is checked because this latch is permanent: a
+			// camera that was merely not plugged in yet fails the same way,
+			// and letting that turn passthrough off would cost every later
+			// frame a decode and re-encode for the life of the process.
 			u.copyCodec = false
 			u.log.Info("camera did not deliver MJPEG, switching to re-encoding", "device", u.cfg.Device)
 		}
@@ -89,52 +111,92 @@ func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 }
 
 // capture runs one ffmpeg process to completion and returns how many frames it
-// yielded.
-func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, error) {
+// yielded along with ffmpeg's diagnostic output.
+func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, string, error) {
 	path, err := u.ffmpegPath()
 	if err != nil {
-		return 0, fatalf(err)
+		return 0, "", fatalf(err)
 	}
 	args := u.args(copyCodec)
 	u.log.Debug("starting ffmpeg", "path", path, "args", strings.Join(args, " "))
 
-	cmd := exec.CommandContext(ctx, path, args...)
+	// Killing the child is what unblocks the read: a silent ffmpeg that is
+	// still running holds the pipe open, so there is nothing to time out on
+	// the reading side.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	stall := time.AfterFunc(u.cfg.StallTimeout, cancelRun)
+	defer stall.Stop()
+
+	cmd := exec.CommandContext(runCtx, path, args...)
 	configureChildProcess(cmd)
 	// Without a delay a killed ffmpeg can leave the pipe open and wedge Wait.
 	cmd.WaitDelay = 5 * time.Second
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return 0, fmt.Errorf("uvc: stdout pipe: %w", err)
+		return 0, "", fmt.Errorf("uvc: stdout pipe: %w", err)
 	}
 	diag := &tailWriter{max: stderrTail}
 	cmd.Stderr = diag
 
 	if err := cmd.Start(); err != nil {
-		return 0, fatalf(fmt.Errorf("uvc: start ffmpeg: %w", err))
+		return 0, "", fatalf(fmt.Errorf("uvc: start ffmpeg: %w", err))
 	}
 
-	frames, readErr := u.pump(ctx, stdout, out)
+	frames, readErr := u.pump(ctx, stdout, out, func() {
+		stall.Reset(u.cfg.StallTimeout)
+	})
 	waitErr := cmd.Wait()
 	stderr := diag.String()
 
 	// Waiting for the child guarantees the device is released before a source
 	// switch opens it again; UVC access is exclusive.
 	if ctx.Err() != nil {
-		return frames, nil
+		return frames, stderr, nil
 	}
 	switch {
+	case runCtx.Err() != nil:
+		return frames, stderr, fmt.Errorf("uvc: %s produced nothing for %s (ffmpeg: %s)", u.cfg.Device, u.cfg.StallTimeout, stderr)
 	case readErr != nil:
-		return frames, fmt.Errorf("uvc: %w (ffmpeg: %s)", readErr, stderr)
+		return frames, stderr, fmt.Errorf("uvc: %w (ffmpeg: %s)", readErr, stderr)
 	case waitErr != nil:
-		return frames, fmt.Errorf("uvc: ffmpeg exited: %w (%s)", waitErr, stderr)
+		return frames, stderr, fmt.Errorf("uvc: ffmpeg exited: %w (%s)", waitErr, stderr)
 	default:
-		return frames, fmt.Errorf("uvc: ffmpeg exited without error (%s)", stderr)
+		return frames, stderr, fmt.Errorf("uvc: ffmpeg exited without error (%s)", stderr)
 	}
 }
 
-// pump reads ffmpeg's MJPEG stdout and forwards each complete image.
-func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame) (uint64, error) {
+// deviceUnavailableSigns are the ffmpeg diagnostics that mean the device could
+// not be opened at all, as opposed to one that opened and could not deliver
+// MJPEG. Matching text is a heuristic, so it only guards the codec fallback
+// and never a decision to stop retrying: a missed match costs a needless
+// re-encode, which is what happened unconditionally before.
+var deviceUnavailableSigns = []string{
+	"could not find video device",       // dshow
+	"could not enumerate video devices", // dshow
+	"cannot open video device",          // v4l2
+	"could not open video device",
+	"no such file or directory", // v4l2
+	"video device not found",    // avfoundation
+}
+
+// deviceUnavailable reports whether an ffmpeg diagnostic blames the device
+// rather than the format asked of it.
+func deviceUnavailable(diag string) bool {
+	lower := strings.ToLower(diag)
+	for _, sign := range deviceUnavailableSigns {
+		if strings.Contains(lower, sign) {
+			return true
+		}
+	}
+	return false
+}
+
+// pump reads ffmpeg's MJPEG stdout and forwards each complete image, calling
+// alive whenever bytes arrive so the caller can tell a slow camera from a
+// wedged one.
+func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame, alive func()) (uint64, error) {
 	assembler := newFrameAssembler(core.SplitJPEGStream, u.cfg.MaxFrameSize)
 	buf := make([]byte, readChunk)
 	var count uint64
@@ -142,6 +204,7 @@ func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame)
 	for {
 		n, err := stdout.Read(buf)
 		if n > 0 {
+			alive()
 			for _, f := range assembler.feed(buf[:n]) {
 				if count == 0 {
 					u.reporter.Connected(u.Name())

@@ -632,3 +632,132 @@ func TestBridgeApplyValidatesTheDriverWhilePaused(t *testing.T) {
 		t.Errorf("resume after a rejected change: %v", err)
 	}
 }
+
+// Changing only the settings the HTTP server owns must not interrupt the
+// camera. Restarting it would drop the stream for nothing, and the start
+// verification would reject the change outright while the camera happened to
+// be reconnecting -- which is exactly when hold_on_source_loss gets touched.
+func TestBridgeApplyDoesNotRestartCaptureForServerOnlySettings(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	frames := hub.New()
+	tracker := status.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, tracker, discardLogger())
+
+	var gotHold bool
+	b.SetStreamConfigurator(streamConfiguratorFunc(func(_ core.MultipartEncoder, hold bool) {
+		gotHold = hold
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	// The driver instance in place before the change has to be the same one
+	// afterwards; a restart would replace it.
+	before := b.stopped
+
+	updated := b.Snapshot()
+	updated.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, updated); err != nil {
+		t.Fatalf("Apply of a server-only change: %v", err)
+	}
+
+	if b.stopped != before {
+		t.Error("the capture source was restarted for a change it does not depend on")
+	}
+	if !gotHold {
+		t.Error("the server was not told about the new hold_on_source_loss")
+	}
+	if !b.Snapshot().Server.HoldOnSourceLoss {
+		t.Error("the change was not kept")
+	}
+}
+
+// The driver announces a frame as soon as it has parsed one, but the transform
+// sits between there and the hub. A frame it drops means no client sees
+// anything, so it must not count as a working source.
+func TestBridgeApplyRevertsWhenTheTransformDropsEveryFrame(t *testing.T) {
+	shortenVerify(t, 1500*time.Millisecond)
+	good := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	// Structurally a valid JPEG -- the driver parses and forwards it -- but
+	// its header claims 65535x65535, so the transform refuses to decode it.
+	oversized := bytes.Clone(testJPEG(t, 16, 16))
+	sof := bytes.Index(oversized, []byte{0xFF, 0xC0})
+	if sof < 0 {
+		t.Fatal("fixture has no baseline SOF0 to rewrite")
+	}
+	copy(oversized[sof+5:sof+9], []byte{0xFF, 0xFF, 0xFF, 0xFF})
+	huge := mjpegUpstream(t, oversized)
+
+	frames := hub.New()
+	cfg := mjpegConfig(good.URL)
+	cfg.Transform.Rotate = 90
+	b := New(cfg, "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	broken := b.Snapshot()
+	broken.Source.MJPEG.URL = huge.URL
+
+	if err := b.Apply(ctx, broken); err == nil {
+		t.Fatal("expected Apply to fail when no frame survives the transform")
+	}
+	if got := b.Snapshot().Source.MJPEG.URL; got != good.URL {
+		t.Errorf("URL = %q, want the working upstream restored", got)
+	}
+}
+
+// A shutdown that lands mid-verification is not proof of anything, and must
+// not persist a configuration nothing ever confirmed.
+func TestBridgeApplyFailsWhenShutdownInterruptsVerification(t *testing.T) {
+	shortenVerify(t, 10*time.Second)
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+
+	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		<-r.Context().Done()
+	}))
+	defer silent.Close()
+
+	path := filepath.Join(t.TempDir(), config.FileName)
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), path, frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	// Shut down while Apply is still waiting for the silent source.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+
+	unverified := b.Snapshot()
+	unverified.Source.MJPEG.URL = silent.URL
+	if err := b.Apply(ctx, unverified); err == nil {
+		t.Fatal("expected a shutdown during verification to fail the apply")
+	}
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		saved, _ := config.Load(path)
+		t.Errorf("an unverified configuration was persisted: %q", saved.Source.MJPEG.URL)
+	}
+}
