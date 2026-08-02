@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -620,6 +621,76 @@ func TestBridgeApplyStopsWhenTheRequestIsCancelled(t *testing.T) {
 		t.Fatal("Apply kept verifying after the request that asked for it had gone")
 	}
 
+	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
+		t.Errorf("URL = %q, want the working upstream restored", got)
+	}
+}
+
+// A change that only touches the server settings never reaches the
+// verification, so the request context has to be checked on the way in too.
+// Waiting for the lock can take as long as another caller's whole
+// verification, which is exactly when a PUT gives up.
+func TestBridgeApplyRejectsAnAlreadyCancelledRequest(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	// Server-only, so captureUnchanged holds and no source is restarted.
+	next := b.Snapshot()
+	next.Server.HoldOnSourceLoss = true
+
+	dead, cancelDead := context.WithCancel(context.Background())
+	cancelDead()
+
+	if err := b.Apply(dead, next); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Apply error = %v, want context.Canceled", err)
+	}
+	if b.Snapshot().Server.HoldOnSourceLoss {
+		t.Error("the change was applied for a request that had already gone")
+	}
+}
+
+// The parsers upstream check structure because that is all they can afford per
+// frame. Structure is not an image, so a source that only ever emits SOI/EOI
+// would otherwise be saved as working while the tracker gets nothing.
+func TestBridgeApplyRejectsASourceSendingUndecodableFrames(t *testing.T) {
+	shortenVerify(t, 3*time.Second)
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	// Structurally a JPEG, and no image in it.
+	hollow := mjpegUpstream(t, []byte{0xFF, 0xD8, 0xFF, 0xD9})
+
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	broken := b.Snapshot()
+	broken.Source.MJPEG.URL = hollow.URL
+
+	err := b.Apply(ctx, broken)
+	if err == nil {
+		t.Fatal("expected a source with no decodable image to be refused")
+	}
+	// Not the timeout: the frame did arrive, it was the decode that rejected
+	// it. Accepting a timeout here would let the test pass on a source that
+	// simply never delivered.
+	if !strings.Contains(err.Error(), "usable JPEG") {
+		t.Errorf("error = %v, want the frame rejected as undecodable rather than missing", err)
+	}
 	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
 		t.Errorf("URL = %q, want the working upstream restored", got)
 	}

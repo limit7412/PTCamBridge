@@ -134,16 +134,33 @@ func run(ctx context.Context, opts Options, m menu) {
 			refresh(opts, m)
 
 		case kind := <-switches:
-			if err := opts.Controller.Switch(ctx, kind); err != nil {
-				opts.Log.Error("could not switch source", "source", kind, "error", err)
-			}
+			// Off the event loop: a source that is not attached is given up to
+			// the verification timeout to prove itself, and running that here
+			// would stop the menu answering at all -- including Quit, which is
+			// exactly what the user reaches for when a switch is hanging.
+			//
+			// Nothing is refreshed on completion. The ticker redraws once a
+			// second from state the bridge exposes without a lock, so the menu
+			// catches up on its own whichever way the switch goes.
+			go func(kind string) {
+				if err := opts.Controller.Switch(ctx, kind); err != nil {
+					opts.Log.Error("could not switch source", "source", kind, "error", err)
+				}
+			}(kind)
 			refresh(opts, m)
 
 		case <-m.pause.ClickedCh:
+			// Also off the loop, and for the same reason: pausing takes the
+			// bridge's lock, so a click that arrives during a slow switch
+			// would block here and undo the point of the goroutine above.
+			// The target state is decided here so two quick clicks cannot
+			// both read the same value.
 			paused := !opts.Controller.Paused()
-			if err := opts.Controller.SetPaused(paused); err != nil {
-				opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
-			}
+			go func(paused bool) {
+				if err := opts.Controller.SetPaused(paused); err != nil {
+					opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
+				}
+			}(paused)
 			refresh(opts, m)
 
 		case <-m.address.ClickedCh:

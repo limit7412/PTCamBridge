@@ -202,3 +202,36 @@ func TestTransformHonoursAConfiguredPixelLimit(t *testing.T) {
 		t.Error("expected a 32x32 frame to exceed a 16 pixel limit")
 	}
 }
+
+// Structure is not an image. The parsers upstream accept anything with the
+// right markers around it, which is the right trade at capture rate, but it
+// means "a frame arrived" and "the source works" are different claims.
+func TestDecodableJPEGRejectsAStructureWithNoImageInIt(t *testing.T) {
+	cases := map[string][]byte{
+		"soi and eoi alone": {markerPrefix, markerSOI, markerPrefix, markerEOI},
+		"no entropy data":   bytes.Clone(encodeJPEG(t, 16, 16))[:24],
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := DecodableJPEG(data, 0); err == nil {
+				t.Error("DecodableJPEG() = nil, want a frame with no decodable image refused")
+			}
+		})
+	}
+}
+
+// The check must not turn away the frames this actually carries.
+func TestDecodableJPEGAcceptsARealFrame(t *testing.T) {
+	if err := DecodableJPEG(encodeJPEG(t, 240, 240), 0); err != nil {
+		t.Errorf("DecodableJPEG() = %v, want a 240x240 frame accepted", err)
+	}
+}
+
+// Decoding is the expensive step, so the declared size is checked first.
+func TestDecodableJPEGRefusesAnOversizedImage(t *testing.T) {
+	if err := DecodableJPEG(encodeJPEG(t, 64, 64), 16); err == nil {
+		t.Error("DecodableJPEG() = nil, want the pixel limit applied")
+	} else if !strings.Contains(err.Error(), "pixel limit") {
+		t.Errorf("error = %v, want it to name the pixel limit", err)
+	}
+}

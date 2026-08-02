@@ -37,6 +37,7 @@ max_frame_size = 0
 # 一覧は `paperbridge -list-devices` で確認できます。
 device = "USB Camera"
 size = "240x240"
+# 0 でデバイス既定値。負数は設定ミスとして起動時に拒否します。
 framerate = 30
 # 空なら実行ファイルと同じフォルダの ffmpeg.exe、次に PATH を探します。
 ffmpeg_path = ""

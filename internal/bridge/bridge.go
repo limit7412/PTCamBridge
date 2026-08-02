@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
@@ -76,6 +77,12 @@ type Bridge struct {
 	// It is set once during wiring, before anything can call Apply.
 	stream StreamConfigurator
 
+	// view mirrors the state the tray polls once a second. Reading that
+	// through mu would freeze the tray's whole event loop for the length of a
+	// slow Apply -- up to startVerifyTimeout -- so the user could not even
+	// quit while a failing source was being given its chance.
+	view atomic.Pointer[view]
+
 	mu      sync.Mutex
 	cfg     config.Config
 	root    context.Context
@@ -84,10 +91,23 @@ type Bridge struct {
 	paused  bool
 }
 
+// view is the lock-free copy of what callers read but never change.
+type view struct {
+	cfg    config.Config
+	paused bool
+}
+
+// publishView refreshes the lock-free copy. The caller holds mu.
+func (b *Bridge) publishView() {
+	b.view.Store(&view{cfg: b.cfg, paused: b.paused})
+}
+
 // New builds a bridge for the given settings. Start must be called to begin
 // capturing.
 func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log *slog.Logger) *Bridge {
-	return &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg}
+	b := &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg}
+	b.publishView()
+	return b
 }
 
 // SetPersistBase records the settings as the file has them, which is what
@@ -129,10 +149,12 @@ func (b *Bridge) Stop() {
 }
 
 // Snapshot returns the settings currently in effect.
+//
+// It reads the lock-free copy, so it stays answerable while a settings change
+// is in progress. A caller that needs the settings and the change to be one
+// operation must hold mu itself; see Switch.
 func (b *Bridge) Snapshot() config.Config {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.cfg
+	return b.view.Load().cfg
 }
 
 // Apply adopts new settings, restarting the source, and persists them when a
@@ -159,6 +181,16 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config) error {
 // letting anything in between. The caller has already normalised and
 // validated cfg.
 func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
+	// Waiting for the lock can take as long as another caller's whole
+	// verification, so the request that got here may already be gone. Nothing
+	// below this point is free to happen on its behalf: a change that only
+	// touches the server settings never reaches the verification and would
+	// otherwise be applied and written out for a caller that was told the
+	// request timed out.
+	if ctx != nil && ctx.Err() != nil {
+		return fmt.Errorf("bridge: the request ended before its change was applied: %w", ctx.Err())
+	}
+
 	previous := b.cfg
 	if err := restartRequired(previous, cfg); err != nil {
 		return err
@@ -178,13 +210,16 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		// happened to be reconnecting -- including hold_on_source_loss, which
 		// is the setting for exactly that situation.
 		b.cfg = cfg
+		b.publishView()
 	} else {
 		b.stopLocked()
 		b.cfg = cfg
+		b.publishView()
 
 		if err := b.verifyStartLocked(ctx); err != nil {
 			b.log.Error("new settings could not start a source, reverting", "error", err)
 			b.cfg = previous
+			b.publishView()
 			// The previous source was working, so it is put back without being
 			// made to prove itself again.
 			if revertErr := b.startLocked(); revertErr != nil {
@@ -350,6 +385,7 @@ func (b *Bridge) SetPaused(paused bool) error {
 		return nil
 	}
 	b.paused = paused
+	b.publishView()
 	b.status.SetPaused(paused)
 
 	if paused {
@@ -361,11 +397,10 @@ func (b *Bridge) SetPaused(paused bool) error {
 	return b.startLocked()
 }
 
-// Paused reports whether capture is currently paused.
+// Paused reports whether capture is currently paused. Like Snapshot it reads
+// the lock-free copy, so the tray can redraw during a slow settings change.
 func (b *Bridge) Paused() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.paused
+	return b.view.Load().paused
 }
 
 // startLocked builds and launches the configured driver, leaving it to retry
@@ -415,9 +450,19 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	// there and the hub and can still drop it -- an image over the pixel
 	// limit, or one the decoder rejects. Only a frame that reached the hub
 	// means a client would see anything.
-	published := make(chan struct{})
+	//
+	// The frame itself is then decoded. Everything before this point checks
+	// structure, which is all a per-frame check can afford, and structure does
+	// not mean an image: a source that only ever emits SOI/EOI passes every
+	// one of those checks and gives the tracker nothing. One decode, on the
+	// one frame that decides the answer, is what separates "bytes arrived"
+	// from "the source works".
+	published := make(chan error, 1)
 	var publishedOnce sync.Once
-	onPublish := func() { publishedOnce.Do(func() { close(published) }) }
+	maxPixels := b.cfg.CoreTransform().MaxPixels
+	onPublish := func(frame core.Frame) {
+		publishedOnce.Do(func() { published <- core.DecodableJPEG(frame.Data, maxPixels) })
+	}
 
 	ctx, cancel := context.WithCancel(b.root)
 	frames := make(chan core.Frame, frameQueueDepth)
@@ -467,7 +512,11 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	timer := time.NewTimer(startVerifyTimeout)
 	defer timer.Stop()
 	select {
-	case <-published:
+	case err := <-published:
+		if err != nil {
+			b.stopLocked()
+			return fmt.Errorf("bridge: %s produced a frame that is not a usable JPEG: %w", drv.Name(), err)
+		}
 	case err := <-failed:
 		b.stopLocked()
 		return err
@@ -506,8 +555,8 @@ func (b *Bridge) stopLocked() {
 }
 
 // pump applies the optional transform and publishes each frame, calling
-// onPublish for every frame that makes it to the hub.
-func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger, onPublish func()) {
+// onPublish with every frame that makes it to the hub.
+func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger, onPublish func(core.Frame)) {
 	for frame := range frames {
 		if !transform.IsNoop() {
 			data, err := transform.Apply(frame.Data)
@@ -518,7 +567,7 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 			frame.Data = data
 		}
 		h.Publish(frame)
-		onPublish()
+		onPublish(frame)
 	}
 }
 

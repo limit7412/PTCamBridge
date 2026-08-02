@@ -167,7 +167,9 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	cfg.ApplyEnv(os.Getenv)
+	if err := cfg.ApplyEnv(os.Getenv); err != nil {
+		return cfg, err
+	}
 	cfg.Normalise()
 	return cfg, cfg.Validate()
 }
@@ -243,21 +245,36 @@ type envLookup func(string) string
 
 // ApplyEnv overlays PAPERBRIDGE_* variables, which take precedence over the
 // file. Only the settings worth scripting are exposed.
-func (c *Config) ApplyEnv(get envLookup) {
+//
+// A value that will not parse is an error, not something to skip. Dropping it
+// silently leaves the file's value in place and starts anyway, so someone who
+// set PAPERBRIDGE_SERIAL_BAUD=abc gets a bridge running on a rate they did not
+// ask for, with nothing anywhere saying the variable was ignored. Every
+// variable is still attempted, so one typo does not hide the next.
+func (c *Config) ApplyEnv(get envLookup) error {
+	var errs []error
+	fail := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	setString(get, "PAPERBRIDGE_LISTEN", &c.Server.Listen)
 	setString(get, "PAPERBRIDGE_BOUNDARY", &c.Server.Boundary)
 	setString(get, "PAPERBRIDGE_SOURCE_TYPE", &c.Source.Type)
 	setString(get, "PAPERBRIDGE_UVC_DEVICE", &c.Source.UVC.Device)
 	setString(get, "PAPERBRIDGE_UVC_SIZE", &c.Source.UVC.Size)
-	setInt(get, "PAPERBRIDGE_UVC_FRAMERATE", &c.Source.UVC.Framerate)
+	fail(setInt(get, "PAPERBRIDGE_UVC_FRAMERATE", &c.Source.UVC.Framerate))
 	setString(get, "PAPERBRIDGE_FFMPEG_PATH", &c.Source.UVC.FFmpegPath)
 	setString(get, "PAPERBRIDGE_SERIAL_PORT", &c.Source.Serial.Port)
-	setInt(get, "PAPERBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud)
+	fail(setInt(get, "PAPERBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud))
 	setString(get, "PAPERBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
 	setString(get, "PAPERBRIDGE_PAPERTRACKER_DIR", &c.PaperTracker.InstallDir)
-	setBool(get, "PAPERBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache)
+	fail(setBool(get, "PAPERBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
 	setString(get, "PAPERBRIDGE_LOG_LEVEL", &c.Log.Level)
 	setString(get, "PAPERBRIDGE_LOG_DIR", &c.Log.Dir)
+
+	return errors.Join(errs...)
 }
 
 func setString(get envLookup, key string, dst *string) {
@@ -266,20 +283,30 @@ func setString(get envLookup, key string, dst *string) {
 	}
 }
 
-func setInt(get envLookup, key string, dst *int) {
-	if v := get(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			*dst = n
-		}
+func setInt(get envLookup, key string, dst *int) error {
+	v := get(key)
+	if v == "" {
+		return nil
 	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fmt.Errorf("%s=%q is not a whole number", key, v)
+	}
+	*dst = n
+	return nil
 }
 
-func setBool(get envLookup, key string, dst *bool) {
-	if v := get(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			*dst = b
-		}
+func setBool(get envLookup, key string, dst *bool) error {
+	v := get(key)
+	if v == "" {
+		return nil
 	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("%s=%q is not true or false", key, v)
+	}
+	*dst = b
+	return nil
 }
 
 // Normalise fills in blanks that have an obvious answer, so validation only
@@ -337,6 +364,14 @@ func (c Config) Validate() error {
 	if c.Source.MaxFrameSize > 0 && c.Source.MaxFrameSize < core.MinJPEGSize {
 		return fmt.Errorf("source.max_frame_size %d is below the %d bytes of the smallest possible JPEG; use 0 for the default",
 			c.Source.MaxFrameSize, core.MinJPEGSize)
+	}
+	// Zero hands the choice to the device, which is a real answer. A negative
+	// rate is not: it makes the driver drop the -framerate argument entirely,
+	// so the camera runs at whatever it likes, Apply sees frames and calls
+	// that success, and the wrong value gets saved.
+	if c.Source.UVC.Framerate < 0 {
+		return fmt.Errorf("source.uvc.framerate must not be negative, got %d; use 0 for the device default",
+			c.Source.UVC.Framerate)
 	}
 	// Normalise has already turned zero into the default, so anything left at
 	// or below zero here was written that way on purpose and is wrong.

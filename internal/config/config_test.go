@@ -90,7 +90,9 @@ func TestApplyEnvOverridesTheFile(t *testing.T) {
 		"PAPERBRIDGE_UVC_FRAMERATE": "60",
 	}
 	cfg := Default()
-	cfg.ApplyEnv(func(k string) string { return env[k] })
+	if err := cfg.ApplyEnv(func(k string) string { return env[k] }); err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
 
 	if cfg.Server.Listen != "0.0.0.0:9000" {
 		t.Errorf("Listen = %q", cfg.Server.Listen)
@@ -112,18 +114,65 @@ func TestApplyEnvOverridesTheFile(t *testing.T) {
 	}
 }
 
-// A malformed number in the environment should leave the file's value alone
-// rather than zeroing it.
-func TestApplyEnvIgnoresUnparsableValues(t *testing.T) {
+// Skipping a malformed variable starts the bridge on a setting the user did
+// not choose, with nothing anywhere saying their variable was thrown away.
+func TestApplyEnvRejectsUnparsableValues(t *testing.T) {
+	cases := map[string]string{
+		"PAPERBRIDGE_SERIAL_BAUD":   "fast",
+		"PAPERBRIDGE_UVC_FRAMERATE": "lots",
+		"PAPERBRIDGE_WRITE_CACHE":   "maybe",
+	}
+	for key, value := range cases {
+		t.Run(key, func(t *testing.T) {
+			cfg := Default()
+			err := cfg.ApplyEnv(func(k string) string {
+				if k == key {
+					return value
+				}
+				return ""
+			})
+			if err == nil {
+				t.Fatalf("ApplyEnv() = nil, want an error for %s=%q", key, value)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error = %v, want it to name %s", err, key)
+			}
+		})
+	}
+}
+
+// One typo must not hide the next: every variable is still attempted.
+func TestApplyEnvReportsEveryBadValue(t *testing.T) {
 	cfg := Default()
-	cfg.ApplyEnv(func(k string) string {
-		if k == "PAPERBRIDGE_SERIAL_BAUD" {
+	err := cfg.ApplyEnv(func(k string) string {
+		switch k {
+		case "PAPERBRIDGE_SERIAL_BAUD":
 			return "fast"
+		case "PAPERBRIDGE_WRITE_CACHE":
+			return "maybe"
 		}
 		return ""
 	})
-	if cfg.Source.Serial.Baud != 3000000 {
-		t.Errorf("Baud = %d, want the default to survive", cfg.Source.Serial.Baud)
+	if err == nil {
+		t.Fatal("ApplyEnv() = nil, want an error")
+	}
+	for _, key := range []string{"PAPERBRIDGE_SERIAL_BAUD", "PAPERBRIDGE_WRITE_CACHE"} {
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("error = %v, want it to name %s", err, key)
+		}
+	}
+}
+
+// Load has to fail on it too, or the check above never reaches a user.
+func TestLoadRejectsABadEnvironmentValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	t.Setenv("PAPERBRIDGE_SERIAL_BAUD", "fast")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() = nil, want the bad environment value rejected")
 	}
 }
 
@@ -142,6 +191,7 @@ func TestValidate(t *testing.T) {
 		{"bad header byte", func(c *Config) { c.Source.Serial.Header = []int{0x1FF} }, "source.serial.header"},
 		{"negative frame size", func(c *Config) { c.Source.MaxFrameSize = -1 }, "source.max_frame_size"},
 		{"negative baud", func(c *Config) { c.Source.Serial.Baud = -1 }, "source.serial.baud"},
+		{"negative framerate", func(c *Config) { c.Source.UVC.Framerate = -1 }, "source.uvc.framerate"},
 		{"cache without dir", func(c *Config) { c.PaperTracker.WriteCache = true }, "install_dir"},
 		{"header injection", func(c *Config) { c.Server.ExtraHeaders = map[string]string{"X": "a\r\nY: b"} }, "extra_headers"},
 	}
@@ -157,6 +207,15 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate() = %v, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// Zero framerate hands the choice to the device, which is a real answer.
+func TestValidateAcceptsAZeroFramerate(t *testing.T) {
+	cfg := Default()
+	cfg.Source.UVC.Framerate = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want a zero framerate accepted as the device default", err)
 	}
 }
 

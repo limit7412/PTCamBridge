@@ -114,7 +114,9 @@ func run() error {
 		return err
 	}
 	cfg := fileCfg
-	cfg.ApplyEnv(os.Getenv)
+	if err := cfg.ApplyEnv(os.Getenv); err != nil {
+		return err
+	}
 	applyFlags(&cfg, opts)
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {

@@ -101,10 +101,40 @@ func (t Transform) Apply(src []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// DecodableJPEG reports whether src is a JPEG a client could actually render,
+// not merely one with the right markers around it.
+//
+// The parsers upstream check structure, which is the right thing to do per
+// frame: it is cheap, and it is all that can be afforded at capture rate. But
+// structure is a weak claim. A payload of SOI followed by EOI has the shape of
+// a JPEG and no image in it, and a source that only ever sends those looks
+// healthy the whole way through -- frames counted, /healthz green -- while the
+// tracker gets nothing it can use. Decoding is how that gets caught, so it is
+// worth doing once, on the frame that decides whether a source works.
+//
+// maxPixels bounds the allocation the decode is allowed to ask for; zero
+// selects DefaultMaxPixels.
+func DecodableJPEG(src []byte, maxPixels int) error {
+	// The header goes first so the ceiling is applied before Decode allocates.
+	if err := checkImageSize(src, maxPixels); err != nil {
+		return err
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(src)); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+	return nil
+}
+
 // checkSize reads only the JPEG header and reports whether the image it
 // describes is small enough to decode.
 func (t Transform) checkSize(src []byte) error {
-	limit := t.MaxPixels
+	return checkImageSize(src, t.MaxPixels)
+}
+
+// checkImageSize reads only the JPEG header and reports whether the image it
+// describes is small enough to decode.
+func checkImageSize(src []byte, maxPixels int) error {
+	limit := maxPixels
 	if limit <= 0 {
 		limit = DefaultMaxPixels
 	}
