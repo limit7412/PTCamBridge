@@ -116,3 +116,54 @@ func watchClicks(ctx context.Context, log *slog.Logger, entries map[string]<-cha
 		}
 	}
 }
+
+// commandQueueDepth bounds the menu actions waiting to be applied. Clicks
+// arrive at human speed and the worker only falls behind while a switch is
+// being verified, so a handful is more than a real user produces.
+const commandQueueDepth = 8
+
+// commandQueue applies menu actions one at a time, in the order they were
+// submitted, on a goroutine of its own.
+//
+// Off the event loop, because a source that is not attached is given up to the
+// verification timeout to prove itself and running that on the loop would stop
+// the menu answering at all -- including Quit, which is exactly what the user
+// reaches for when a switch is hanging.
+//
+// One worker rather than a goroutine each, because these actions all serialise
+// on the bridge's lock and a goroutine per click leaves the order to the
+// scheduler. Picking UVC and then MJPEG would settle on whichever won the
+// race, so the menu could show one source and the bridge run the other.
+type commandQueue struct {
+	cmds chan func()
+	log  *slog.Logger
+}
+
+func newCommandQueue(log *slog.Logger, depth int) *commandQueue {
+	q := &commandQueue{cmds: make(chan func(), depth), log: log}
+	go func() {
+		for cmd := range q.cmds {
+			cmd()
+		}
+	}()
+	return q
+}
+
+// submit queues an action and reports whether it was taken.
+//
+// The send never blocks: holding the event loop until the worker catches up is
+// the thing being avoided. A full queue means an action is dropped, which is
+// said out loud rather than left to look like a click that did nothing -- and
+// reported back, because a caller tracking what it has asked for must not
+// count a request that was never made.
+func (q *commandQueue) submit(what string, cmd func()) bool {
+	select {
+	case q.cmds <- cmd:
+		return true
+	default:
+		q.log.Warn("ignoring a menu action, earlier ones are still being applied", "action", what)
+		return false
+	}
+}
+
+func (q *commandQueue) close() { close(q.cmds) }

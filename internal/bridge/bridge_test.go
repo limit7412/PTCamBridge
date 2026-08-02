@@ -1375,3 +1375,64 @@ func TestBridgeRecordsSettingsThatCannotBuildADriver(t *testing.T) {
 		t.Errorf("last error = %q, want it to name what is missing", snapshot.LastError)
 	}
 }
+
+// Two changes made while the settings file is unparsable both have to survive.
+//
+// The second one diffs to nothing against the first: by then the running
+// configuration already carries it. So the pending write is the only record
+// that the first change exists, and rebuilding it without carrying the earlier
+// one forward loses it the moment the file becomes readable again.
+func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	path := filepath.Join(t.TempDir(), config.FileName)
+
+	cfg := mjpegConfig(upstream.URL)
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	if err := os.WriteFile(path, []byte("[server\n"), 0o644); err != nil {
+		t.Fatalf("break the file: %v", err)
+	}
+
+	first := b.Snapshot()
+	first.Server.Boundary = "first-change"
+	if err := b.Apply(ctx, first); !errors.Is(err, config.ErrNotSaved) {
+		t.Fatalf("first Apply = %v, want config.ErrNotSaved", err)
+	}
+
+	second := b.Snapshot()
+	second.Server.HoldOnSourceLoss = true
+	if err := b.Apply(ctx, second); !errors.Is(err, config.ErrNotSaved) {
+		t.Fatalf("second Apply = %v, want config.ErrNotSaved", err)
+	}
+
+	// The user finishes the edit, and the next change writes everything.
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("repair the file: %v", err)
+	}
+	if err := b.Apply(ctx, b.Snapshot()); err != nil {
+		t.Fatalf("Apply once the file is readable again: %v", err)
+	}
+
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if saved.Server.Boundary != "first-change" {
+		t.Errorf("saved boundary = %q, want the first change kept", saved.Server.Boundary)
+	}
+	if !saved.Server.HoldOnSourceLoss {
+		t.Error("the second change was not saved")
+	}
+}

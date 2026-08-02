@@ -153,3 +153,50 @@ func TestPauseActionDoesNotCollideWithASourceType(t *testing.T) {
 		}
 	}
 }
+
+// A full queue drops the action, and has to say so. A caller tracking what it
+// has asked for -- the pause toggle does -- must not count a request that was
+// never made, or its next click asks for the state the bridge is already in
+// and the button looks broken.
+func TestCommandQueueReportsWhetherAnActionWasTaken(t *testing.T) {
+	// Nothing runs until the worker is released, so the queue fills up.
+	release := make(chan struct{})
+	q := newCommandQueue(discardLogger(), 2)
+	defer close(release)
+
+	if !q.submit("first", func() { <-release }) {
+		t.Fatal("the first action was refused by an empty queue")
+	}
+	// The worker may or may not have picked the first one up yet, so fill
+	// past the depth rather than assuming.
+	for i := 0; i < 8; i++ {
+		q.submit("filler", func() {})
+	}
+	if q.submit("overflow", func() {}) {
+		t.Error("an action was accepted by a queue that is already full")
+	}
+}
+
+// The queue exists to put the actions in one order and keep them there.
+func TestCommandQueueRunsActionsInOrder(t *testing.T) {
+	done := make(chan string, 3)
+	q := newCommandQueue(discardLogger(), commandQueueDepth)
+
+	for _, name := range []string{"one", "two", "three"} {
+		if !q.submit(name, func() { done <- name }) {
+			t.Fatalf("%s was refused", name)
+		}
+	}
+	q.close()
+
+	for i, want := range []string{"one", "two", "three"} {
+		select {
+		case got := <-done:
+			if got != want {
+				t.Fatalf("action %d = %q, want %q", i+1, got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("action %d (%s) never ran", i+1, want)
+		}
+	}
+}

@@ -14,11 +14,6 @@ import (
 // only; nothing in the pipeline depends on it.
 const refreshInterval = time.Second
 
-// commandQueueDepth bounds the menu actions waiting to be applied. Clicks
-// arrive at human speed and the worker only falls behind while a switch is
-// being verified, so a handful is more than a real user produces.
-const commandQueueDepth = 8
-
 // Run shows the tray icon and blocks until the user quits or ctx is cancelled.
 //
 // It must be called from the main goroutine: the tray runs a Windows message
@@ -112,36 +107,10 @@ func run(ctx context.Context, opts Options, m menu) {
 	go watchClicks(ctx, opts.Log, clicks, actions)
 
 	// Everything that changes the bridge goes through one worker, in the
-	// order it was clicked.
-	//
-	// Off the event loop, because a source that is not attached is given up to
-	// the verification timeout to prove itself and running that here would
-	// stop the menu answering at all -- including Quit, which is exactly what
-	// the user reaches for when a switch is hanging.
-	//
-	// One worker rather than a goroutine each, because these actions all
-	// serialise on the bridge's lock and a goroutine per click leaves the
-	// order to the scheduler. Picking UVC and then MJPEG would settle on
-	// whichever won the race, so the tick could show one source and the
-	// bridge run the other.
-	commands := make(chan func(), commandQueueDepth)
-	go func() {
-		for cmd := range commands {
-			cmd()
-		}
-	}()
-	defer close(commands)
+	// order it was clicked. See commandQueue.
+	queue := newCommandQueue(opts.Log, commandQueueDepth)
+	defer queue.close()
 
-	// The queue is short and the send never blocks: holding the event loop
-	// until the worker catches up is the thing being avoided. Dropping is
-	// said out loud rather than left to look like a click that did nothing.
-	submit := func(what string, cmd func()) {
-		select {
-		case commands <- cmd:
-		default:
-			opts.Log.Warn("ignoring a menu action, earlier ones are still being applied", "action", what)
-		}
-	}
 	wantPaused := opts.Controller.Paused()
 
 	refresh(opts, m)
@@ -164,16 +133,23 @@ func run(ctx context.Context, opts Options, m menu) {
 				// succession both see the old state otherwise -- the first has
 				// not reached SetPaused yet -- so they ask for the same thing
 				// twice and the pair does not cancel out.
-				wantPaused = !wantPaused
-				paused := wantPaused
-				submit(actionPause, func() {
+				//
+				// Only a request that was actually queued counts. A dropped
+				// one changed nothing, and moving the target anyway would
+				// leave the next click asking for the state the bridge is
+				// already in, which looks like a button that does nothing.
+				paused := !wantPaused
+				queued := queue.submit(actionPause, func() {
 					if err := opts.Controller.SetPaused(paused); err != nil {
 						opts.Log.Error("could not change the paused state", "paused", paused, "error", err)
 					}
 				})
+				if queued {
+					wantPaused = paused
+				}
 			} else {
 				kind := action
-				submit("switch source", func() {
+				queue.submit("switch source", func() {
 					if err := opts.Controller.Switch(ctx, kind); err != nil {
 						opts.Log.Error("could not switch source", "source", kind, "error", err)
 					}

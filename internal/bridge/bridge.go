@@ -321,14 +321,22 @@ func (b *Bridge) captureAsExpectedLocked() bool {
 // A file that is not there at all is different. Nothing is being lost, so the
 // last known contents are the right base and Save recreates the file from
 // them.
+// A read failure is reported but does not skip the pending write: the caller
+// builds the next pending write from what comes back, and a base without the
+// earlier changes in it would quietly drop them. Two changes made while the
+// file is unparsable would otherwise leave only the second one to be written
+// when it can be read again, because the first is already in the running
+// configuration and so no longer shows up as a difference.
 func (b *Bridge) saveBaseLocked() (config.Config, error) {
 	base := b.persistBase
+	var readErr error
 	if _, err := os.Stat(b.cfgPath); err == nil {
 		onDisk, err := config.LoadFile(b.cfgPath)
 		if err != nil {
-			return base, fmt.Errorf("re-read %s before saving: %w", b.cfgPath, err)
+			readErr = fmt.Errorf("re-read %s before saving: %w", b.cfgPath, err)
+		} else {
+			base = onDisk
 		}
-		base = onDisk
 	}
 	if b.unsaved != nil {
 		// Lay the pending write back on top of whatever the file says now.
@@ -336,7 +344,7 @@ func (b *Bridge) saveBaseLocked() (config.Config, error) {
 		// this copies exactly the leaves it was trying to change.
 		base = mergeChanges(base, b.persistBase, *b.unsaved)
 	}
-	return base, nil
+	return base, readErr
 }
 
 // mergeChanges returns base with every value this change actually touched
