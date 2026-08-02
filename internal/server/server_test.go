@@ -775,3 +775,57 @@ func TestDevicesReportsAnEnumerationFailure(t *testing.T) {
 		t.Errorf("body = %q, want the enumeration error", out)
 	}
 }
+
+// The settings file refuses unknown keys; the API has to agree. A misspelled
+// field is otherwise dropped, the value it meant to set stays at its zero
+// value, and the caller gets a 200 for a change that did something else.
+func TestManagementAPIRejectsUnknownFields(t *testing.T) {
+	ctrl := &fakeController{cfg: config.Default()}
+	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	t.Run("config", func(t *testing.T) {
+		body := `{"server":{"hold_on_sorce_loss":true}}`
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 for a misspelled field", resp.StatusCode)
+		}
+		if ctrl.applied {
+			t.Error("the controller was handed a config built from a rejected body")
+		}
+	})
+
+	t.Run("source", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/api/v1/source", "application/json", strings.NewReader(`{"tpye":"serial"}`))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 for a misspelled field", resp.StatusCode)
+		}
+		if ctrl.switched != "" {
+			t.Errorf("the controller switched to %q from a rejected body", ctrl.switched)
+		}
+	})
+
+	// A body the struct does know is still accepted.
+	t.Run("well formed", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/api/v1/source", "application/json", strings.NewReader(`{"type":"serial"}`))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+	})
+}

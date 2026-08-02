@@ -106,11 +106,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fileCfg, err := config.Load(cfgPath)
+	// The layers are separated here rather than inside Load, because saving
+	// has to start from the file alone: an environment variable or a flag is
+	// for this run, and writing it back would make it permanent.
+	fileCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
 		return err
 	}
 	cfg := fileCfg
+	cfg.ApplyEnv(os.Getenv)
 	applyFlags(&cfg, opts)
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
@@ -152,7 +156,8 @@ func run() error {
 	app := bridge.New(cfg, cfgPath, frames, tracker, log)
 	// Saving starts from what the file said, not from the effective settings:
 	// a -device or a PAPERBRIDGE_* is for this run, and must not be written
-	// back the first time the tray changes something unrelated.
+	// back the first time the tray changes something unrelated. fileCfg has
+	// had neither layer applied.
 	app.SetPersistBase(fileCfg)
 
 	admin := cfg.IsLoopback()

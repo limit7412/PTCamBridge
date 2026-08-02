@@ -346,3 +346,34 @@ func TestSavedConfigLoadsBack(t *testing.T) {
 		t.Fatalf("a saved config did not load back: %v", err)
 	}
 }
+
+// Saving builds on the file, so LoadFile has to report the file alone. Folding
+// the environment in here would write a variable meant for one run back as a
+// permanent choice.
+func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	cfg := Default()
+	cfg.Source.UVC.Device = "from the file"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	t.Setenv("PAPERBRIDGE_UVC_DEVICE", "from the environment")
+
+	fromFile, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if got := fromFile.Source.UVC.Device; got != "from the file" {
+		t.Errorf("LoadFile device = %q, want the file's value", got)
+	}
+
+	// Load still layers it on, which is what the running config wants.
+	effective, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := effective.Source.UVC.Device; got != "from the environment" {
+		t.Errorf("Load device = %q, want the environment to win", got)
+	}
+}

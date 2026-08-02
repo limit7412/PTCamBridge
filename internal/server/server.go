@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net"
@@ -432,7 +433,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPut:
 		var cfg config.Config
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&cfg); err != nil {
+		if err := decodeStrict(http.MaxBytesReader(w, r.Body, 1<<20), &cfg); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -465,7 +466,7 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Type string `json:"type"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+	if err := decodeStrict(http.MaxBytesReader(w, r.Body, 1<<16), &body); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -501,6 +502,18 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusOK, devices)
+}
+
+// decodeStrict rejects a body carrying fields the target does not have.
+//
+// The settings file already refuses unknown keys; without the same rule here a
+// misspelled field over the API is silently dropped, the value it was meant to
+// set stays at its zero value, and the caller gets a 200 for a change that did
+// something other than what it asked for.
+func decodeStrict(r io.Reader, target any) error {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	return dec.Decode(target)
 }
 
 func writeJSON(w http.ResponseWriter, r *http.Request, code int, body any) {

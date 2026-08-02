@@ -30,11 +30,20 @@ const frameQueueDepth = 1
 // before giving up on it.
 //
 // The proof is the first frame, not the absence of an early error: a driver
-// reconnects on its own, so "has not failed yet" says nothing. The window has
-// to cover a whole first attempt -- the MJPEG connect timeout is five seconds,
-// and a camera that has to fall back from passthrough to re-encoding spends a
-// backoff and a second ffmpeg startup getting there.
-var startVerifyTimeout = 10 * time.Second
+// reconnects on its own, so "has not failed yet" says nothing.
+//
+// The window has to outlast a whole first attempt, or a source that was going
+// to work gets rolled back for being slow. The two worst cases are close to
+// each other:
+//
+//   - MJPEG spends its connect timeout on each of dial, TLS and response
+//     headers, then its stall timeout waiting for the first frame: 5s x 4.
+//   - UVC spends its stall timeout on the first ffmpeg, and a camera with no
+//     native MJPEG then spends a backoff and a second one: 10s + 1s + 10s.
+//
+// Nothing here costs a working source anything. It returns the moment a frame
+// reaches the hub, so this only runs long when the answer is going to be no.
+var startVerifyTimeout = 30 * time.Second
 
 // StreamConfigurator receives the parts of a settings change that the HTTP
 // server owns and must adopt for itself.

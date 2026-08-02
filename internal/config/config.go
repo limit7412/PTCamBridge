@@ -156,9 +156,23 @@ func Path() (string, error) {
 	return filepath.Join(dir, FileName), nil
 }
 
-// Load reads the settings file, creating it with defaults when absent, and
-// then layers the environment on top. The returned config is validated.
+// Load reads the settings file and layers the environment on top. The returned
+// config is validated.
 func Load(path string) (Config, error) {
+	cfg, err := LoadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ApplyEnv(os.Getenv)
+	cfg.Normalise()
+	return cfg, cfg.Validate()
+}
+
+// LoadFile reads the settings file alone, creating it with defaults when
+// absent. The environment is deliberately not applied: this is the file as it
+// stands, which is what saving has to build on if a PAPERBRIDGE_* meant for one
+// run is not to be written back as a permanent choice.
+func LoadFile(path string) (Config, error) {
 	cfg := Default()
 
 	data, err := os.ReadFile(path)
@@ -186,9 +200,8 @@ func Load(path string) (Config, error) {
 		}
 	}
 
-	cfg.ApplyEnv(os.Getenv)
 	cfg.Normalise()
-	return cfg, cfg.Validate()
+	return cfg, nil
 }
 
 // ErrNotSaved marks a settings change that took effect but could not be

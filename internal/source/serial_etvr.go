@@ -25,8 +25,8 @@ const DefaultSerialBaud = 3000000
 // context was cancelled. It is not a stall detector.
 const serialReadTimeout = 200 * time.Millisecond
 
-// serialStallTimeout is how long a port may stay silent before the driver
-// treats the board as gone and reconnects.
+// serialStallTimeout is how long a port may go without producing a frame
+// before the driver treats the board as gone and reconnects.
 const serialStallTimeout = 5 * time.Second
 
 // knownCameraVIDs are the USB vendor IDs of the bridges and MCUs that Babble
@@ -109,28 +109,32 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 
 	assembler := newFrameAssembler(s.splitPackets, s.cfg.MaxFrameSize)
 	buf := make([]byte, readChunk)
-	lastData := time.Now()
+	lastFrame := time.Now()
 	var count uint64
 
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
+		// Frames, not bytes, and checked on every pass rather than only when a
+		// read times out. "auto" can land on some other serial device that
+		// chatters away without ever forming a packet; keying on arrival would
+		// hold that port open forever and never re-run the search, so the real
+		// board plugged in later would never be found.
+		if time.Since(lastFrame) > serialStallTimeout {
+			return fmt.Errorf("serial: %s produced no frame for %s", name, serialStallTimeout)
+		}
 		n, err := port.Read(buf)
 		if err != nil {
 			return fmt.Errorf("serial: read from %s: %w", name, err)
 		}
 		if n == 0 {
-			// A read timeout, not an error. Only a long silence means the
-			// board is gone.
-			if time.Since(lastData) > serialStallTimeout {
-				return fmt.Errorf("serial: %s produced no data for %s", name, serialStallTimeout)
-			}
+			// A read timeout, not an error.
 			continue
 		}
-		lastData = time.Now()
 
 		for _, f := range assembler.feed(buf[:n]) {
+			lastFrame = time.Now()
 			if count == 0 {
 				s.reporter.Connected(s.Name())
 			}
