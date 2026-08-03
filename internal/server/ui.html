@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --line: #dcdfe4;
+  --ink: #1b1d21;
+  --dim: #626873;
+  --warn: #a8331f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --card: #1e2126;
+    --line: #31353d;
+    --ink: #e6e8ec;
+    --dim: #9aa1ad;
+    --warn: #ff9b86;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 1.5rem 1rem 3rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Yu Gothic UI", sans-serif;
+}
+main { max-width: 62rem; margin: 0 auto; }
+h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+h2 { font-size: .95rem; margin: 0 0 .75rem; color: var(--dim); font-weight: 600; }
+.sub { color: var(--dim); font-size: .85rem; margin: 0 0 1.5rem; }
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  padding: 1rem 1.1rem;
+}
+dl { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem; margin: 0; }
+dt { color: var(--dim); white-space: nowrap; }
+dd { margin: 0; overflow-wrap: anywhere; }
+dd.mono, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .9em; }
+ul { margin: 0; padding-left: 1.2rem; }
+li { overflow-wrap: anywhere; }
+.warn { color: var(--warn); }
+.note { color: var(--dim); font-size: .8rem; margin: .6rem 0 0; }
+#preview-frame {
+  display: block;
+  width: 100%;
+  max-width: 20rem;
+  margin: 0 auto;
+  border-radius: .35rem;
+  background: #000;
+  image-rendering: pixelated;
+}
+#preview-waiting { text-align: center; color: var(--dim); padding: 2rem 0; }
+#offline {
+  display: none;
+  background: var(--warn);
+  color: var(--card);
+  padding: .6rem 1rem;
+  border-radius: .4rem;
+  margin-bottom: 1rem;
+}
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>{{.Title}}</h1>
+  <p class="sub mono">{{.Address}}<span id="version"></span></p>
+
+  <p id="offline">{{index .Text "unreachable"}}</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>{{index .Text "status"}}</h2>
+      <dl>
+        <dt>{{index .Text "state"}}</dt><dd id="state">-</dd>
+        <dt>{{index .Text "source"}}</dt><dd id="source">-</dd>
+        <dt>{{index .Text "uptime"}}</dt><dd id="uptime" class="mono">-</dd>
+        <dt>{{index .Text "reconnects"}}</dt><dd id="reconnects" class="mono">-</dd>
+        <dt>{{index .Text "lastError"}}</dt><dd id="last-error">-</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "preview"}}</h2>
+      <img id="preview-frame" alt="" hidden>
+      <p id="preview-waiting">{{index .Text "waiting"}}</p>
+      <p class="note">{{index .Text "previewNote"}}</p>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "frames"}}</h2>
+      <dl>
+        <dt>{{index .Text "inputFPS"}}</dt><dd><span id="input-fps" class="mono">-</span> fps</dd>
+        <dt>{{index .Text "clients"}}</dt><dd id="clients" class="mono">-</dd>
+        <dt>{{index .Text "published"}}</dt><dd id="published" class="mono">-</dd>
+        <dt>{{index .Text "dropped"}}</dt><dd id="dropped" class="mono">-</dd>
+        <dt>{{index .Text "frameSize"}}</dt><dd id="frame-size" class="mono">-</dd>
+        <dt>{{index .Text "lastFrame"}}</dt><dd id="last-frame" class="mono">-</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "devices"}}</h2>
+      <dl>
+        <dt>{{index .Text "cameras"}}</dt><dd><ul id="cameras"></ul></dd>
+        <dt>{{index .Text "serialPorts"}}</dt><dd><ul id="serial-ports"></ul></dd>
+      </dl>
+    </section>
+
+    <section class="card" id="ffmpeg-card" hidden>
+      <h2>{{index .Text "ffmpeg"}}</h2>
+      <p id="ffmpeg" class="mono">-</p>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "places"}}</h2>
+      <dl>
+        <dt>{{index .Text "address"}}</dt><dd class="mono">{{.Address}}</dd>
+        {{if .Settings}}<dt>{{index .Text "settings"}}</dt><dd class="mono">{{.Settings}}</dd>{{end}}
+        {{if .LogDir}}<dt>{{index .Text "logs"}}</dt><dd class="mono">{{.LogDir}}</dd>{{end}}
+        {{if .Version}}<dt>{{index .Text "version"}}</dt><dd class="mono">{{.Version}}</dd>{{end}}
+      </dl>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const TEXT = {{.TextJSON}};
+
+const el = (id) => document.getElementById(id);
+const put = (id, value) => { const node = el(id); if (node) node.textContent = value; };
+
+// 状態は 1 秒ごとに取り直す。トレイの表示と同じ刻みで、人が画面を見ながら
+// ケーブルを挿し直すのに追いつく速さ。
+async function pollState() {
+  try {
+    const response = await fetch("/ui/state", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    const state = await response.json();
+
+    put("state", state.state);
+    put("source", state.source);
+    put("uptime", state.uptime);
+    put("reconnects", state.reconnects);
+    put("input-fps", state.input_fps);
+    put("clients", state.clients);
+    put("published", state.published);
+    put("dropped", state.dropped);
+    put("frame-size", state.frame_size);
+    put("last-frame", state.last_frame);
+
+    const lastError = el("last-error");
+    lastError.textContent = state.last_error;
+    lastError.classList.toggle("warn", state.last_error !== TEXT.none);
+
+    el("ffmpeg-card").hidden = !state.has_ffmpeg;
+    if (state.has_ffmpeg) put("ffmpeg", state.ffmpeg);
+
+    el("offline").style.display = "none";
+  } catch (err) {
+    // ブリッジが終了していれば、この画面はもう何も言えない。黙って古い数字を
+    // 見せ続けるより、応答が無いことを言う方が診断の役に立つ。
+    el("offline").style.display = "block";
+  }
+}
+
+// プレビューは静止画を 1 枚ずつ取り直す。/stream を img に繋ぐと購読者が 1 つ
+// 増え、この画面が数えて見せているクライアント数そのものが狂う。
+let previewBusy = false;
+function pollPreview() {
+  if (previewBusy) return;
+  previewBusy = true;
+  const next = new Image();
+  next.onload = () => {
+    const frame = el("preview-frame");
+    frame.src = next.src;
+    frame.hidden = false;
+    el("preview-waiting").hidden = true;
+    previewBusy = false;
+  };
+  next.onerror = () => {
+    el("preview-frame").hidden = true;
+    el("preview-waiting").hidden = false;
+    previewBusy = false;
+  };
+  next.src = "/snapshot?t=" + Date.now();
+}
+
+// デバイスの列挙は安くない。Windows では ffmpeg を起動して最大 15 秒待つので、
+// 読み込み時に 1 度だけ引く。挿し直したときは画面を再読み込みすればよい。
+async function loadDevices() {
+  const fill = (id, names, failure) => {
+    const list = el(id);
+    list.replaceChildren();
+    if (failure) {
+      const item = document.createElement("li");
+      item.textContent = failure;
+      item.className = "warn";
+      list.append(item);
+      return;
+    }
+    if (!names || names.length === 0) {
+      const item = document.createElement("li");
+      item.textContent = TEXT.none;
+      list.append(item);
+      return;
+    }
+    for (const name of names) {
+      const item = document.createElement("li");
+      item.textContent = name;
+      item.className = "mono";
+      list.append(item);
+    }
+  };
+
+  try {
+    const response = await fetch("/api/v1/devices", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    const devices = await response.json();
+    fill("cameras", (devices.cameras || []).map((d) => d.name), devices.camera_error);
+    // ポート名だけでは、どれがカメラボードなのかが分からない。列挙が既に
+    // 見分けているので、分かっている名前は添えて出す。
+    fill("serial-ports", (devices.serial_ports || []).map((p) => {
+      const label = p.product || p.vendor;
+      return label ? p.name + " (" + label + ")" : p.name;
+    }), devices.serial_error);
+  } catch (err) {
+    fill("cameras", [], String(err));
+    fill("serial-ports", [], String(err));
+  }
+}
+
+pollState();
+pollPreview();
+loadDevices();
+setInterval(pollState, 1000);
+setInterval(pollPreview, 500);
+</script>
+</body>
+</html>

@@ -97,6 +97,11 @@ type Options struct {
 	// (指定があれば)。自動起動の切り替えはこれを登録するので、サインイン時の起動も
 	// 同じファイルを使います。空なら既定の場所を意味します。
 	ConfigFlag string
+	// Dashboard は、ブリッジが診断画面を提供しているかどうかです。ループバック
+	// 以外を待受にすると管理 API と一緒に消えるので、そのときはアドレス項目を
+	// 従来どおりスナップショットへ向けます。無い画面を開こうとして 403 を見せる
+	// よりは、1 枚の絵の方が役に立ちます。
+	Dashboard bool
 	// Printer はメニューの文字列を組み立てます。ゼロ値なら英語になります。
 	Printer i18n.Printer
 	// OnQuit は、ユーザーが終了を選んだとき、トレイが終わる前に呼ばれます。
@@ -277,10 +282,7 @@ func statusLine(p i18n.Printer, snapshot status.Snapshot, paused bool, fps float
 // なります。誰も翻訳していないメッセージの方が、たまたま読み手の言語になっている
 // 曖昧なメッセージより、読む人の役に立ちます。
 func reason(p i18n.Printer, snapshot status.Snapshot) string {
-	if snapshot.LastErrorKey != "" {
-		return p.S(i18n.Key(snapshot.LastErrorKey))
-	}
-	return snapshot.LastError
+	return p.Reported(snapshot.LastErrorKey, snapshot.LastError)
 }
 
 // truncate は、メニュー項目に収まるよう理由を短くします。

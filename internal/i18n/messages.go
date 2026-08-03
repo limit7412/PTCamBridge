@@ -14,6 +14,7 @@ const (
 	MenuStatusStarting  Key = "menu.status.starting"
 	MenuStatusTip       Key = "menu.status.tip"
 	MenuAddressTip      Key = "menu.address.tip"
+	MenuAddressTipUI    Key = "menu.address.tip.ui"
 	MenuSource          Key = "menu.source"
 	MenuSourceTip       Key = "menu.source.tip"
 	MenuSourceUVC       Key = "menu.source.uvc"
@@ -68,6 +69,57 @@ const (
 	CLINoSerialPorts    Key = "cli.no_serial_ports"
 )
 
+// 診断画面。
+//
+// ここはログではなく画面なので翻訳します。読み手はブラウザの前に座っている
+// ユーザーであって、不具合報告に貼られた記録を後から読む人ではありません。
+// 画面が表示する値そのもの — デバイス名、パス、エラーの文言 — は翻訳しません。
+// それらは機械から来たものであり、書き写して検索する対象です。
+const (
+	UITitle       Key = "ui.title"
+	UIStatus      Key = "ui.status"
+	UIPreview     Key = "ui.preview"
+	UIFrames      Key = "ui.frames"
+	UIDevices     Key = "ui.devices"
+	UIFFmpeg      Key = "ui.ffmpeg"
+	UIPlaces      Key = "ui.places"
+	UIUnreachable Key = "ui.unreachable"
+
+	UIFieldSource      Key = "ui.field.source"
+	UIFieldState       Key = "ui.field.state"
+	UIFieldUptime      Key = "ui.field.uptime"
+	UIFieldReconnects  Key = "ui.field.reconnects"
+	UIFieldLastError   Key = "ui.field.last_error"
+	UIFieldInputFPS    Key = "ui.field.input_fps"
+	UIFieldClients     Key = "ui.field.clients"
+	UIFieldPublished   Key = "ui.field.published"
+	UIFieldDropped     Key = "ui.field.dropped"
+	UIFieldFrameSize   Key = "ui.field.frame_size"
+	UIFieldLastFrame   Key = "ui.field.last_frame"
+	UIFieldAddress     Key = "ui.field.address"
+	UIFieldSettings    Key = "ui.field.settings"
+	UIFieldLogs        Key = "ui.field.logs"
+	UIFieldVersion     Key = "ui.field.version"
+	UIFieldCameras     Key = "ui.field.cameras"
+	UIFieldSerialPorts Key = "ui.field.serial_ports"
+
+	UIStateRunning      Key = "ui.state.running"
+	UIStatePaused       Key = "ui.state.paused"
+	UIStateConnecting   Key = "ui.state.connecting"
+	UIStateReconnecting Key = "ui.state.reconnecting"
+	UIStateNoSource     Key = "ui.state.nosource"
+
+	UINone            Key = "ui.none"
+	UIAgo             Key = "ui.ago"
+	UIWaitingForFrame Key = "ui.waiting_for_frame"
+	UIPreviewNote     Key = "ui.preview.note"
+
+	UIFFmpegInstalled   Key = "ui.ffmpeg.installed"
+	UIFFmpegMissing     Key = "ui.ffmpeg.missing"
+	UIFFmpegDownloading Key = "ui.ffmpeg.downloading"
+	UIFFmpegUnsupported Key = "ui.ffmpeg.unsupported"
+)
+
 // ユーザーが何かできると想定される失敗。これだけです。残りはログが記録する英語の
 // ままにします。"read from COM4: access denied" は、どちらの言語であってもログの
 // 文脈無しに対処できるものではないからです。
@@ -81,6 +133,7 @@ var messages = map[Key]map[Lang]string{
 	MenuStatusStarting: {English: "Starting...", Japanese: "起動中..."},
 	MenuStatusTip:      {English: "Current source and frame rate", Japanese: "現在のソースとフレームレート"},
 	MenuAddressTip:     {English: "Stream address; click to open a preview", Japanese: "配信アドレス。クリックでプレビューを開きます"},
+	MenuAddressTipUI:   {English: "Stream address; click to open the diagnostics page", Japanese: "配信アドレス。クリックで診断画面を開きます"},
 	MenuSource:         {English: "Source", Japanese: "ソース"},
 	MenuSourceTip:      {English: "Choose the camera to bridge", Japanese: "中継するカメラを選びます"},
 	MenuSourceUVC:      {English: "UVC camera (USB)", Japanese: "UVC カメラ (USB)"},
@@ -143,6 +196,52 @@ var messages = map[Key]map[Lang]string{
 	CLINoSettingsRead:   {English: "could not read the settings file:", Japanese: "設定ファイルを読めません:"},
 	CLINoDevices:        {English: "could not list capture devices:", Japanese: "カメラを列挙できません:"},
 	CLINoSerialPorts:    {English: "could not list serial ports:", Japanese: "シリアルポートを列挙できません:"},
+
+	UITitle:       {English: "PTCamBridge diagnostics", Japanese: "PTCamBridge 診断"},
+	UIStatus:      {English: "Status", Japanese: "状態"},
+	UIPreview:     {English: "Preview", Japanese: "プレビュー"},
+	UIFrames:      {English: "Frames", Japanese: "フレーム"},
+	UIDevices:     {English: "Devices", Japanese: "デバイス"},
+	UIFFmpeg:      {English: "ffmpeg", Japanese: "ffmpeg"},
+	UIPlaces:      {English: "Places", Japanese: "場所"},
+	UIUnreachable: {English: "PTCamBridge is not answering. It may have stopped.", Japanese: "PTCamBridge が応答しません。終了した可能性があります。"},
+
+	UIFieldSource:      {English: "Source", Japanese: "ソース"},
+	UIFieldState:       {English: "State", Japanese: "状態"},
+	UIFieldUptime:      {English: "Uptime", Japanese: "稼働時間"},
+	UIFieldReconnects:  {English: "Reconnects", Japanese: "再接続"},
+	UIFieldLastError:   {English: "Last error", Japanese: "直近のエラー"},
+	UIFieldInputFPS:    {English: "Input", Japanese: "入力"},
+	UIFieldClients:     {English: "Clients", Japanese: "クライアント"},
+	UIFieldPublished:   {English: "Published", Japanese: "配信"},
+	UIFieldDropped:     {English: "Dropped", Japanese: "破棄"},
+	UIFieldFrameSize:   {English: "Frame size", Japanese: "フレームサイズ"},
+	UIFieldLastFrame:   {English: "Last frame", Japanese: "最終フレーム"},
+	UIFieldAddress:     {English: "Stream address", Japanese: "配信アドレス"},
+	UIFieldSettings:    {English: "Settings file", Japanese: "設定ファイル"},
+	UIFieldLogs:        {English: "Log folder", Japanese: "ログフォルダ"},
+	UIFieldVersion:     {English: "Version", Japanese: "バージョン"},
+	UIFieldCameras:     {English: "Cameras", Japanese: "カメラ"},
+	UIFieldSerialPorts: {English: "Serial ports", Japanese: "シリアルポート"},
+
+	UIStateRunning:      {English: "receiving frames", Japanese: "受信中"},
+	UIStatePaused:       {English: "paused", Japanese: "一時停止中"},
+	UIStateConnecting:   {English: "connecting", Japanese: "接続中"},
+	UIStateReconnecting: {English: "reconnecting", Japanese: "再接続中"},
+	UIStateNoSource:     {English: "no source", Japanese: "ソース未選択"},
+
+	UINone:            {English: "(none)", Japanese: "(なし)"},
+	UIAgo:             {English: "%s ago", Japanese: "%s 前"},
+	UIWaitingForFrame: {English: "Waiting for a frame", Japanese: "フレームを待っています"},
+	UIPreviewNote: {
+		English:  "The preview asks for one still at a time, so it is not counted as a client above.",
+		Japanese: "プレビューは静止画を 1 枚ずつ取得するので、上のクライアント数には数えられません。",
+	},
+
+	UIFFmpegInstalled:   {English: "installed", Japanese: "導入済み"},
+	UIFFmpegMissing:     {English: "not installed; UVC cameras need it", Japanese: "未導入。UVC カメラを使うには必要です"},
+	UIFFmpegDownloading: {English: "downloading... %d%%", Japanese: "ダウンロード中... %d%%"},
+	UIFFmpegUnsupported: {English: "no build is published for this platform", Japanese: "このプラットフォーム向けのビルドはありません"},
 
 	ErrNoCamera: {
 		English:  `No camera configured. Run "ptcambridge -list-devices" to see the cameras attached, then put one of the names in [source.uvc] device in the settings file.`,

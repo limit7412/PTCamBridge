@@ -127,3 +127,17 @@ func (p Printer) S(k Key) string {
 func (p Printer) F(k Key, args ...any) string {
 	return fmt.Sprintf(p.S(k), args...)
 }
+
+// Reported は、機械が出した文言を画面に出すためのものです。key に名前が付いて
+// いればユーザーの言語で、付いていなければ text をそのまま返します。
+//
+// この 2 段構えは status.Snapshot がエラーを運ぶ形そのものです。ユーザーが対処
+// できる少数の失敗にはキーが付き、残りはドライバの文言のまま届きます。後者を
+// 翻訳しないのは、それがログに載っているものと同じ文字列であり、書き写して
+// 検索する対象だからです。
+func (p Printer) Reported(key, text string) string {
+	if key != "" {
+		return p.S(Key(key))
+	}
+	return text
+}
