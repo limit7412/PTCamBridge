@@ -415,8 +415,10 @@ dial・TLS・ヘッダー・最初のフレームでそれぞれ 5 秒、UVC な
 language = "auto"   # "auto" | "en" | "ja"
 ```
 
-`auto` は OS の表示言語に従います (Windows は `GetUserDefaultLocaleName`、
-それ以外は `LC_ALL` / `LC_MESSAGES` / `LANG`)。Windows でも環境変数があれば
+`auto` は OS の表示言語に従います (Windows は `GetUserPreferredUILanguages`、
+それ以外は `LC_ALL` / `LC_MESSAGES` / `LANG`)。Windows で見るのは表示言語であって
+地域形式ではないので、`auto` の結果を変えたい場合は地域設定ではなく表示言語を
+変更してください。Windows でも環境変数があれば
 そちらを優先するので、システム設定を変えずに切り替えて試せます。
 `PTCAMBRIDGE_LANGUAGE=ja` でも指定できます。
 

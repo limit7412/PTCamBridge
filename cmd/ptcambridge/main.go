@@ -414,18 +414,24 @@ func listDevices(opts options) error {
 
 	// The settings are read here too: an installation that points at ffmpeg
 	// with source.uvc.ffmpeg_path rather than bundling it would otherwise get
-	// an empty list from a command whose whole job is to find the camera. The
-	// language comes from the same read, falling back to the system when the
-	// file cannot be had.
+	// an empty list from a command whose whole job is to find the camera.
+	//
+	// The language is resolved separately from that read, and before it. The
+	// messages most in need of the user's own language are the ones about the
+	// settings being unusable, and those are exactly the ones a language taken
+	// from the settings cannot reach: the load has already failed. An empty
+	// path is not a special case -- it finds no file and falls through to the
+	// variable or the system.
+	cfgPath, pathErr := resolveConfigPath(opts.configPath)
+	p := i18n.NewPrinter(config.LanguageWithoutLoading(cfgPath, os.Getenv))
+
 	var ffmpegPath string
-	p := i18n.NewPrinter(i18n.Detect())
-	if cfgPath, err := resolveConfigPath(opts.configPath); err != nil {
-		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoSettingsPath), err)
+	if pathErr != nil {
+		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoSettingsPath), pathErr)
 	} else if cfg, err := config.Load(cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoSettingsRead), err)
 	} else {
 		ffmpegPath = cfg.Source.UVC.FFmpegPath
-		p = i18n.NewPrinter(cfg.Language())
 	}
 
 	cameras, err := source.ListDevices(ctx, ffmpegPath)
@@ -594,10 +600,8 @@ func restoreCache(opts options) error {
 	// there is none. This command is what somebody runs while uninstalling, so
 	// putting the settings folder back on a machine they are clearing is the
 	// one thing it must not do.
-	p := i18n.NewPrinter(i18n.Detect())
-	if cfgPath, err := resolveConfigPath(opts.configPath); err == nil {
-		p = i18n.NewPrinter(config.LanguageWithoutLoading(cfgPath, os.Getenv))
-	}
+	cfgPath, _ := resolveConfigPath(opts.configPath)
+	p := i18n.NewPrinter(config.LanguageWithoutLoading(cfgPath, os.Getenv))
 
 	restored, err := restoreEverywhereItWas(configuredInstallDir(opts))
 	for _, dir := range restored {

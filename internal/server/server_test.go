@@ -1202,3 +1202,64 @@ func TestFFmpegEndpointRefusesACrossSiteRequest(t *testing.T) {
 		t.Errorf("a cross-site request started %d downloads", fetcher.starts)
 	}
 }
+
+// A client written before ui existed cannot send it, and the settings it does
+// send are none of its business to change. Decaying the field it never named
+// to a default would look like a request to change a startup-only setting, and
+// the whole request would be refused -- shutting that client out of the
+// management API over something it never touched.
+func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
+	running := config.Default()
+	running.UI.Language = "ja"
+	ctrl := &fakeController{cfg: running}
+
+	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	put := func(t *testing.T, body string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+
+	// The old schema: everything it knows about, and no ui.
+	old := config.Default()
+	old.UI = config.UI{}
+	body, _ := json.Marshal(old)
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	delete(fields, "ui")
+	withoutUI, _ := json.Marshal(fields)
+
+	resp := put(t, string(withoutUI))
+	if resp.StatusCode != http.StatusOK {
+		out, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want the request accepted: %s", resp.StatusCode, out)
+	}
+	if got := ctrl.cfg.UI.Language; got != "ja" {
+		t.Errorf("language = %q, want the running ja carried through untouched", got)
+	}
+
+	// Naming it still changes it, so the carry-through cannot hide a real edit.
+	named := config.Default()
+	named.UI.Language = "en"
+	namedBody, _ := json.Marshal(named)
+
+	resp = put(t, string(namedBody))
+	if resp.StatusCode != http.StatusOK {
+		out, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d: %s", resp.StatusCode, out)
+	}
+	if got := ctrl.cfg.UI.Language; got != "en" {
+		t.Errorf("language = %q, want the explicit en", got)
+	}
+}
