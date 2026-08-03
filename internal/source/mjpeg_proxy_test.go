@@ -464,3 +464,41 @@ func TestMJPEGProxyGivesUpOnDataThatNeverBecomesFrames(t *testing.T) {
 		t.Fatal("the session stayed open on data that never became a frame")
 	}
 }
+
+// Cancellation is not a failure, and the difference carries: the bridge reads
+// a non-nil error from Run as the source having died under it, and stops
+// counting the settings that produced it as working. A driver that reported
+// its own shutdown as an error would make every pause look like a fault.
+func TestMJPEGReturnsNilWhenCancelled(t *testing.T) {
+	upstream := serveMultipart(t, testJPEG(t), "frame", true, 0)
+	defer upstream.Close()
+
+	p, err := NewMJPEGProxy(MJPEGConfig{URL: upstream.URL}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewMJPEGProxy: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	frames := make(chan core.Frame, 4)
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx, frames) }()
+
+	// Cancel once it is streaming, so the stop lands mid-read rather than
+	// before the driver has done anything.
+	select {
+	case <-frames:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("no frame arrived, so the cancellation would not be mid-stream")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v on cancellation, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after its context was cancelled")
+	}
+}

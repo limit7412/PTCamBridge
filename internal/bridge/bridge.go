@@ -779,12 +779,23 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		defer close(frames)
 		// Run only returns on cancellation or on a failure retrying cannot
 		// fix, so any error here means this source will never produce a frame.
-		if err := drv.Run(ctx, frames); err != nil && ctx.Err() == nil {
-			log.Error("source stopped", "source", drv.Name(), "error", err)
-			// Before the send: a source that has stopped is not one the
-			// bridge may still count on, whether or not anybody is waiting to
-			// hear about it. Startup and resume are not.
+		err := drv.Run(ctx, frames)
+		if err != nil {
+			// Recorded whatever the context says, because the two race: a
+			// driver that has just returned its failure and a pause that
+			// cancels before this line reads ctx.Err() would leave the
+			// settings looking proven with nothing behind them, which is the
+			// state this exists to rule out.
+			//
+			// Reading it here would also be asking the wrong question. A
+			// driver returns nil when its own context is cancelled -- all
+			// three do, and being able to say "it stopped because it was
+			// told to" is the whole reason they bother -- so a non-nil error
+			// is a failure of the source, not of the cancellation.
 			b.died.Store(true)
+		}
+		if err != nil && ctx.Err() == nil {
+			log.Error("source stopped", "source", drv.Name(), "error", err)
 			failed <- err
 		}
 	}()
