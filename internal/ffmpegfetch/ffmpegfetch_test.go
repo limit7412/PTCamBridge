@@ -19,17 +19,16 @@ import (
 	"time"
 )
 
-// The tests never reach the network. Every one of them serves the archive it
-// expects from an httptest server, which is also the only way to exercise a
-// download that is wrong in a specific way.
+// テストはネットワークに出ない。どのテストも、期待するアーカイブを httptest の
+// サーバから配る。特定の壊れ方をしたダウンロードを再現する唯一の方法でもある。
 
 const (
 	binaryBody = "not really ffmpeg, but the bytes that get installed"
 	noticeBody = "GNU LESSER GENERAL PUBLIC LICENSE Version 2.1"
 )
 
-// buildArchive returns a zip laid out the way the published one is: everything
-// under a single folder named after the version.
+// buildArchive は、公開されているものと同じ配置の zip を返す。すべてがバージョン名の
+// フォルダ 1 つの下に入る。
 func buildArchive(t *testing.T, members map[string]string) []byte {
 	t.Helper()
 
@@ -64,8 +63,8 @@ func digestOf(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// serve publishes the archive and returns a manager pointed at it, installing
-// into a directory of the test's own.
+// serve はアーカイブを公開し、それを指す manager を返す。設置先はテスト自身の
+// ディレクトリ。
 func serve(t *testing.T, archive []byte) (*Manager, string) {
 	t.Helper()
 	return serveWith(t, archive, digestOf(archive), int64(len(archive)))
@@ -109,7 +108,7 @@ func TestFetchInstallsTheBinaryAndItsLicence(t *testing.T) {
 	if got := readFile(t, filepath.Join(dir, noticeName)); got != noticeBody {
 		t.Errorf("installed licence = %q, want %q", got, noticeBody)
 	}
-	// The other executables in the archive are not ours to install.
+	// アーカイブに含まれる他の実行ファイルは、こちらが設置すべきものではない。
 	if _, err := os.Stat(filepath.Join(dir, "ffplay.exe")); !os.IsNotExist(err) {
 		t.Errorf("ffplay.exe stat error = %v, want it not to be installed", err)
 	}
@@ -122,8 +121,8 @@ func TestFetchLeavesNoArchiveBehind(t *testing.T) {
 		t.Fatalf("Fetch: %v", err)
 	}
 
-	// A hundred-odd megabytes of temporary file is not something to leave in
-	// the user's settings folder.
+	// 100 メガバイト強の一時ファイルは、ユーザーの設定フォルダに残してよいもの
+	// ではない。
 	for _, name := range readDir(t, dir) {
 		if strings.HasPrefix(name, "ffmpeg-download-") || strings.Contains(name, ".exe.") {
 			t.Errorf("%s was left behind in %s", name, dir)
@@ -142,13 +141,13 @@ func TestFetchRejectsAnArchiveWithTheWrongDigest(t *testing.T) {
 	if !strings.Contains(err.Error(), "digest") {
 		t.Errorf("error = %v, want it to name the digest", err)
 	}
-	// Nothing may be installed from an archive that failed its check.
+	// 検査に失敗したアーカイブからは、何も設置してはならない。
 	assertEmptyOfInstalls(t, dir)
 }
 
 func TestFetchRejectsAnArchiveOfTheWrongLength(t *testing.T) {
 	archive := defaultArchive(t)
-	// The digest is right for the body served; only the pinned length is not.
+	// ダイジェストは配った本体に対して正しい。合っていないのは固定した長さだけ。
 	m, dir := serveWith(t, archive, digestOf(archive), int64(len(archive))+10)
 
 	_, err := m.Fetch(context.Background())
@@ -161,8 +160,8 @@ func TestFetchRejectsAnArchiveOfTheWrongLength(t *testing.T) {
 	assertEmptyOfInstalls(t, dir)
 }
 
-// A body longer than the pinned length has to fail as a length mismatch rather
-// than be truncated to something that could accidentally match.
+// 固定した長さより長い本体は、たまたま一致し得る何かに切り詰められるのではなく、
+// 長さの不一致として失敗しなければならない。
 func TestFetchRejectsABodyLongerThanPinned(t *testing.T) {
 	archive := defaultArchive(t)
 	m, dir := serveWith(t, append(archive, "trailing rubbish"...), digestOf(archive), int64(len(archive)))
@@ -190,8 +189,8 @@ func TestFetchRejectsAnArchiveMissingTheBinary(t *testing.T) {
 	assertEmptyOfInstalls(t, dir)
 }
 
-// The licence text is installed first precisely so this cannot happen the
-// other way round: an ffmpeg on disk without the licence beside it.
+// ライセンス本文を先に設置するのは、まさにその逆が起きないようにするため。
+// 隣にライセンスの無い ffmpeg がディスク上にある、という状態。
 func TestFetchInstallsNothingWhenTheLicenceIsMissing(t *testing.T) {
 	archive := buildArchive(t, map[string]string{"bin/ffmpeg.exe": binaryBody})
 	m, dir := serve(t, archive)
@@ -221,15 +220,15 @@ func TestFetchFailsOnAnErrorResponse(t *testing.T) {
 	assertEmptyOfInstalls(t, dir)
 }
 
-// Cancelling has to stop the download and clean up after it, or a user who
-// changes their mind is left with the temporary file anyway.
+// キャンセルはダウンロードを止め、後片付けもしなければならない。さもないと気が
+// 変わったユーザーの手元に、結局一時ファイルが残る。
 func TestFetchStopsWhenTheContextIsCancelled(t *testing.T) {
 	archive := defaultArchive(t)
 
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1000000")
-		// Enough to have started, then a stall until the test lets go.
+		// 開始したと言える程度だけ送り、その後はテストが解放するまで止まる。
 		_, _ = w.Write(archive[:10])
 		w.(http.Flusher).Flush()
 		<-release
@@ -246,8 +245,8 @@ func TestFetchStopsWhenTheContextIsCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		// Wait until bytes have actually arrived, so the cancellation lands
-		// mid-download rather than before the request was made.
+		// 実際にバイトが届くまで待つ。キャンセルが、リクエスト前ではなく
+		// ダウンロードの途中に落ちるようにするため。
 		for i := 0; i < 200; i++ {
 			if m.State().Received > 0 {
 				break
@@ -329,8 +328,8 @@ func TestStateReportsWhyTheLastAttemptFailed(t *testing.T) {
 	}
 }
 
-// Both the tray and the API can ask. The second ask while the first is running
-// is not another job: it is the same file to the same place.
+// トレイからも API からも要求できる。1 つ目が走っている最中の 2 つ目の要求は別の
+// 仕事ではない。同じ場所への同じファイルだ。
 func TestASecondFetchIsRefusedWhileOneIsRunning(t *testing.T) {
 	archive := defaultArchive(t)
 
@@ -369,7 +368,7 @@ func TestASecondFetchIsRefusedWhileOneIsRunning(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("first Fetch: %v", err)
 	}
-	// And once it is over, asking again is allowed.
+	// そして終わってしまえば、また要求できる。
 	if _, err := m.Fetch(context.Background()); err != nil {
 		t.Errorf("Fetch after the first finished: %v", err)
 	}
@@ -388,8 +387,8 @@ func TestStartRunsInTheBackground(t *testing.T) {
 	}
 }
 
-// The archive names its top folder after the version, so members are matched
-// by their trailing path rather than in full.
+// アーカイブは最上位フォルダをバージョンにちなんで命名するので、要素は全体では
+// なく末尾のパスで照合する。
 func TestFindEntryMatchesTheTrailingPath(t *testing.T) {
 	archive := defaultArchive(t)
 	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
@@ -405,8 +404,8 @@ func TestFindEntryMatchesTheTrailingPath(t *testing.T) {
 		t.Errorf("found %q, want the bin/ffmpeg.exe member", found.Name)
 	}
 
-	// A suffix that only matches part of a path segment is not a match:
-	// "mpeg.exe" must not find "ffmpeg.exe".
+	// パス要素の一部にしか一致しない接尾辞は一致とみなさない。"mpeg.exe" が
+	// "ffmpeg.exe" を見つけてはいけない。
 	if _, err := findEntry(zr, "mpeg.exe"); err == nil {
 		t.Error("findEntry matched a partial path segment")
 	}
@@ -440,9 +439,9 @@ func TestPathLivesUnderTheSettingsFolder(t *testing.T) {
 	}
 }
 
-// The pinned build is the one thing here that cannot be tested against a
-// server, so at least check it is internally consistent: a digest and a length
-// that are obviously unset would disable verification altogether.
+// 固定したビルドは、ここでサーバ相手に検証できない唯一のもの。せめて内部の
+// 整合性だけは確認する。明らかに未設定のダイジェストと長さは、検証そのものを
+// 無効にしてしまう。
 func TestPinnedBuildIsFullyPinned(t *testing.T) {
 	b := Pinned()
 	if len(b.SHA256) != 64 {
@@ -454,8 +453,8 @@ func TestPinnedBuildIsFullyPinned(t *testing.T) {
 	if !strings.HasPrefix(b.URL, "https://") {
 		t.Errorf("pinned URL %q is not https", b.URL)
 	}
-	// A rolling tag is rebuilt under the same URL, which would make the digest
-	// wrong within a day.
+	// 転がり続けるタグは同じ URL の下で作り直されるので、ダイジェストは 1 日で
+	// 誤りになる。
 	if strings.Contains(b.URL, "/latest/") {
 		t.Errorf("pinned URL %q points at a rolling tag", b.URL)
 	}
@@ -507,8 +506,8 @@ func waitFor(t *testing.T, done func() bool) {
 	t.Fatal("timed out waiting")
 }
 
-// Shutting the bridge down has to take an in-flight download with it, or the
-// process stays alive pulling a hundred megabytes nobody is waiting for.
+// ブリッジの停止は、進行中のダウンロードも道連れにしなければならない。さもないと
+// プロセスは、誰も待っていない 100 メガバイトを引きながら生き続ける。
 func TestStartStopsWhenTheLifetimeEnds(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -517,8 +516,7 @@ func TestStartStopsWhenTheLifetimeEnds(t *testing.T) {
 		w.(http.Flusher).Flush()
 		<-release
 	}))
-	// Closing the server waits for the handler, so the handler has to be let
-	// go first.
+	// サーバを閉じるとハンドラを待つので、先にハンドラを解放しなければならない。
 	defer srv.Close()
 	defer close(release)
 
@@ -544,9 +542,9 @@ func TestStartStopsWhenTheLifetimeEnds(t *testing.T) {
 	assertEmptyOfInstalls(t, dir)
 }
 
-// A server that answers and then goes quiet produces no bytes and no error.
-// Without a watchdog the download hangs until the bridge exits, with the menu
-// stuck on "Downloading..." and every retry refused as busy.
+// 応答した後に黙り込むサーバは、バイトもエラーも生まない。監視が無ければ
+// ダウンロードはブリッジが終了するまで固まり、メニューは "Downloading..." のまま、
+// 再試行はすべて実行中として拒否される。
 func TestFetchGivesUpWhenTheServerStopsSending(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -579,14 +577,15 @@ func TestFetchGivesUpWhenTheServerStopsSending(t *testing.T) {
 			t.Errorf("%s was left behind after a stall", name)
 		}
 	}
-	// And the manager is free again rather than stuck reporting a download.
+	// そして manager は、ダウンロード中と報告し続けたまま固まるのではなく、
+	// 再び自由になる。
 	if state := m.State(); state.Downloading {
 		t.Error("still reporting a download after the stall")
 	}
 }
 
-// A slow trickle is not a stall. Abandoning a download that is working, just
-// slowly, is worse than the hang the watchdog exists to prevent.
+// 細く遅い流れは停滞ではない。遅いだけで機能しているダウンロードを見捨てることは、
+// この監視が防ごうとしている固まりよりも悪い。
 func TestFetchToleratesASlowButMovingDownload(t *testing.T) {
 	archive := defaultArchive(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -602,8 +601,8 @@ func TestFetchToleratesASlowButMovingDownload(t *testing.T) {
 	dir := t.TempDir()
 	m := New(Options{
 		Dir: dir,
-		// Far shorter than the whole transfer takes, so this only passes if the
-		// watchdog is measuring the gap between reads rather than the total.
+		// 転送全体にかかる時間よりはるかに短くする。監視が合計ではなく読み取りの
+		// 間隔を測っている場合にだけ、これは通る。
 		StallTimeout: 200 * time.Millisecond,
 		Build: Build{
 			URL: srv.URL, SHA256: digestOf(archive), Size: int64(len(archive)),
@@ -617,7 +616,7 @@ func TestFetchToleratesASlowButMovingDownload(t *testing.T) {
 	}
 }
 
-// Shutdown has to outlast the cleanup, not just the transfer.
+// 停止処理は、転送だけでなく後片付けよりも長く生きなければならない。
 func TestWaitReturnsOnlyAfterTheDownloadHasTidiedUp(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -651,8 +650,8 @@ func TestWaitReturnsOnlyAfterTheDownloadHasTidiedUp(t *testing.T) {
 		t.Fatal("Wait timed out")
 	}
 
-	// The point of waiting: by the time it returns, the part-downloaded
-	// archive is gone.
+	// 待つことの意味はここ。返ってきた時点で、途中まで落としたアーカイブは消えて
+	// いる。
 	for _, name := range readDir(t, dir) {
 		if strings.HasPrefix(name, "ffmpeg-download-") {
 			t.Errorf("%s was still there when Wait returned", name)
@@ -660,7 +659,7 @@ func TestWaitReturnsOnlyAfterTheDownloadHasTidiedUp(t *testing.T) {
 	}
 }
 
-// Waiting on a manager that is doing nothing returns at once.
+// 何もしていない manager を待てば、すぐ返る。
 func TestWaitReturnsImmediatelyWithNoDownload(t *testing.T) {
 	m, _ := serve(t, defaultArchive(t))
 
