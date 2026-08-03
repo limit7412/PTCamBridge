@@ -1935,3 +1935,171 @@ func TestApplyRefusesALanguageChangeWhileRunning(t *testing.T) {
 		t.Error("the rejected language was kept anyway")
 	}
 }
+
+// silentUpstream answers and then says nothing, so a driver connects and waits
+// where a verification cannot.
+func silentUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	done := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(done); ts.Close() })
+	return ts
+}
+
+// The corner from the field: a bridge that came up on settings it could never
+// start, then a change that fails verification. Going back to settings that
+// were not running either fails for a second, unrelated reason, and reporting
+// both buries the one the caller asked about. What matters more is what comes
+// after -- the user has to be able to pick a source that works.
+func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	frames := hub.New()
+	// uvc with no device name: a driver that cannot even be built.
+	b := New(config.Default(), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err == nil {
+		t.Fatal("expected the unconfigured camera to fail to start")
+	}
+	defer b.Stop()
+
+	// A change that connects but never delivers, so verification rejects it.
+	silent := mjpegConfig(silentUpstream(t).URL)
+	err := b.Apply(ctx, silent)
+	if err == nil {
+		t.Fatal("expected the silent upstream to fail verification")
+	}
+	if strings.Contains(err.Error(), "could not be restored") {
+		t.Errorf("error = %v, want only the failure the caller asked about", err)
+	}
+
+	// The point of all of it: another source can still be chosen.
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	if err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+		t.Fatalf("could not switch to a working source afterwards: %v", err)
+	}
+	waitForFrame(t, frames, 5*time.Second)
+}
+
+// Resuming is not a claim that the source works, any more than starting up is.
+// Failing it left the bridge paused, and a paused bridge would not take a
+// different source: the two together had no way out but the settings file.
+//
+// The pause and the resume are the ones in the reported log, on a bridge that
+// came up on a camera it could not build.
+func TestBridgeResumesEvenWhenTheSourceCannotStart(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	tracker := status.New()
+	b := New(config.Default(), "", hub.New(), tracker, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err == nil {
+		t.Fatal("expected the unconfigured camera to fail to start")
+	}
+	defer b.Stop()
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := b.SetPaused(false); err != nil {
+		t.Errorf("resume reported %v, want it to succeed and leave the driver retrying", err)
+	}
+	if b.Paused() {
+		t.Fatal("the bridge is still paused after resuming")
+	}
+
+	snapshot := tracker.Snapshot()
+	if snapshot.Paused {
+		t.Error("the status still says paused")
+	}
+	if snapshot.LastError == "" {
+		t.Error("the status has no reason, so nothing tells the user why there is no picture")
+	}
+
+	// And the way out is open: a source that works can be chosen.
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	if err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+		t.Fatalf("could not switch to a working source after resuming: %v", err)
+	}
+}
+
+// Refusing a change while paused protects a working source from being traded
+// for an unproven one. With no working source it protects nothing, and takes
+// away the only move left.
+func TestBridgeAcceptsASourceChangeWhilePausedWithNothingRunning(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	frames := hub.New()
+	b := New(config.Default(), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err == nil {
+		t.Fatal("expected the unconfigured camera to fail to start")
+	}
+	defer b.Stop()
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	if err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+		t.Fatalf("changing source while paused with nothing running: %v", err)
+	}
+	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
+		t.Errorf("source = %q, want the change to have been kept", got)
+	}
+
+	// Still paused, so the change is held rather than started.
+	if !b.Paused() {
+		t.Error("the change unpaused the bridge")
+	}
+	if err := b.SetPaused(false); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	waitForFrame(t, frames, 5*time.Second)
+}
+
+// The protection itself has to survive: a source that works is not traded for
+// an unproven one just because the bridge is paused.
+func TestBridgeStillRefusesASourceChangeWhilePausedWithAWorkingSource(t *testing.T) {
+	frames := hub.New()
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitForFrame(t, frames, 5*time.Second)
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	other := mjpegConfig(mjpegUpstream(t, testJPEG(t, 32, 32)).URL)
+	err := b.Apply(ctx, other)
+	if err == nil {
+		t.Fatal("a working source was traded for an unproven one while paused")
+	}
+	if !strings.Contains(err.Error(), "resume first") {
+		t.Errorf("error = %v, want it to say what to do", err)
+	}
+}

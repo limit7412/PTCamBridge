@@ -96,6 +96,20 @@ type Bridge struct {
 	cancel  context.CancelFunc
 	stopped chan struct{}
 	paused  bool
+
+	// proven says the settings in cfg got a driver running, and that nothing
+	// since has said otherwise.
+	//
+	// Two decisions need it, and both went wrong without it. Reverting a
+	// failed change assumed the settings it went back to had been working;
+	// when they had not -- the bridge started on a source it could never
+	// build, which is what unconfigured UVC does -- the revert failed too and
+	// left nothing capturing. Refusing a change while paused assumed there was
+	// a working source to protect, and went on refusing when there was not.
+	//
+	// Pausing does not clear it. A source deliberately stopped is still one
+	// that works, and that is exactly what the refusal above is protecting.
+	proven bool
 }
 
 // pendingSave is a settings write that failed and still has to happen.
@@ -212,6 +226,10 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	}
 
 	previous := b.cfg
+	// Read before anything is torn down: from here on the flag tracks the
+	// settings being tried, and whether the ones being replaced were working
+	// is the only thing that says a revert can succeed.
+	provenBefore := b.proven
 	if err := restartRequired(previous, cfg); err != nil {
 		return err
 	}
@@ -224,7 +242,13 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	// resuming does not verify either -- a camera plugged in after sign-in has
 	// to be picked up, so resume leaves the driver retrying exactly as startup
 	// does. Saying so is better than any of that.
-	if b.paused && !captureUnchanged(previous, cfg) {
+	//
+	// All of which assumes there is a known-good configuration. With none --
+	// nothing ever started, or what did has since failed -- the refusal
+	// protects nothing and only takes away the one move left: picking a
+	// different source. Somebody who pauses a bridge that is already down
+	// would have to edit the settings file to get it back.
+	if b.paused && b.proven && !captureUnchanged(previous, cfg) {
 		return errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
 	}
 
@@ -252,6 +276,15 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 			b.log.Error("new settings could not start a source, reverting", "error", err)
 			b.cfg = previous
 			b.publishView()
+
+			if !provenBefore {
+				// Nothing was running before this change either, so there is
+				// nothing to put back. Trying anyway fails for a second reason
+				// that has nothing to do with what the caller asked for, and
+				// reporting the pair of them buries the one that does.
+				b.log.Warn("nothing is capturing: the settings in place before this change had not started a source either")
+				return err
+			}
 			// The previous source was working, so it is put back without being
 			// made to prove itself again.
 			if revertErr := b.startLocked(); revertErr != nil {
@@ -593,7 +626,20 @@ func (b *Bridge) SetPaused(paused bool) error {
 		return nil
 	}
 	b.log.Info("capture resumed")
-	return b.startLocked()
+	if err := b.startLocked(); err != nil {
+		// Resuming is not a claim that the source works, any more than
+		// starting up is: both leave a driver retrying so that a camera
+		// plugged in later is picked up. Failing the resume instead left the
+		// bridge paused, and a paused bridge is one that cannot be handed a
+		// different source -- the two together are a corner with no way out
+		// short of editing the settings file.
+		//
+		// The reason is not lost by returning nil here. Whatever could not
+		// start is on the status tracker, which is what the tray shows and
+		// what /healthz answers with.
+		b.log.Error("capture resumed but the source could not be started", "error", err)
+	}
+	return nil
 }
 
 // Paused reports whether capture is currently paused. Like Snapshot it reads
@@ -635,6 +681,11 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		// produce a driver. Accepting them unchecked while paused would save a
 		// configuration that Resume then cannot start, with the previous
 		// working one already gone.
+		//
+		// Constructing one is not running one, so these settings are unproven
+		// whichever way it goes. Leaving the flag as it was would credit them
+		// with what the settings they replaced had done.
+		b.proven = false
 		_, err := b.newSource()
 		return err
 	}
@@ -647,6 +698,7 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		// connected, both of which describe something that is trying. The
 		// default settings have no UVC device name, so this is the first thing
 		// a new user meets.
+		b.proven = false
 		b.status.SetSource(b.cfg.Source.Type)
 		b.status.Disconnected(b.cfg.Source.Type, err)
 		return err
@@ -709,9 +761,13 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	}()
 
 	if verifyCtx == nil {
+		b.proven = true
 		b.log.Info("source started", "source", drv.Name())
 		return nil
 	}
+
+	// Everything from here to the frame is a way of not getting one.
+	b.proven = false
 
 	timer := time.NewTimer(startVerifyTimeout)
 	defer timer.Stop()
@@ -743,6 +799,7 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		return err
 	}
 
+	b.proven = true
 	b.log.Info("source started", "source", drv.Name())
 	return nil
 }
