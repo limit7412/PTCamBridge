@@ -70,7 +70,7 @@ type Bridge struct {
 
 	// persistBase is what the settings file said, before the environment and
 	// the command line were layered on. Saving starts from this so a
-	// -device or a PAPERBRIDGE_* meant for one run is not written back as if
+	// -device or a PTCAMBRIDGE_* meant for one run is not written back as if
 	// the user had chosen it permanently.
 	persistBase config.Config
 

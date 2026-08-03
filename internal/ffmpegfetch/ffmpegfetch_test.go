@@ -421,7 +421,7 @@ func TestPathLivesUnderTheSettingsFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Path: %v", err)
 	}
-	want := filepath.Join(dir, "PaperBridge", "bin", binaryName())
+	want := filepath.Join(dir, "PTCamBridge", "bin", binaryName())
 	if path != want {
 		t.Errorf("Path() = %q, want %q", path, want)
 	}

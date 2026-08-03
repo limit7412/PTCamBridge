@@ -151,7 +151,7 @@ func TestRestoreUndoesEveryFolderTheBridgeWroteTo(t *testing.T) {
 }
 
 // Undoing what the bridge did to somebody else's application must not depend on
-// the whole settings file being valid. Someone uninstalling PaperBridge with a
+// the whole settings file being valid. Someone uninstalling PTCamBridge with a
 // misspelled key or an out-of-range value in it would otherwise be told nothing
 // was changed, while the client still points at the bridge they are removing.
 func TestRestoreReadsInstallDirFromAnOtherwiseUnusableSettingsFile(t *testing.T) {
@@ -175,7 +175,7 @@ func TestRestoreReadsInstallDirFromAnOtherwiseUnusableSettingsFile(t *testing.T)
 		t.Fatalf("WriteCache: %v", err)
 	}
 
-	cfgPath := filepath.Join(t.TempDir(), "paperbridge.toml")
+	cfgPath := filepath.Join(t.TempDir(), "ptcambridge.toml")
 	settings := "[server]\nlsiten = 'oops'\n\n[papertracker]\ninstall_dir = '" + install + "'\n"
 	if err := os.WriteFile(cfgPath, []byte(settings), 0o644); err != nil {
 		t.Fatalf("write the settings: %v", err)

@@ -28,8 +28,8 @@ func Run(ctx context.Context, opts Options) {
 
 func onReady(ctx context.Context, opts Options) {
 	systray.SetIcon(iconICO)
-	systray.SetTitle("PaperBridge")
-	systray.SetTooltip("PaperBridge")
+	systray.SetTitle("PTCamBridge")
+	systray.SetTooltip("PTCamBridge")
 
 	statusItem := systray.AddMenuItem("Starting...", "Current source and frame rate")
 	statusItem.Disable()
@@ -49,7 +49,7 @@ func onReady(ctx context.Context, opts Options) {
 	if opts.LogDir == "" {
 		logItem.Hide()
 	}
-	configItem := systray.AddMenuItem("Edit settings", "Open paperbridge.toml")
+	configItem := systray.AddMenuItem("Edit settings", "Open ptcambridge.toml")
 	if opts.ConfigPath == "" {
 		configItem.Hide()
 	}
@@ -59,7 +59,7 @@ func onReady(ctx context.Context, opts Options) {
 		ffmpegItem.Hide()
 	}
 
-	autostartItem := systray.AddMenuItemCheckbox("Start with Windows", "Launch PaperBridge at sign-in", false)
+	autostartItem := systray.AddMenuItemCheckbox("Start with Windows", "Launch PTCamBridge at sign-in", false)
 	if !autostart.Supported() {
 		autostartItem.Hide()
 	} else if on, err := autostart.Enabled(opts.ConfigFlag); err != nil {
@@ -69,7 +69,7 @@ func onReady(ctx context.Context, opts Options) {
 	}
 
 	systray.AddSeparator()
-	quitItem := systray.AddMenuItem("Quit", "Stop PaperBridge")
+	quitItem := systray.AddMenuItem("Quit", "Stop PTCamBridge")
 
 	go run(ctx, opts, menu{
 		status:    statusItem,
@@ -216,7 +216,7 @@ func refresh(opts Options, m menu) {
 	}
 
 	m.status.SetTitle(statusLine(snapshot.Source, paused, snapshot.Connected, stats.InputFPS, stats.Subscribers, snapshot.LastError))
-	systray.SetTooltip("PaperBridge - " + m.status.String())
+	systray.SetTooltip("PTCamBridge - " + m.status.String())
 }
 
 // statusLine is the one line of text the user reads to know whether it works.
@@ -255,10 +255,10 @@ func startFFmpegFetch(opts Options) {
 	case state.Installed:
 		// Already there. Saying so beats a click that looks like it did
 		// nothing, and re-downloading a working ffmpeg is not what it means.
-		confirm("PaperBridge", "ffmpeg is already installed:\n\n"+state.Path)
+		confirm("PTCamBridge", "ffmpeg is already installed:\n\n"+state.Path)
 		return
 	}
-	if !confirm("PaperBridge - download ffmpeg", ffmpegPrompt(state.Source)) {
+	if !confirm("PTCamBridge - download ffmpeg", ffmpegPrompt(state.Source)) {
 		return
 	}
 	if err := opts.FFmpeg.Start(); err != nil {

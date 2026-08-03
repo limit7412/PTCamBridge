@@ -1,4 +1,4 @@
-# PaperBridge
+# PTCamBridge
 
 Baballonia / Project Babble 系の口トラッキングカメラを、PaperTracker クライアントが期待する
 MJPEG over HTTP ストリームとしてローカルホストに再配信する Windows 常駐ブリッジです。
@@ -31,11 +31,51 @@ multipart エンコードは副作用のない純粋関数として `internal/co
 
 Windows 10 / 11 (x64) 向けの単一実行ファイルです。
 
-1. `paperbridge.exe` を任意のフォルダへ配置する
+1. `ptcambridge.exe` を任意のフォルダへ配置する
 2. 実行するとタスクトレイに常駐する
 3. UVC カメラを使う場合のみ ffmpeg を用意する (下記)
 
-初回起動時に `%APPDATA%\PaperBridge\paperbridge.toml` が既定値で生成されます。
+初回起動時に `%APPDATA%\PTCamBridge\ptcambridge.toml` が既定値で生成されます。
+
+### PaperBridge (v0.1.x) からの移行
+
+アプリ名を PTCamBridge に統一したため、名前を持つものはすべて変わりました。
+**旧バージョンの設定・データは引き継ぎません。** 自動移行は入れていないので、
+必要なものは手で移してください。
+
+| 旧 | 新 |
+|---|---|
+| `%APPDATA%\PaperBridge\` | `%APPDATA%\PTCamBridge\` |
+| `paperbridge.toml` | `ptcambridge.toml` |
+| `paperbridge.log` | `ptcambridge.log` |
+| `PAPERBRIDGE_*` 環境変数 | `PTCAMBRIDGE_*` |
+| レジストリ `Run\PaperBridge` | `Run\PTCamBridge` |
+| `wifi_cache.txt.paperbridge-backup` | `wifi_cache.txt.ptcambridge-backup` |
+| multipart boundary の既定値 `paperbridge` | `ptcambridge` |
+
+手順は次のとおりです。以下の `旧exe` は、お使いの旧バージョンの実行ファイル名に
+読み替えてください。リリースからダウンロードしたものは
+`paperbridge-windows-amd64-0.1.1.exe` のようにバージョンが付いた名前です。
+
+1. **旧バージョンを終了する** (トレイアイコンから Quit)。
+   常駐したままだと 5 のフォルダ削除が失敗し (Windows が実行中の exe をロックします)、
+   新バージョンも既定ポートを取れずに起動できません
+2. **`旧exe -restore-cache` を実行する。**
+   `write_cache` を使っていた場合、これを先にやらないと PaperTracker 側に残った
+   `wifi_cache.txt.paperbridge-backup` は新バージョンからは見えず、クライアントが
+   ブリッジを指したまま戻せなくなります
+3. 旧バージョンで自動起動を登録していた場合は `旧exe -uninstall-autostart`
+   を実行する (レジストリのエントリ名が変わるため、残すと存在しない exe を指し続けます)
+4. 引き継ぐものがあれば手で移す
+   - 設定: `%APPDATA%\PaperBridge\paperbridge.toml` →
+     `%APPDATA%\PTCamBridge\ptcambridge.toml`
+   - 取得済み ffmpeg: `%APPDATA%\PaperBridge\bin\` → `%APPDATA%\PTCamBridge\bin\`
+     (100 MB 超の再ダウンロードを避けるため。移さなければトレイから取り直せます)
+5. `%APPDATA%\PaperBridge\` と旧 exe を削除する
+
+`server.boundary` を明示的に設定している場合、その値は変わりません。既定値のまま
+使っている場合はストリームの boundary 文字列が変わりますが、PaperTracker
+クライアントは boundary を `--` の探索で見つけるため影響ありません。
 
 ### ffmpeg (UVC カメラを使う場合のみ)
 
@@ -45,17 +85,17 @@ ffmpeg が要ります。用意する方法は 2 つあります。
 
 - **トレイメニューの「Get ffmpeg」** — 配布元・サイズ・ライセンスを確認する
   ダイアログが出て、同意すると発行元 (BtbN/FFmpeg-Builds) から直接ダウンロードし、
-  `%APPDATA%\PaperBridge\bin\ffmpeg.exe` に配置します。ダウンロード内容は
+  `%APPDATA%\PTCamBridge\bin\ffmpeg.exe` に配置します。ダウンロード内容は
   SHA-256 で検証します。
-- **自分で用意する** — `paperbridge.exe` と同じフォルダに `ffmpeg.exe` を置くか、
+- **自分で用意する** — `ptcambridge.exe` と同じフォルダに `ffmpeg.exe` を置くか、
   PATH に通すか、`[source.uvc] ffmpeg_path` でパスを指定します。
 
 探索順は `ffmpeg_path` → 実行ファイルと同じフォルダ → PATH → 取得した ffmpeg
 です。取得したものが最後なのは、ユーザーが明示的に指定した ffmpeg を、
 トレイのクリック一つで黙って置き換えないためです。
 
-**同梱していない理由**: PaperBridge は ffmpeg をライブラリとしてリンクせず
-別プロセスとして起動するため、同梱の有無に関わらず PaperBridge 自身のライセンス
+**同梱していない理由**: PTCamBridge は ffmpeg をライブラリとしてリンクせず
+別プロセスとして起動するため、同梱の有無に関わらず PTCamBridge 自身のライセンス
 (MIT) には影響しません。一方で同梱すると、(1) LGPL バイナリの再配布者として
 対応ソースの入手手段を提供し続ける義務が生じ、(2) ffmpeg を必要としない
 シリアル / MJPEG 利用者にも 100 MB 超のダウンロードを強いることになります。
@@ -68,7 +108,7 @@ ffmpeg が要ります。用意する方法は 2 つあります。
 利用可能なデバイスを一覧します。
 
 ```
-paperbridge.exe -list-devices
+ptcambridge.exe -list-devices
 ```
 
 設定ファイルの `[source]` セクション、またはトレイメニューの「Source」から選択します。
@@ -138,11 +178,11 @@ install_dir = 'C:\Program Files\PaperTracker'
 write_cache = true
 ```
 
-元の内容は `wifi_cache.txt.paperbridge-backup` へ退避します。退避は初回のみです
+元の内容は `wifi_cache.txt.ptcambridge-backup` へ退避します。退避は初回のみです
 (毎回取り直すとバックアップがブリッジ自身のアドレスで上書きされ、
 本来戻したい値が失われるため)。
 
-退避先の名前に PaperBridge が入っているのは意図的です。復元は `write_cache` が
+退避先の名前に PTCamBridge が入っているのは意図的です。復元は `write_cache` が
 false の起動ごとに走り、設定に無ければフォルダも自動探索するため、`.bak` のような
 一般的な名前だと、別の何かが置いたファイルを読み戻して現在のキャッシュを壊し、
 そのファイルまで消してしまいます。
@@ -153,13 +193,13 @@ false の起動ごとに走り、設定に無ければフォルダも自動探�
 `install_dir` を更新すると、新旧どちらのフォルダにも退避ファイルが残るためです。
 1 件で打ち切ると、もう一方のクライアントがブリッジを指したまま取り残されます。
 
-自動探索は「PaperTracker らしいフォルダ」ではなく「PaperBridge の退避ファイルが
+自動探索は「PaperTracker らしいフォルダ」ではなく「PTCamBridge の退避ファイルが
 あるフォルダ」を探します。インストールが複数ある環境で先頭の候補を選ぶと、何もして
 いないフォルダに対して「戻すものはありません」と報告し、実際に書き換えたクライアントは
 ブリッジを指したまま取り残されるためです。
 
 キャッシュを書き換えたフォルダは、ブリッジ側の
-`%APPDATA%\PaperBridge\written-dirs.txt` に絶対パスで記録します
+`%APPDATA%\PTCamBridge\written-dirs.txt` に絶対パスで記録します
 (`install_dir` に相対パスを書くと、起動時のカレントディレクトリ次第で別のフォルダを
 指すためです)。`install_dir` に探索候補外の
 フォルダ (ポータブル版など) を指定していた場合、`[papertracker]` セクションごと
@@ -170,12 +210,12 @@ false の起動ごとに走り、設定に無ければフォルダも自動探�
 `install_dir` の読み取りは設定ファイル全体の検証に依存しません。存在しないキーや
 範囲外の値が含まれていてブリッジ自身は起動できない状態でも、フォルダ名は読めます。
 アンインストール時に「変更していません」と言いながらクライアントがブリッジを
-指したまま、という結果を避けるためです。`PAPERBRIDGE_PAPERTRACKER_DIR` は通常起動と
+指したまま、という結果を避けるためです。`PTCAMBRIDGE_PAPERTRACKER_DIR` は通常起動と
 同じくファイルより優先されます。この変数だけで指定されたフォルダも、ブリッジが
 書き換えた以上は元に戻せる必要があるためです。
 
 アンインストールする場合は設定ファイルごと消えて次回起動が来ないため、
-`paperbridge.exe -restore-cache` で明示的に戻してください。
+`ptcambridge.exe -restore-cache` で明示的に戻してください。
 
 `wifi_cache.txt` への書き込みと復元は、いずれも同じフォルダ内の一時ファイルへ
 書いてから rename します。上書きの途中で失敗すると、クライアントの接続先が
@@ -345,21 +385,21 @@ dial・TLS・ヘッダー・最初のフレームでそれぞれ 5 秒、UVC な
 
 ## 設定
 
-`%APPDATA%\PaperBridge\paperbridge.toml`。項目の説明は
-[`configs/paperbridge.toml`](configs/paperbridge.toml) を参照してください。
+`%APPDATA%\PTCamBridge\ptcambridge.toml`。項目の説明は
+[`configs/ptcambridge.toml`](configs/ptcambridge.toml) を参照してください。
 
-優先順位はコマンドライン引数 > 環境変数 (`PAPERBRIDGE_*`) > 設定ファイル > 既定値です。
+優先順位はコマンドライン引数 > 環境変数 (`PTCAMBRIDGE_*`) > 設定ファイル > 既定値です。
 
 存在しないキーが書かれている場合はエラーで起動を中止します。`lsiten` のような
 綴り間違いが黙って既定値で起動し、意図しないアドレスやソースで動くのを防ぐため
 です。`PUT /api/v1/config` も同様に未知のフィールドを 400 で拒否します。
 
-環境変数の値が解釈できない場合 (`PAPERBRIDGE_SERIAL_BAUD=abc` など) も起動を中止
+環境変数の値が解釈できない場合 (`PTCAMBRIDGE_SERIAL_BAUD=abc` など) も起動を中止
 します。黙って無視するとファイル側の値で起動してしまい、変数を設定したつもりの
 利用者には別の設定で動いていることが分かりません。
 
 コマンドライン引数と環境変数で上書きした値は設定ファイルへ書き戻されません。
-トレイなどで別の項目を変更しても、`-device` や `PAPERBRIDGE_*` のような一時的な
+トレイなどで別の項目を変更しても、`-device` や `PTCAMBRIDGE_*` のような一時的な
 指定が恒久化することはありません。
 
 主なコマンドライン引数:
@@ -382,7 +422,7 @@ Run キーに記録されます。次回サインイン時に既定の `%APPDATA
 
 ## 制約
 
-UVC デバイスは排他アクセスです。PaperBridge が掴んでいる間、同じカメラを
+UVC デバイスは排他アクセスです。PTCamBridge が掴んでいる間、同じカメラを
 Baballonia 本体から開くことはできません。切り替えて使う想定であり、
 同時利用は保証しません。トレイメニューの「Pause」でカメラを解放できます。
 
@@ -393,7 +433,7 @@ MJPEG ソースについては、上流のファームウェアが HTTP の多�
 
 ```
 go test ./...
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o paperbridge.exe ./cmd/paperbridge
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o ptcambridge.exe ./cmd/ptcambridge
 ```
 
 cgo は使いません。Windows でのカメラ取得は ffmpeg を子プロセスとして起動し
@@ -412,7 +452,7 @@ stdout から MJPEG を読む方式で解決しているため、`CGO_ENABLED=0`
 | `release.yml` | バージョンタグの push | `build.yml` を呼び、成果物を GitHub Release へ添付 |
 
 `build.yml` が発行する exe のファイル名にはバージョンが入ります
-(`paperbridge-windows-amd64-0.1.0.exe`)。Artifacts の名前も同じで、展開したあとの
+(`ptcambridge-windows-amd64-0.1.0.exe`)。Artifacts の名前も同じで、展開したあとの
 exe 単体でもどのビルドか分かります。動作はファイル名に依存しません。
 
 発行は Linux でのクロスコンパイル (`CGO_ENABLED=0`) で、`ci.yml` が全 push で

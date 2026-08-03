@@ -21,7 +21,7 @@ const (
 	DefaultMaxSize    = 10 << 20
 	DefaultMaxBackups = 5
 	// FileName is the active log file inside the log directory.
-	FileName = "paperbridge.log"
+	FileName = "ptcambridge.log"
 )
 
 // Options configures Setup.
@@ -134,7 +134,7 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 	if w.file != nil && w.size+int64(len(p)) > w.maxSize {
 		if err := w.rotate(); err != nil {
 			// Losing rotation is better than losing the log line.
-			fmt.Fprintf(os.Stderr, "paperbridge: log rotation failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "ptcambridge: log rotation failed: %v\n", err)
 		}
 	}
 	if w.file == nil {

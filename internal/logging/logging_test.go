@@ -164,7 +164,7 @@ func TestWriteAfterCloseDoesNotPanic(t *testing.T) {
 // A rotation that closes the old file and cannot open a new one must not wedge
 // logging for the rest of the run: the next write opens the file again.
 func TestRotatingWriterRecoversFromAFailedRotation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "paperbridge.log")
+	path := filepath.Join(t.TempDir(), "ptcambridge.log")
 	w, err := newRotatingWriter(path, 1<<20, 3)
 	if err != nil {
 		t.Fatalf("newRotatingWriter: %v", err)
@@ -192,7 +192,7 @@ func TestRotatingWriterRecoversFromAFailedRotation(t *testing.T) {
 
 // Close is the one reason to stop accepting writes, and it has to stick.
 func TestRotatingWriterRejectsWritesAfterClose(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "paperbridge.log")
+	path := filepath.Join(t.TempDir(), "ptcambridge.log")
 	w, err := newRotatingWriter(path, 1<<20, 3)
 	if err != nil {
 		t.Fatalf("newRotatingWriter: %v", err)

@@ -1,8 +1,8 @@
 // Package ffmpegfetch downloads the ffmpeg binary the UVC source needs, from
 // the people who built it, onto the machine that will run it.
 //
-// PaperBridge does not ship ffmpeg. It starts ffmpeg as a child process, so the
-// two are separate programs and PaperBridge's own licence is unaffected either
+// PTCamBridge does not ship ffmpeg. It starts ffmpeg as a child process, so the
+// two are separate programs and PTCamBridge's own licence is unaffected either
 // way -- but putting a copy in the release would make this project a
 // redistributor of an LGPL binary, with the source-availability duties that
 // carries, and would put a hundred-odd megabytes in front of every user

@@ -56,9 +56,9 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: '0'
-        run: go build -trimpath -ldflags "-s -w -H=windowsgui -X main.Version=${GITHUB_SHA::7}" -o paperbridge.exe ./cmd/paperbridge
+        run: go build -trimpath -ldflags "-s -w -H=windowsgui -X main.Version=${GITHUB_SHA::7}" -o ptcambridge.exe ./cmd/ptcambridge
 
       - uses: actions/upload-artifact@v4
         with:
-          name: paperbridge-windows-amd64
-          path: paperbridge.exe
+          name: ptcambridge-windows-amd64
+          path: ptcambridge.exe

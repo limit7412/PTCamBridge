@@ -351,7 +351,7 @@ func platformInput(device string) (format, input string) {
 // ffmpegPath resolves the binary: the configured override, then a copy sitting
 // next to the executable, then PATH, then one fetched by the bridge itself.
 //
-// The fetched copy comes last on purpose. It is the one PaperBridge manages, so
+// The fetched copy comes last on purpose. It is the one PTCamBridge manages, so
 // it is also the one the user cannot easily choose against -- putting it ahead
 // of PATH would mean an installation that has deliberately been pointed at a
 // particular ffmpeg silently stops using it the first time somebody clicks the

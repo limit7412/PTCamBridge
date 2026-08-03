@@ -1,7 +1,7 @@
 // Package console reattaches a GUI-subsystem process to the terminal that
 // launched it.
 //
-// PaperBridge is linked with -H=windowsgui so the tray application does not
+// PTCamBridge is linked with -H=windowsgui so the tray application does not
 // drag a console window along, but that also detaches stdout and stderr. The
 // command line flags (-list-devices, -version) would then print into the void.
 package console

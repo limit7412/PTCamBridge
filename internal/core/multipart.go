@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// DefaultBoundary is the multipart delimiter PaperBridge advertises.
-const DefaultBoundary = "paperbridge"
+// DefaultBoundary is the multipart delimiter PTCamBridge advertises.
+const DefaultBoundary = "ptcambridge"
 
 // ErrInvalidBoundary is returned for a boundary that cannot be written into a
 // Content-Type header or a delimiter line.

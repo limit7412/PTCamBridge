@@ -290,7 +290,7 @@ func TestUVCPrefersTheUsersFFmpegOverTheFetchedOne(t *testing.T) {
 	settings := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", settings)
 	t.Setenv("APPDATA", settings)
-	fetched := writeExecutable(t, filepath.Join(settings, "PaperBridge", "bin"), ffmpegBinaryName())
+	fetched := writeExecutable(t, filepath.Join(settings, "PTCamBridge", "bin"), ffmpegBinaryName())
 
 	// Nothing else on offer: the fetched copy is found.
 	t.Setenv("PATH", t.TempDir())

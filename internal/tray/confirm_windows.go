@@ -7,7 +7,7 @@ import (
 
 // The tray is the whole UI, and a menu item cannot ask a question. Downloading
 // a third party's binary onto the user's machine is not something a single
-// click should do silently, so this is the one place PaperBridge puts a window
+// click should do silently, so this is the one place PTCamBridge puts a window
 // on screen -- through user32 directly, which keeps the build free of cgo and
 // of a UI toolkit brought in for one message box.
 var (

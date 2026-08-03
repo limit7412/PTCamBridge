@@ -6,7 +6,7 @@ import (
 )
 
 // createNoWindow keeps ffmpeg from flashing a console window on a machine
-// where PaperBridge itself runs without one.
+// where PTCamBridge itself runs without one.
 const createNoWindow = 0x08000000
 
 func configureChildProcess(cmd *exec.Cmd) {
