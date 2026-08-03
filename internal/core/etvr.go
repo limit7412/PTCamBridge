@@ -55,6 +55,11 @@ func NewETVRParser(header []byte, maxPayload int) (ETVRParser, error) {
 // HeaderLen reports the length of the preamble this parser searches for.
 func (p ETVRParser) HeaderLen() int { return len(p.header) }
 
+// Header returns a copy of the preamble this parser searches for. A driver
+// that finds nothing on the wire has to be able to say what it was looking
+// for, since the answer may be that the firmware uses something else.
+func (p ETVRParser) Header() []byte { return bytes.Clone(p.header) }
+
 // Parse consumes whole packets from buf and returns the JPEG payloads found,
 // along with the bytes that could not be consumed yet.
 //

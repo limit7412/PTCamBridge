@@ -96,6 +96,31 @@ UVC はまずカメラ自身に MJPEG を要求してパススルーします。
 刺さっていても先頭で止まらず、再接続のたびに次の候補へ移ります。一度フレームを
 返したポートは、切断後の 1 回だけ優先して開き直します。
 
+#### シリアルがつながらないとき
+
+ポートは開けるのにフレームが来ない場合、ログは受信バイト数まで報告します。
+
+```
+serial: COM4 produced no frame for 5s (0 bytes received in that time)
+```
+
+- **0 バイト** — ボードが何も送っていません。有線ストリーミングモードになっているか
+  (WiFi モードのままではないか) を確認してください
+- **0 バイトではない** — バイトは届いているのにパケットが組み立てられていません。
+  この場合は届いた先頭 16 バイトと、探している preamble が警告として出ます
+
+```
+level=WARN msg="bytes are arriving on the serial port but no packet matched; ..."
+  port=COM4 baud=3000000 expected_header="ff a0 ff a1" first_bytes="ff a0 ff b1 10 00 ..."
+```
+
+`first_bytes` に規則的な preamble が見えるなら firmware のヘッダ違いなので、
+`[source.serial] header` を実際の値に合わせれば通ります。まったく規則性が無い
+場合はボーレート不一致を疑ってください (`[source.serial] baud`)。
+
+同じ内容の警告は繰り返しません。再接続のたびに出ると埋もれるためで、届くバイトが
+変わったときだけ改めて警告します (それ以降は debug レベル)。
+
 ### 2. PaperTracker から接続する
 
 PaperTracker クライアントはシリアル未接続時、実行ファイルと同じフォルダの

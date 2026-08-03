@@ -27,8 +27,15 @@ const DefaultSerialBaud = 3000000
 const serialReadTimeout = 200 * time.Millisecond
 
 // serialStallTimeout is how long a port may go without producing a frame
-// before the driver treats the board as gone and reconnects.
-const serialStallTimeout = 5 * time.Second
+// before the driver treats the board as gone and reconnects. A var so tests
+// do not have to spend it: what they check is what the stall reports, and
+// waiting five seconds for each one says nothing extra.
+var serialStallTimeout = 5 * time.Second
+
+// previewBytes is how much of a stream nothing could be parsed out of is put
+// in the log: enough to see a preamble and the start of a length field,
+// not so much that the line turns into a hex dump.
+const previewBytes = 16
 
 // knownCameraVIDs are the USB vendor IDs of the bridges and MCUs that Babble
 // and OpenIris boards ship with: Espressif, Silicon Labs, QinHeng, FTDI and
@@ -70,10 +77,26 @@ type Serial struct {
 	tried  map[string]struct{}
 	proven string
 
+	// loggedPreview is the last unparsable stream this driver complained
+	// about, so a board that is wrong the same way on every reconnect says so
+	// once rather than every few seconds.
+	loggedPreview string
+
 	// listPorts is ListSerialPorts, replaced in tests: the rotation is the
 	// part worth checking and it cannot be reached without control over what
 	// enumeration returns.
 	listPorts func() ([]SerialPort, error)
+	// openPort is serial.Open, replaced in tests for the same reason: what a
+	// stalled session says about the wire cannot be checked without deciding
+	// what comes off it.
+	openPort func(name string, baud int) (serialPort, error)
+}
+
+// serialPort is the part of go.bug.st/serial.Port this driver uses.
+type serialPort interface {
+	Read(p []byte) (int, error)
+	SetReadTimeout(t time.Duration) error
+	Close() error
 }
 
 // NewSerial builds the driver and validates the packet header up front, since
@@ -99,6 +122,9 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 		reporter:  reporter,
 		tried:     map[string]struct{}{},
 		listPorts: ListSerialPorts,
+		openPort: func(name string, baud int) (serialPort, error) {
+			return serial.Open(name, &serial.Mode{BaudRate: baud})
+		},
 	}, nil
 }
 
@@ -118,7 +144,7 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 	if err != nil {
 		return err
 	}
-	port, err := serial.Open(name, &serial.Mode{BaudRate: s.cfg.Baud})
+	port, err := s.openPort(name, s.cfg.Baud)
 	if err != nil {
 		return fmt.Errorf("serial: open %s at %d baud: %w", name, s.cfg.Baud, err)
 	}
@@ -133,6 +159,11 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 	buf := make([]byte, readChunk)
 	lastFrame := time.Now()
 	var count uint64
+	// Bytes since the last frame, over the same window the stall is measured
+	// in, and the head of the stream while nothing has parsed out of it. See
+	// stalled for what they are for.
+	var sinceFrame int64
+	var preview []byte
 
 	for {
 		if ctx.Err() != nil {
@@ -144,7 +175,7 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 		// hold that port open forever and never re-run the search, so the real
 		// board plugged in later would never be found.
 		if time.Since(lastFrame) > serialStallTimeout {
-			return fmt.Errorf("serial: %s produced no frame for %s", name, serialStallTimeout)
+			return s.stalled(name, count, sinceFrame, preview)
 		}
 		n, err := port.Read(buf)
 		if err != nil {
@@ -154,9 +185,18 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 			// A read timeout, not an error.
 			continue
 		}
+		sinceFrame += int64(n)
+		if count == 0 && len(preview) < previewBytes {
+			take := previewBytes - len(preview)
+			if take > n {
+				take = n
+			}
+			preview = append(preview, buf[:take]...)
+		}
 
 		for _, f := range assembler.feed(buf[:n]) {
 			lastFrame = time.Now()
+			sinceFrame = 0
 			if count == 0 {
 				// This port has proved itself, so the auto search should come
 				// back to it first rather than rotating past it.
@@ -169,6 +209,60 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 			}
 		}
 	}
+}
+
+// stalled explains a session that stopped producing frames, and says what was
+// on the wire when nothing could be made of it.
+//
+// The stall is counted in frames rather than bytes (see the loop), so on its
+// own it cannot tell a silent port from a talkative one whose packets this
+// parser does not recognise -- and those two need opposite fixes: the first is
+// a board that is not streaming, the second is a header or a baud rate that
+// does not match the firmware. The byte total separates them. For the second,
+// the bytes themselves are what settles it, which is why they are logged: the
+// packet header is configurable precisely because firmware revisions differ,
+// and the value to configure is sitting in that line.
+func (s *Serial) stalled(name string, frames uint64, sinceFrame int64, preview []byte) error {
+	err := fmt.Errorf("serial: %s produced no frame for %s (%d bytes received in that time)", name, serialStallTimeout, sinceFrame)
+	if frames > 0 || sinceFrame == 0 {
+		// Either the board went quiet after working, or the port is silent.
+		// Both are described by the error; there is nothing to show.
+		return err
+	}
+
+	head := hexPreview(preview)
+	// Said once per distinct stream. The reconnect loop comes back every few
+	// seconds and a board that is wrong is wrong the same way every time, so
+	// repeating this would fill the log without adding anything.
+	if head == s.loggedPreview {
+		s.log.Debug("still nothing that parses on the serial port", "port", name, "first_bytes", head)
+		return err
+	}
+	s.loggedPreview = head
+	s.log.Warn("bytes are arriving on the serial port but no packet matched; check the firmware's preamble against source.serial.header, and the baud rate",
+		"port", name,
+		"baud", s.cfg.Baud,
+		"expected_header", hexPreview(s.parser.Header()),
+		"first_bytes", head,
+		"bytes_received", sinceFrame,
+	)
+	return err
+}
+
+// hexPreview renders bytes the way a protocol document writes them, so what is
+// logged can be compared with the header in the settings by eye.
+func hexPreview(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, c := range b {
+		if i > 0 {
+			sb.WriteByte(' ')
+		}
+		fmt.Fprintf(&sb, "%02x", c)
+	}
+	return sb.String()
 }
 
 // splitPackets adapts the parser to the frameAssembler signature. The parser
