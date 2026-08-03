@@ -82,9 +82,9 @@ jobs:
 
           ## アンインストール
 
-          `paperbridge.exe -restore-cache` を実行してから削除してください。
+          `@EXE@ -restore-cache` を実行してから削除してください。
           `write_cache` で書き換えた PaperTracker の接続先が元に戻ります。
-          自動起動を登録している場合は `paperbridge.exe -uninstall-autostart` も実行してください。
+          自動起動を登録している場合は `@EXE@ -uninstall-autostart` も実行してください。
           EOF
           sed -i "s|@EXE@|$EXE|g" release-notes.md
 
