@@ -337,7 +337,7 @@ func (s *Serial) resolvePort() (string, error) {
 		return "", fmt.Errorf("serial: enumerate ports: %w", err)
 	}
 
-	candidates := autoCandidates(ports)
+	candidates, guessed := autoCandidates(ports)
 	if len(candidates) == 0 {
 		return "", errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
 	}
@@ -366,8 +366,39 @@ func (s *Serial) resolvePort() (string, error) {
 		name, _ = s.firstUntried(candidates)
 	}
 	s.tried[name] = struct{}{}
-	s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	if guessed {
+		// Said in full, because this is a guess and the last one cost somebody
+		// an afternoon: the port was a VR headset, and the log said only that a
+		// port had been "auto-selected". Anything opened on this branch may be
+		// no camera at all, so what it actually is goes in the line.
+		s.log.Warn("no serial port matches a known camera board; trying the only port there is, which may not be a camera",
+			"port", name, "device", describePort(ports, name))
+	} else {
+		s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	}
 	return name, nil
+}
+
+// describePort renders what enumeration knows about a port, for a log line
+// that has to let the reader recognise a device they did not mean to open.
+func describePort(ports []SerialPort, name string) string {
+	for _, p := range ports {
+		if p.Name != name {
+			continue
+		}
+		parts := make([]string, 0, 3)
+		if p.VID != "" || p.PID != "" {
+			parts = append(parts, p.VID+":"+p.PID)
+		}
+		if p.Product != "" {
+			parts = append(parts, p.Product)
+		}
+		if len(parts) == 0 {
+			return "unknown"
+		}
+		return strings.Join(parts, " ")
+	}
+	return "unknown"
 }
 
 // firstUntried returns the first candidate this driver has not opened yet.
@@ -385,17 +416,16 @@ func (s *Serial) firstUntried(candidates []string) (string, bool) {
 // A recognised vendor ID is the only positive evidence available, so those
 // come first and in the order ListSerialPorts put them. The lone port on the
 // machine is the fallback: with nothing else it could be, it is worth a try.
-func autoCandidates(ports []SerialPort) []string {
-	var names []string
+func autoCandidates(ports []SerialPort) (names []string, guessed bool) {
 	for _, p := range ports {
 		if p.Vendor != "" {
 			names = append(names, p.Name)
 		}
 	}
 	if len(names) == 0 && len(ports) == 1 {
-		names = append(names, ports[0].Name)
+		return []string{ports[0].Name}, true
 	}
-	return names
+	return names, false
 }
 
 // SerialPort describes a port offered in the tray menu and over the management

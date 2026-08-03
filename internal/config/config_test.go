@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
@@ -502,5 +505,56 @@ func TestInstallDirFromFileReportsAnUnparsableFile(t *testing.T) {
 	}
 	if _, err := InstallDirFromFile(path); err == nil {
 		t.Error("expected an error for a file that cannot be parsed")
+	}
+}
+
+// The generated file and Default() are two statements of the same settings, so
+// they have to agree. They are kept apart because only the file carries the
+// comments, and a first run that cannot start until a camera is named needs a
+// file that says so -- but a drift between them would hand new users values
+// nobody chose.
+func TestDefaultFileMatchesDefault(t *testing.T) {
+	var fromFile Config
+	md, err := toml.Decode(DefaultFile(), &fromFile)
+	if err != nil {
+		t.Fatalf("decode the embedded default file: %v", err)
+	}
+	if unknown := md.Undecoded(); len(unknown) > 0 {
+		t.Errorf("the embedded default file has settings that do not exist: %v", unknown)
+	}
+	if !reflect.DeepEqual(Default(), fromFile) {
+		t.Errorf("the embedded default file does not match Default()\n file: %+v\n code: %+v", fromFile, Default())
+	}
+}
+
+// It is the file a first run is left staring at, so the two things that run
+// cannot proceed without have to be answered in it.
+func TestDefaultFileSaysHowToNameACamera(t *testing.T) {
+	for _, want := range []string{"-list-devices", "device"} {
+		if !strings.Contains(DefaultFile(), want) {
+			t.Errorf("the embedded default file does not mention %q", want)
+		}
+	}
+}
+
+// A first run must end up with the annotated file, not an encoding of the
+// struct: the comments are the only thing telling the user what to do next.
+func TestLoadFileCreatesTheAnnotatedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if !reflect.DeepEqual(Default(), cfg) {
+		t.Errorf("LoadFile returned %+v, want the defaults %+v", cfg, Default())
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the created file: %v", err)
+	}
+	if string(written) != DefaultFile() {
+		t.Errorf("the created file is not the annotated default:\n%s", written)
 	}
 }

@@ -6,6 +6,8 @@
 package config
 
 import (
+	"bytes"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net"
@@ -19,6 +21,17 @@ import (
 
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
+
+// defaultFile is the settings file a first run gets: the same values as
+// Default(), with the comments that say what each one is for. Kept as a file
+// rather than built from the struct because the comments are the point, and
+// held to Default() by a test so the two cannot drift.
+//
+//go:embed default.toml
+var defaultFile string
+
+// DefaultFile returns the annotated settings file written on first run.
+func DefaultFile() string { return defaultFile }
 
 // AppName is the folder name used under the user's config and data directories.
 const AppName = "PTCamBridge"
@@ -184,7 +197,13 @@ func LoadFile(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		if writeErr := Save(path, cfg); writeErr != nil {
+		// The annotated template rather than an encoding of cfg. The two say
+		// the same thing -- a test holds them to it -- but only one of them
+		// tells the reader what to put in the empty fields, and this is the
+		// file the tray's "Edit settings" opens. A first run cannot start
+		// without a camera being named, so the file that appears has to be the
+		// one that says so.
+		if writeErr := writeAtomic(path, []byte(defaultFile)); writeErr != nil {
 			return cfg, fmt.Errorf("write the default settings file: %w", writeErr)
 		}
 	case err != nil:
@@ -248,10 +267,24 @@ func InstallDirFromFile(path string) (string, error) {
 // the management API and the tray.
 var ErrNotSaved = errors.New("the settings are active but could not be saved")
 
-// Save writes the settings file, creating the folder if needed. The file is
-// written to a temporary name and renamed, so an interrupted write cannot
-// leave a truncated settings file behind.
+// Save writes the settings file, creating the folder if needed.
+//
+// This is the encoding of the settings as they stand, so the comments a
+// generated file starts with are lost the first time anything is saved. That
+// is the cost of keeping one representation of the settings rather than a
+// parser that edits TOML in place; by the time the tray or the API is writing
+// here, the file has already done its job of explaining itself.
 func Save(path string, cfg Config) error {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
+		return err
+	}
+	return writeAtomic(path, buf.Bytes())
+}
+
+// writeAtomic writes the settings file through a temporary name and a rename,
+// so an interrupted write cannot leave a truncated settings file behind.
+func writeAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -261,8 +294,7 @@ func Save(path string, cfg Config) error {
 	}
 	defer os.Remove(tmp.Name())
 
-	enc := toml.NewEncoder(tmp)
-	if err := enc.Encode(cfg); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}

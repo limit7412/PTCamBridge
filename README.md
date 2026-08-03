@@ -33,9 +33,21 @@ Windows 10 / 11 (x64) 向けの単一実行ファイルです。
 
 1. `ptcambridge.exe` を任意のフォルダへ配置する
 2. 実行するとタスクトレイに常駐する
-3. UVC カメラを使う場合のみ ffmpeg を用意する (下記)
+3. UVC カメラを使う場合は ffmpeg を用意する (下記)
+4. **使うカメラを設定する**
 
 初回起動時に `%APPDATA%\PTCamBridge\ptcambridge.toml` が既定値で生成されます。
+**この時点ではまだ映像は流れません。** 既定は UVC ですがカメラ名が空なので、
+`uvc: no camera configured` で止まります。推測できる既定値が無いためで、
+次のように設定してください。
+
+```
+ptcambridge.exe -list-devices
+```
+
+で出た名前を、生成された設定ファイルの `[source.uvc] device` に書きます
+(トレイの「Edit settings」で開けます)。有線ボードや WiFi カメラを使う場合は
+`[source] type` を `"serial"` / `"mjpeg"` に変えてください。
 
 ### PaperBridge (v0.1.x) からの移行
 
@@ -385,8 +397,14 @@ dial・TLS・ヘッダー・最初のフレームでそれぞれ 5 秒、UVC な
 
 ## 設定
 
-`%APPDATA%\PTCamBridge\ptcambridge.toml`。項目の説明は
-[`configs/ptcambridge.toml`](configs/ptcambridge.toml) を参照してください。
+`%APPDATA%\PTCamBridge\ptcambridge.toml`。初回起動時に
+[`internal/config/default.toml`](internal/config/default.toml) がそのまま書き出されます。
+各項目の説明はコメントとして入っているので、生成されたファイルをそのまま読めます
+(リポジトリ側と中身が同一であることはテストで保証しています)。
+
+ただしトレイや管理 API から設定を変更すると、そのタイミングで設定内容だけが
+書き直され、コメントは失われます。設定の表現を 1 つに保つためで、その頃には
+説明としての役目は終わっているという判断です。
 
 優先順位はコマンドライン引数 > 環境変数 (`PTCAMBRIDGE_*`) > 設定ファイル > 既定値です。
 

@@ -83,7 +83,7 @@ type UVC struct {
 // NewUVC builds the driver. The device must be set.
 func NewUVC(cfg UVCConfig, log *slog.Logger, reporter Reporter) (*UVC, error) {
 	if strings.TrimSpace(cfg.Device) == "" {
-		return nil, errors.New("uvc: no capture device configured")
+		return nil, ErrNoDevice
 	}
 	if reporter == nil {
 		reporter = NopReporter{}
@@ -377,6 +377,15 @@ func (u *UVC) ffmpegPath() (string, error) {
 	}
 	return "", ErrNoFFmpeg
 }
+
+// ErrNoDevice means no camera has been named.
+//
+// This is the state a first run starts in -- the settings file is written with
+// the field empty, because there is no camera name that could be guessed -- so
+// it is the error most likely to be the first thing a new user ever sees from
+// this program. It says the whole remedy rather than only the symptom: what to
+// run to find the name, and where to put it once found.
+var ErrNoDevice = errors.New(`uvc: no camera configured. Run "ptcambridge -list-devices" to see the cameras attached, then put one of the names in [source.uvc] device in the settings file (or set PTCAMBRIDGE_UVC_DEVICE)`)
 
 // ErrNoFFmpeg means there is no ffmpeg anywhere the driver looks.
 //
