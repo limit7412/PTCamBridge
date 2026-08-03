@@ -6,12 +6,20 @@
 
 Baballonia 互換の口トラッキングカメラを PaperTracker クライアントへ橋渡しします。カメラから取ったフレームを、そのクライアントが期待する MJPEG-over-HTTP ストリームとしてループバック上に配信し直します。
 
+フレームはこう流れます。
+
 ```
-カメラ ──▶ source ──▶ bridge ──▶ hub ──▶ server ──▶ PaperTracker クライアント
- (UVC /                  ▲                  ▲
-  serial /               │                  │
-  MJPEG)               tray ───────────────┘
-                      config
+カメラ ──▶ source ──▶ (変換) ──▶ hub ──▶ server ──▶ PaperTracker クライアント
+```
+
+その経路を組み立て、実行時に差し替えるのが `bridge` です。差し替えを指示するのは
+トレイメニューか管理 API で、指示された内容は `config` を通して設定ファイルへ戻ります。
+
+```
+tray ──┐
+       ├──▶ bridge ──▶ 上の経路を止めて組み直す
+API ───┘        │
+                └──▶ config ──▶ 設定ファイル
 ```
 
 ## 全体の形
@@ -48,29 +56,29 @@ Baballonia 互換の口トラッキングカメラを PaperTracker クライア�
 
 ## 依存の向き
 
-```
-cmd/ptcambridge
-      │
-      ▼
-   bridge ──▶ server ──▶ hub ──▶ core
-      │          │
-      ├──────▶ source ──▶ core
-      │          │
-      │          ▼
-      │      ffmpegfetch
-      ▼
-   status ◀── tray ──▶ i18n
-      │
-    config ──▶ core, i18n
-```
+内部パッケージが直接 import している相手です (`go list` の出力そのもの)。
 
-**逆流はありません。** 特に `status` はどこからも読まれる葉であり、何も知りません。「どのエラーが翻訳に値するか」の判定がドライバの領分である `source.ErrorKey` に置かれ、`main` が `status.WithErrorKeys` で注入しているのはそのためです。
+| | |
+|---|---|
+| `cmd/ptcambridge` | すべて |
+| `bridge` | `config`, `core`, `hub`, `server`, `source`, `status` |
+| `server` | `config`, `core`, `ffmpegfetch`, `hub`, `source`, `status` |
+| `tray` | `config`, `ffmpegfetch`, `hub`, `i18n`, `status` |
+| `source` | `core`, `ffmpegfetch`, `i18n` |
+| `config` | `core`, `i18n` |
+| `ffmpegfetch` | `config` |
+| `hub` | `core` |
+| `core` / `status` / `i18n` / `papertracker` / `logging` / `autostart` / `console` | 標準ライブラリのみ |
+
+**逆流はありません。** 下の 7 つは葉で、標準ライブラリ以外に何も依存しません。特に `status` は `bridge`・`server`・`tray` の 3 つから直接読まれますが、そのどれも知りません。「どのエラーが翻訳に値するか」の判定がドライバの領分である `source.ErrorKey` に置かれ、`main` が `status.WithErrorKeys` で注入しているのはそのためです。
 
 ## 知っておくと読みやすい判断
 
 ### ソースが「動いている」とは、フレームが 1 枚届くこと
 
-ドライバはカメラに届かなくても失敗せず再接続します。つまり**「まだエラーが出ていない」は何も証明しません**。`bridge.Apply` が新しい設定を残すのは、最初のフレームが `hub` まで到達したときだけです。
+ドライバはカメラに届かなくても失敗せず再接続します。つまり**「まだエラーが出ていない」は何も証明しません**。**キャプチャに関わる設定を変更する場合**、`bridge.Apply` が新しい設定を残すのは、最初のフレームが `hub` まで到達したときだけです。
+
+キャプチャに触れない変更 — `server.boundary`、`server.extra_headers`、`server.hold_on_source_loss` — はこの経路を通りません。カメラをそのままにして即座に採用します。再起動すれば何の得も無くストリームが途切れますし、カメラがたまたま再接続中なら検証が変更を丸ごと拒否してしまいます。まさにその状況のための設定である `hold_on_source_loss` さえも。
 
 見るのがドライバではなく `hub` なのは、その間に変換段があるからです。ピクセル上限を超えた画像やデコーダが拒む画像はそこで落ちます。クライアントに何かが見えると言えるのは、`hub` まで届いたフレームだけです。
 
