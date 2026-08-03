@@ -93,11 +93,15 @@ jobs:
           **旧バージョンの設定は引き継ぎません。**
 
           旧バージョンを使っていた場合は、**先に旧 exe で後始末をしてください**。
+          下記の `旧exe` は実際のファイル名 (リリース版なら
+          `paperbridge-windows-amd64-0.1.1.exe` のようにバージョン付き) に読み替えてください。
 
-          1. `paperbridge.exe -restore-cache` (`write_cache` を使っていた場合。
+          1. 旧バージョンをトレイの Quit で終了する (常駐したままだとフォルダを削除できず、
+             新バージョンも既定ポートを取れずに起動できません)
+          2. `旧exe -restore-cache` (`write_cache` を使っていた場合。
              これを先にやらないと、PaperTracker 側に残った退避ファイルは新バージョンから
              見えず、クライアントがブリッジを指したまま戻せなくなります)
-          2. `paperbridge.exe -uninstall-autostart` (自動起動を登録していた場合)
+          3. `旧exe -uninstall-autostart` (自動起動を登録していた場合)
 
           設定と取得済み ffmpeg を引き継ぐ場合は `%APPDATA%\PaperBridge\` の中身を
           `%APPDATA%\PTCamBridge\` へ手で移してください (`paperbridge.toml` は

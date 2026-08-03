@@ -53,19 +53,25 @@ Windows 10 / 11 (x64) 向けの単一実行ファイルです。
 | `wifi_cache.txt.paperbridge-backup` | `wifi_cache.txt.ptcambridge-backup` |
 | multipart boundary の既定値 `paperbridge` | `ptcambridge` |
 
-手順は次のとおりです。
+手順は次のとおりです。以下の `旧exe` は、お使いの旧バージョンの実行ファイル名に
+読み替えてください。リリースからダウンロードしたものは
+`paperbridge-windows-amd64-0.1.1.exe` のようにバージョンが付いた名前です。
 
-1. **旧バージョンで `paperbridge.exe -restore-cache` を実行する。**
+1. **旧バージョンを終了する** (トレイアイコンから Quit)。
+   常駐したままだと 5 のフォルダ削除が失敗し (Windows が実行中の exe をロックします)、
+   新バージョンも既定ポートを取れずに起動できません
+2. **`旧exe -restore-cache` を実行する。**
    `write_cache` を使っていた場合、これを先にやらないと PaperTracker 側に残った
    `wifi_cache.txt.paperbridge-backup` は新バージョンからは見えず、クライアントが
    ブリッジを指したまま戻せなくなります
-2. 旧バージョンで自動起動を登録していた場合は `paperbridge.exe -uninstall-autostart`
+3. 旧バージョンで自動起動を登録していた場合は `旧exe -uninstall-autostart`
    を実行する (レジストリのエントリ名が変わるため、残すと存在しない exe を指し続けます)
-3. 設定を引き継ぐ場合は `%APPDATA%\PaperBridge\paperbridge.toml` を
-   `%APPDATA%\PTCamBridge\ptcambridge.toml` へコピーする
-4. ffmpeg を取得済みなら `%APPDATA%\PaperBridge\bin\` を `%APPDATA%\PTCamBridge\bin\`
-   へ移す (100 MB 超の再ダウンロードを避けるため。移さなければトレイから取り直せます)
-5. `%APPDATA%\PaperBridge\` を削除する
+4. 引き継ぐものがあれば手で移す
+   - 設定: `%APPDATA%\PaperBridge\paperbridge.toml` →
+     `%APPDATA%\PTCamBridge\ptcambridge.toml`
+   - 取得済み ffmpeg: `%APPDATA%\PaperBridge\bin\` → `%APPDATA%\PTCamBridge\bin\`
+     (100 MB 超の再ダウンロードを避けるため。移さなければトレイから取り直せます)
+5. `%APPDATA%\PaperBridge\` と旧 exe を削除する
 
 `server.boundary` を明示的に設定している場合、その値は変わりません。既定値のまま
 使っている場合はストリームの boundary 文字列が変わりますが、PaperTracker
