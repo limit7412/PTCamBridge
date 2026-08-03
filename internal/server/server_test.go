@@ -63,7 +63,7 @@ func newTestServer(t *testing.T, opts Options) (*Server, *hub.Hub, *status.Track
 	return s, opts.Hub, opts.Status
 }
 
-// publishUntilDone keeps frames flowing for the duration of a test.
+// publishUntilDone は、テストの間フレームを流し続ける。
 func publishUntilDone(t *testing.T, h *hub.Hub, jpg []byte) {
 	t.Helper()
 	done := make(chan struct{})
@@ -83,10 +83,9 @@ func publishUntilDone(t *testing.T, h *hub.Hub, jpg []byte) {
 	}()
 }
 
-// The client reads the socket looking for the boundary and for Content-Length.
-// Chunked framing would interleave hex length lines with that structure, so
-// this reads the raw bytes off the wire rather than trusting net/http's client
-// to hide it.
+// クライアントは boundary と Content-Length を探しながらソケットを読む。チャンクの
+// 枠組みはその構造の間に 16 進の長さ行を挟むので、ここでは net/http のクライアントが
+// それを隠してくれることに頼らず、線上の生バイトを読む。
 func TestStreamIsNotChunkedOnTheWire(t *testing.T) {
 	s, h, _ := newTestServer(t, Options{})
 	ts := httptest.NewServer(s.Handler())
@@ -132,7 +131,7 @@ func TestStreamIsNotChunkedOnTheWire(t *testing.T) {
 		t.Errorf("Content-Type missing or wrong:\n%s", joined)
 	}
 
-	// The body must begin with the delimiter, not a chunk size line.
+	// 本体は区切りで始まらなければならない。チャンク長の行ではなく。
 	body := make([]byte, len("--ptcambridge\r\n"))
 	if _, err := io.ReadFull(reader, body); err != nil {
 		t.Fatalf("read body: %v", err)
@@ -142,7 +141,7 @@ func TestStreamIsNotChunkedOnTheWire(t *testing.T) {
 	}
 }
 
-// The exact part layout is the compatibility contract with the client.
+// パートの正確な並びが、クライアントとの互換性の契約そのもの。
 func TestStreamPartLayout(t *testing.T) {
 	s, h, _ := newTestServer(t, Options{})
 	ts := httptest.NewServer(s.Handler())
@@ -191,8 +190,8 @@ func TestStreamPartLayout(t *testing.T) {
 	}
 }
 
-// A client that connects mid-stream should see the current frame at once
-// rather than waiting for the next capture.
+// 途中から接続したクライアントは、次のキャプチャを待たずに今のフレームをすぐ
+// 見られるべき。
 func TestStreamSendsTheLatestFrameImmediately(t *testing.T) {
 	s, h, _ := newTestServer(t, Options{HoldOnSourceLoss: true})
 	ts := httptest.NewServer(s.Handler())
@@ -224,8 +223,8 @@ func TestStreamSendsTheLatestFrameImmediately(t *testing.T) {
 	}
 }
 
-// With holding disabled, a source that stops must free the client so it can
-// reconnect.
+// 保持を無効にしている場合、止まったソースはクライアントを解放し、再接続できる
+// ようにしなければならない。
 func TestStreamClosesAfterSourceLoss(t *testing.T) {
 	s, h, _ := newTestServer(t, Options{HoldOnSourceLoss: false})
 	ts := httptest.NewServer(s.Handler())
@@ -360,16 +359,16 @@ func TestStats(t *testing.T) {
 	}
 }
 
-// fakeController records what the management API asked for.
+// fakeController は、管理 API が何を要求したかを記録する。
 type fakeController struct {
 	cfg      config.Config
 	switched string
 	applied  bool
-	// applyErr is what Apply returns, for the failure mappings.
+	// applyErr は Apply が返す値。失敗の対応付けを見るためのもの。
 	applyErr error
-	// devices is what Devices returns.
+	// devices は Devices が返す値。
 	devices Devices
-	// devicesCalls counts enumerations, which cost a subprocess on Windows.
+	// devicesCalls は列挙の回数を数える。Windows では 1 回につき子プロセスが要る。
 	devicesCalls int
 }
 
@@ -400,8 +399,8 @@ func TestManagementAPIIsAbsentUnlessEnabled(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	// The catch-all root route means an unregistered admin path 404s rather
-	// than streaming, which is the behaviour worth pinning down.
+	// ルートが全部を受けるので、登録されていない管理用のパスはストリームを
+	// 返さず 404 になる。固定しておく価値があるのはその挙動。
 	resp, err := http.Get(ts.URL + "/api/v1/config")
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -496,9 +495,9 @@ func TestManagementAPI(t *testing.T) {
 	})
 }
 
-// Listening on loopback is not a control by itself: any page the user visits
-// can reach 127.0.0.1, and a form-style POST gets there without a preflight.
-// Such a request must not be able to take the camera away from the tracker.
+// ループバックで listen することはそれ自体では防御にならない。ユーザーが訪れた
+// どのページも 127.0.0.1 に到達できるし、フォーム形式の POST は preflight 無しで
+// そこへ届く。そうしたリクエストが、トラッカーからカメラを奪えてはいけない。
 func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -508,8 +507,8 @@ func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
 		want        int
 	}{
 		{
-			// The bypass: text/plain is a simple request, so no preflight is
-			// ever made and the Origin check below never gets a chance to run.
+			// 抜け道。text/plain は単純リクエストなので preflight は一度も
+			// 行われず、下の Origin の検査には出番が回ってこない。
 			name:        "simple post with a plain text body",
 			contentType: "text/plain;charset=UTF-8",
 			want:        http.StatusUnsupportedMediaType,
@@ -520,15 +519,16 @@ func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
 			want:        http.StatusUnsupportedMediaType,
 		},
 		{
-			// A page that does send JSON triggers a preflight, and this is what
-			// the preflight fails on.
+			// JSON を送るページは preflight を引き起こし、その preflight が
+			// 失敗するのはこれが理由。
 			name:        "json post from a foreign page",
 			contentType: "application/json",
 			origin:      "https://evil.example",
 			want:        http.StatusForbidden,
 		},
 		{
-			// DNS rebinding: the name resolves to loopback but travels in Host.
+			// DNS リバインディング。名前はループバックに解決されるが、Host には
+			// その名前が載って届く。
 			name:        "rebound host name",
 			contentType: "application/json",
 			host:        "evil.example",
@@ -541,7 +541,7 @@ func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
 			want:        http.StatusOK,
 		},
 		{
-			// curl and the tray send no Origin at all.
+			// curl とトレイは Origin をまったく送らない。
 			name:        "json post with no origin",
 			contentType: "application/json",
 			want:        http.StatusOK,
@@ -581,12 +581,12 @@ func TestManagementAPIRejectsRequestsAPageCouldSend(t *testing.T) {
 	}
 }
 
-// A GET needs no preflight and carries no Origin when a page asks for it as a
-// subresource -- <img src="http://127.0.0.1:18080/api/v1/devices">. The page
-// cannot read the answer, but the answer is not free: enumerating devices runs
-// ffmpeg and waits for it, so a page cycling URLs keeps starting processes on
-// the machine. Sec-Fetch-Site says where the request came from and no page can
-// forge it or stop the browser sending it.
+// GET は preflight を必要とせず、ページがサブリソースとして要求した場合は Origin も
+// 載らない — <img src="http://127.0.0.1:18080/api/v1/devices">。ページは応答を
+// 読めないが、応答はただではない。デバイスの列挙は ffmpeg を起動して待つので、URL を
+// 次々に叩くページは、その機械でプロセスを起動し続けられる。Sec-Fetch-Site は
+// リクエストの出所を述べるもので、どのページも偽装できず、ブラウザに送信をやめさせる
+// こともできない。
 func TestDeviceEnumerationRefusesACrossSiteGet(t *testing.T) {
 	cases := []struct {
 		name string
@@ -629,8 +629,8 @@ func TestDeviceEnumerationRefusesACrossSiteGet(t *testing.T) {
 	}
 }
 
-// A change that took effect but could not be written is this side's failure,
-// not the caller's, and the two must not report the same way.
+// 反映はされたが書けなかった変更は、呼び出し側ではなくこちら側の失敗であり、
+// 両者が同じ形で報告されてはいけない。
 func TestManagementAPIReportsASaveFailureSeparately(t *testing.T) {
 	ctrl := &fakeController{
 		cfg:      config.Default(),
@@ -659,8 +659,8 @@ func TestManagementAPIReportsASaveFailureSeparately(t *testing.T) {
 	}
 }
 
-// The boundary is the knob for matching a PaperTracker release, so changing it
-// has to reach the wire without a restart.
+// boundary は PaperTracker のリリースに合わせるためのつまみなので、その変更は
+// 再起動なしで線上まで届かなければならない。
 func TestSetStreamOptionsAppliesToNewStreams(t *testing.T) {
 	s, frames, _ := newTestServer(t, Options{})
 	ts := httptest.NewServer(s.Handler())
@@ -707,7 +707,7 @@ func TestUnknownPathIsNotFound(t *testing.T) {
 	}
 }
 
-// A client that stops reading must not slow down the others.
+// 読むのをやめたクライアントが、他のクライアントを遅くしてはいけない。
 func TestManyStreamClients(t *testing.T) {
 	s, h, _ := newTestServer(t, Options{HoldOnSourceLoss: true})
 	ts := httptest.NewServer(s.Handler())
@@ -727,7 +727,7 @@ func TestManyStreamClients(t *testing.T) {
 		defer resp.Body.Close()
 
 		if i == 0 {
-			// Leave this one unread for the whole test.
+			// これはテストの間ずっと読まないままにしておく。
 			continue
 		}
 		buf := make([]byte, 64)
@@ -746,9 +746,9 @@ func TestManyStreamClients(t *testing.T) {
 	t.Fatalf("Subscribers() = %d, want 3", h.Subscribers())
 }
 
-// The hub keeps the last image indefinitely. Replaying it to every reconnect
-// while the camera is down would feed the tracker the same stale mouth shape
-// over and over, so a frame older than the loss timeout is withheld.
+// hub は最後の画像を無期限に保持する。カメラが落ちている間の再接続すべてにそれを
+// 流すと、トラッカーに同じ古い口の形を何度も食わせることになるので、喪失タイム
+// アウトより古いフレームは送らない。
 func TestStreamWithholdsAStaleOpeningFrame(t *testing.T) {
 	frames := hub.New()
 	s, _, _ := newTestServer(t, Options{Hub: frames})
@@ -781,8 +781,8 @@ func TestStreamWithholdsAStaleOpeningFrame(t *testing.T) {
 	}
 }
 
-// A frame that just arrived is still what a reconnecting client should see
-// straight away, rather than waiting for the next capture.
+// 届いたばかりのフレームは、再接続したクライアントが次のキャプチャを待たずに
+// すぐ見るべきものであることに変わりはない。
 func TestStreamSendsAFreshOpeningFrame(t *testing.T) {
 	frames := hub.New()
 	s, _, _ := newTestServer(t, Options{Hub: frames})
@@ -806,10 +806,10 @@ func TestStreamSendsAFreshOpeningFrame(t *testing.T) {
 	}
 }
 
-// An enumeration that failed is not an empty machine, and only the caller can
-// tell the user which it was. The two lists fail independently, so one failing
-// must not take the other's results with it: a machine with no ffmpeg still
-// has serial ports, and a picker that showed neither would be wrong about both.
+// 失敗した列挙は「何も繋がっていない機械」ではないし、どちらだったかをユーザーに
+// 伝えられるのは呼び出し側だけ。2 つのリストは独立に失敗するので、片方の失敗が
+// もう片方の結果を道連れにしてはいけない。ffmpeg の無い機械にもシリアルポートは
+// あるし、どちらも見せない選択画面は、両方について間違っていることになる。
 func TestDevicesReportsAPartialListWithItsError(t *testing.T) {
 	ctrl := &fakeController{cfg: config.Default(), devices: Devices{
 		CameraError: "ffmpeg is not executable",
@@ -843,9 +843,9 @@ func TestDevicesReportsAPartialListWithItsError(t *testing.T) {
 	}
 }
 
-// The settings file refuses unknown keys; the API has to agree. A misspelled
-// field is otherwise dropped, the value it meant to set stays at its zero
-// value, and the caller gets a 200 for a change that did something else.
+// 設定ファイルは未知のキーを拒否するので、API もそれに揃わなければならない。
+// さもないと綴りを誤ったフィールドは捨てられ、それが設定するはずだった値はゼロ値の
+// まま残り、呼び出し側は「別のことをした変更」に対して 200 を受け取る。
 func TestManagementAPIRejectsUnknownFields(t *testing.T) {
 	ctrl := &fakeController{cfg: config.Default()}
 	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
@@ -884,7 +884,7 @@ func TestManagementAPIRejectsUnknownFields(t *testing.T) {
 		}
 	})
 
-	// A body the struct does know is still accepted.
+	// 構造体が知っている本体は、これまでどおり受け入れられる。
 	t.Run("well formed", func(t *testing.T) {
 		resp, err := http.Post(ts.URL+"/api/v1/source", "application/json", strings.NewReader(`{"type":"serial"}`))
 		if err != nil {
@@ -897,9 +897,9 @@ func TestManagementAPIRejectsUnknownFields(t *testing.T) {
 	})
 }
 
-// Two JSON values in one body are two requests, not one with a typo. Decoding
-// the first and stopping there reports success for a change the caller asked
-// for and never got.
+// 1 つの本体に 2 つの JSON 値があるのは、打ち間違いのある 1 つではなく 2 つの
+// リクエスト。最初の 1 つをデコードしてそこで止まることは、呼び出し側が要求したのに
+// 得られなかった変更について成功を報告することになる。
 func TestManagementAPIRejectsTrailingContent(t *testing.T) {
 	bodies := map[string]string{
 		"a second value":   `{"type":"uvc"}{"type":"mjpeg"}`,
@@ -928,7 +928,7 @@ func TestManagementAPIRejectsTrailingContent(t *testing.T) {
 	}
 }
 
-// Whitespace after the value is just formatting, not a second request.
+// 値の後ろの空白は単なる整形であって、2 つ目のリクエストではない。
 func TestManagementAPIAcceptsTrailingWhitespace(t *testing.T) {
 	ctrl := &fakeController{cfg: config.Default()}
 	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
@@ -945,9 +945,9 @@ func TestManagementAPIAcceptsTrailingWhitespace(t *testing.T) {
 	}
 }
 
-// An absent type decodes to the empty string, and empty is not "missing" any
-// further down: Normalise reads it as unset and fills in uvc, so a request
-// with no type would move a working source rather than being rejected.
+// type が無ければ空文字列にデコードされるが、その先で空は「無い」を意味しない。
+// Normalise はそれを未設定と読んで uvc を埋めるので、type を含まないリクエストは
+// 拒否されるのではなく、動いているソースを動かしてしまう。
 func TestManagementAPIRejectsAnEmptySourceType(t *testing.T) {
 	for _, body := range []string{`{}`, `{"type":""}`, `{"type":"   "}`} {
 		t.Run(body, func(t *testing.T) {
@@ -971,10 +971,9 @@ func TestManagementAPIRejectsAnEmptySourceType(t *testing.T) {
 	}
 }
 
-// Subscribing and reading the latest frame are two steps. A frame published in
-// between lands in the new client's queue and becomes the latest at the same
-// moment, so it would open the stream by sending the same image twice -- two
-// samples of one mouth shape for the tracker.
+// 購読と最新フレームの読み取りは 2 段階。その間に配信されたフレームは、新しい
+// クライアントのキューに入ると同時に最新にもなるので、ストリームは同じ画像を 2 回
+// 送って始まることになる。トラッカーにとっては、1 つの口の形が 2 つの標本になる。
 func TestStreamDoesNotResendTheFrameItOpenedWith(t *testing.T) {
 	s, h, _ := newTestServer(t, Options{HoldOnSourceLoss: true})
 	ts := httptest.NewServer(s.Handler())
@@ -1013,7 +1012,7 @@ func TestStreamDoesNotResendTheFrameItOpenedWith(t *testing.T) {
 		if _, err := io.ReadFull(reader, body); err != nil {
 			t.Fatalf("read part body: %v", err)
 		}
-		// Each part ends with a CRLF of its own, before the next delimiter.
+		// 各パートは次の区切りの前に、自身の CRLF で終わる。
 		trailer := make([]byte, 2)
 		if _, err := io.ReadFull(reader, trailer); err != nil {
 			t.Fatalf("read part trailer: %v", err)
@@ -1021,13 +1020,13 @@ func TestStreamDoesNotResendTheFrameItOpenedWith(t *testing.T) {
 		return body
 	}
 
-	// The frame the stream opens with, which the client already had queued.
+	// ストリームが最初に送るフレーム。クライアントのキューに既に入っていたもの。
 	if got := readPart(); !bytes.Equal(got, first) {
 		t.Fatal("the stream did not open with the current frame")
 	}
 
-	// A distinguishable second frame. If the opening one were resent, this read
-	// would return it again instead.
+	// 見分けのつく 2 枚目。最初のものが再送されていれば、この読み取りは代わりに
+	// それをもう一度返すことになる。
 	second := append(bytes.Clone(first), 0x00)
 	h.Publish(core.Frame{Data: second})
 	if got := readPart(); !bytes.Equal(got, second) {
@@ -1035,12 +1034,11 @@ func TestStreamDoesNotResendTheFrameItOpenedWith(t *testing.T) {
 	}
 }
 
-// The overlap the skip above is for: a frame published while a client is
-// connecting is both the hub's latest and the first thing in that client's
-// queue. The race itself cannot be staged from a test -- the publish has to
-// land between Subscribe and Latest, two calls inside one handler -- but the
-// condition it produces can be shown, and it is the sequence number that tells
-// the two apart.
+// 上の読み飛ばしが対象としている重なり。クライアントの接続中に配信されたフレームは、
+// hub の最新であると同時に、そのクライアントのキューの先頭でもある。競合そのものは
+// テストから作り出せない — 配信が Subscribe と Latest の間、1 つのハンドラ内の
+// 2 つの呼び出しの間に落ちる必要がある — が、それが生む状況は示せるし、両者を
+// 見分けるのは連番だ。
 func TestHubQueuesTheFrameThatIsAlsoTheLatest(t *testing.T) {
 	h := hub.New()
 	frames, cancel := h.Subscribe()
@@ -1062,7 +1060,7 @@ func TestHubQueuesTheFrameThatIsAlsoTheLatest(t *testing.T) {
 	}
 }
 
-// fakeFetcher stands in for the ffmpeg download.
+// fakeFetcher は ffmpeg のダウンロードの代役。
 type fakeFetcher struct {
 	state  ffmpegfetch.State
 	starts int
@@ -1132,7 +1130,7 @@ func TestFFmpegEndpointReportsAndStarts(t *testing.T) {
 			t.Fatalf("post: %v", err)
 		}
 		defer resp.Body.Close()
-		// Accepted, not OK: the download outlives the request by minutes.
+		// OK ではなく Accepted。ダウンロードはリクエストより数分長く生き続ける。
 		if resp.StatusCode != http.StatusAccepted {
 			t.Errorf("status = %d, want 202", resp.StatusCode)
 		}
@@ -1142,7 +1140,7 @@ func TestFFmpegEndpointReportsAndStarts(t *testing.T) {
 	})
 }
 
-// Asking again while it runs is the same request, not a second download.
+// 実行中にもう一度頼むのは同じ要求であって、2 つ目のダウンロードではない。
 func TestFFmpegEndpointAcceptsARepeatedRequestWhileBusy(t *testing.T) {
 	fetcher := &fakeFetcher{err: ffmpegfetch.ErrBusy}
 	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
@@ -1159,7 +1157,7 @@ func TestFFmpegEndpointAcceptsARepeatedRequestWhileBusy(t *testing.T) {
 	}
 }
 
-// A hundred megabytes is not fetched again over an ffmpeg that already works.
+// 既に動いている ffmpeg の上に、100 メガバイトを取り直したりはしない。
 func TestFFmpegEndpointDoesNotRefetchAnInstalledCopy(t *testing.T) {
 	fetcher := &fakeFetcher{state: ffmpegfetch.State{Installed: true, Path: `C:\ffmpeg.exe`}}
 	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
@@ -1179,8 +1177,8 @@ func TestFFmpegEndpointDoesNotRefetchAnInstalledCopy(t *testing.T) {
 	}
 }
 
-// The download endpoint is behind the same guard as the rest: a page must not
-// be able to make the machine pull a hundred megabytes.
+// ダウンロードのエンドポイントも他と同じ番人の後ろにある。ページが機械に 100
+// メガバイトを引かせられてはいけない。
 func TestFFmpegEndpointRefusesACrossSiteRequest(t *testing.T) {
 	fetcher := &fakeFetcher{}
 	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
@@ -1203,11 +1201,10 @@ func TestFFmpegEndpointRefusesACrossSiteRequest(t *testing.T) {
 	}
 }
 
-// A client written before ui existed cannot send it, and the settings it does
-// send are none of its business to change. Decaying the field it never named
-// to a default would look like a request to change a startup-only setting, and
-// the whole request would be refused -- shutting that client out of the
-// management API over something it never touched.
+// ui が存在する前に書かれたクライアントはそれを送れないし、実際に送ってくる設定を
+// 変えるのはそのクライアントの領分ではない。名前を挙げなかったフィールドを既定値へ
+// 落とすと、起動時にしか変更できない設定への変更要求に見えてしまい、リクエスト全体が
+// 拒否される。触れてもいないもののせいで、そのクライアントは管理 API から締め出される。
 func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
 	running := config.Default()
 	running.UI.Language = "ja"
@@ -1229,7 +1226,7 @@ func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
 		return resp
 	}
 
-	// The old schema: everything it knows about, and no ui.
+	// 古いスキーマ。知っているものはすべて含み、ui は含まない。
 	old := config.Default()
 	old.UI = config.UI{}
 	body, _ := json.Marshal(old)
@@ -1249,7 +1246,7 @@ func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
 		t.Errorf("language = %q, want the running ja carried through untouched", got)
 	}
 
-	// Naming it still changes it, so the carry-through cannot hide a real edit.
+	// 名前を挙げればちゃんと変わる。引き継ぎが本物の編集を隠すことはない。
 	named := config.Default()
 	named.UI.Language = "en"
 	namedBody, _ := json.Marshal(named)
