@@ -596,7 +596,7 @@ func restoreCache(opts options) error {
 	// one thing it must not do.
 	p := i18n.NewPrinter(i18n.Detect())
 	if cfgPath, err := resolveConfigPath(opts.configPath); err == nil {
-		p = i18n.NewPrinter(config.LanguageFromFile(cfgPath))
+		p = i18n.NewPrinter(config.LanguageWithoutLoading(cfgPath, os.Getenv))
 	}
 
 	restored, err := restoreEverywhereItWas(configuredInstallDir(opts))

@@ -623,7 +623,7 @@ func TestLanguageFromTheEnvironment(t *testing.T) {
 // -restore-cache is what somebody runs while uninstalling, so reading the
 // language must not put the settings folder back on a machine they are
 // clearing.
-func TestLanguageFromFileCreatesNothing(t *testing.T) {
+func TestLanguageWithoutLoadingCreatesNothing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gone", FileName)
 
@@ -631,8 +631,8 @@ func TestLanguageFromFileCreatesNothing(t *testing.T) {
 	t.Setenv("LC_MESSAGES", "")
 	t.Setenv("LANG", "ja_JP.UTF-8")
 
-	if got := LanguageFromFile(path); got != i18n.Japanese {
-		t.Errorf("LanguageFromFile of a missing file = %q, want the system's", got)
+	if got := LanguageWithoutLoading(path, nil); got != i18n.Japanese {
+		t.Errorf("LanguageWithoutLoading of a missing file = %q, want the system's", got)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Errorf("the settings folder was created (stat error %v)", err)
@@ -644,12 +644,54 @@ func TestLanguageFromFileCreatesNothing(t *testing.T) {
 
 // It reads only its one setting, so a file the bridge itself would refuse to
 // start on still answers the question.
-func TestLanguageFromFileIgnoresTheRest(t *testing.T) {
+func TestLanguageWithoutLoadingIgnoresTheRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	if err := os.WriteFile(path, []byte("[ui]\nlanguage = 'ja'\n\n[server]\nlsiten = 'typo'\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if got := LanguageFromFile(path); got != i18n.Japanese {
-		t.Errorf("LanguageFromFile = %q, want Japanese despite the unknown key", got)
+	if got := LanguageWithoutLoading(path, nil); got != i18n.Japanese {
+		t.Errorf("LanguageWithoutLoading = %q, want Japanese despite the unknown key", got)
+	}
+}
+
+// The documented order is environment, then file, then system, and it has to
+// hold for the command that reads the language outside the usual layering too.
+// A variable that works everywhere except here is worse than not offering it.
+func TestLanguageWithoutLoadingPrefersTheEnvironment(t *testing.T) {
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "en_US.UTF-8")
+
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, []byte("[ui]\nlanguage = 'en'\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	env := func(name string) string {
+		if name == EnvLanguage {
+			return "ja"
+		}
+		return ""
+	}
+	if got := LanguageWithoutLoading(path, env); got != i18n.Japanese {
+		t.Errorf("LanguageWithoutLoading = %q, want the variable to beat the file", got)
+	}
+
+	// An empty variable is not a choice, so the file still decides.
+	blank := func(string) string { return "" }
+	if got := LanguageWithoutLoading(path, blank); got != i18n.English {
+		t.Errorf("LanguageWithoutLoading = %q, want the file's English", got)
+	}
+
+	// Neither is an unusable one: it falls through rather than failing, since
+	// this runs when the settings are already in a bad state.
+	bad := func(name string) string {
+		if name == EnvLanguage {
+			return "jp"
+		}
+		return ""
+	}
+	if got := LanguageWithoutLoading(path, bad); got != i18n.English {
+		t.Errorf("LanguageWithoutLoading = %q, want it to fall through to the file", got)
 	}
 }

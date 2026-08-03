@@ -281,15 +281,33 @@ func InstallDirFromFile(path string) (string, error) {
 	return strings.TrimSpace(doc.PaperTracker.InstallDir), nil
 }
 
-// LanguageFromFile reads ui.language on its own, without creating anything and
-// without validating the rest of the file.
+// EnvLanguage overrides ui.language, like every other PTCAMBRIDGE_*.
+//
+// Exported because reading the language outside the usual layering has to
+// honour the same order, and a second copy of the name here and in ApplyEnv
+// is a drift waiting to happen.
+const EnvLanguage = "PTCAMBRIDGE_LANGUAGE"
+
+// LanguageWithoutLoading resolves the interface language without creating
+// anything and without validating the rest of the settings.
 //
 // The same reasoning as InstallDirFromFile: -restore-cache is what somebody
 // runs while uninstalling, when the settings may be half deleted or gone
 // altogether, and the ordinary read would write a fresh settings file and its
-// folder back onto a machine the user is clearing. A missing or unreadable
-// file is not an error here -- it just means the system language.
-func LanguageFromFile(path string) i18n.Lang {
+// folder back onto a machine the user is clearing.
+//
+// The order is the documented one -- environment, then file, then system --
+// because a variable that works for every other command and silently does not
+// for this one is worse than not offering it. Anything unreadable or unknown
+// falls through rather than failing: this is a command whose whole point is
+// running when the settings are in a bad state.
+func LanguageWithoutLoading(path string, getenv func(string) string) i18n.Lang {
+	if getenv != nil {
+		if lang, err := i18n.ParseLang(getenv(EnvLanguage)); err == nil && strings.TrimSpace(getenv(EnvLanguage)) != "" {
+			return lang
+		}
+	}
+
 	var doc struct {
 		UI struct {
 			Language string `toml:"language"`
@@ -379,7 +397,7 @@ func (c *Config) ApplyEnv(get envLookup) error {
 	setString(get, "PTCAMBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
 	setString(get, EnvInstallDir, &c.PaperTracker.InstallDir)
 	fail(setBool(get, "PTCAMBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
-	setString(get, "PTCAMBRIDGE_LANGUAGE", &c.UI.Language)
+	setString(get, EnvLanguage, &c.UI.Language)
 	setString(get, "PTCAMBRIDGE_LOG_LEVEL", &c.Log.Level)
 	setString(get, "PTCAMBRIDGE_LOG_DIR", &c.Log.Dir)
 
