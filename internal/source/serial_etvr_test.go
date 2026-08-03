@@ -417,6 +417,39 @@ func TestSerialStallKeepsBytesThatFollowedTheLastFrame(t *testing.T) {
 	}
 }
 
+// The bytes after a frame are counted from what the parser skipped past, not
+// from what it kept: it keeps only what could still begin a packet, which for
+// pure rubbish is at most the header length minus one -- nothing at all when
+// the configured header is a single byte, which the settings allow.
+func TestSerialStallCountsUnparsableBytesAfterAFrame(t *testing.T) {
+	for _, header := range [][]byte{{0xFF, 0xA0, 0xFF, 0xA1}, {0xFF}} {
+		t.Run(hexPreview(header), func(t *testing.T) {
+			parser, err := core.NewETVRParser(header, 0)
+			if err != nil {
+				t.Fatalf("NewETVRParser: %v", err)
+			}
+			packet, err := parser.EncodePacket(testJPEG(t))
+			if err != nil {
+				t.Fatalf("EncodePacket: %v", err)
+			}
+			// Rubbish the parser cannot make anything of, and which contains
+			// no byte of the header, so none of it is kept as a candidate.
+			junk := bytes.Repeat([]byte{0x5A}, 64)
+
+			s := wiredSerial(t, discardLogger(), SerialConfig{Header: header},
+				append(append([]byte{}, packet...), junk...))
+			stallErr := runUntilStall(t, s)
+			if stallErr == nil {
+				t.Fatal("session returned nil, want a stall")
+			}
+			want := fmt.Sprintf("%d bytes received", len(junk))
+			if !strings.Contains(stallErr.Error(), want) {
+				t.Errorf("error = %v, want it to report the %s that followed the frame", stallErr, want)
+			}
+		})
+	}
+}
+
 // A board that worked and then went quiet is a different situation: there is
 // no unparsable stream to show, so showing one would be misleading.
 func TestSerialStallAfterWorkingSaysNothingAboutTheStream(t *testing.T) {

@@ -29,7 +29,7 @@ func TestETVRParseConsecutivePackets(t *testing.T) {
 		stream = append(stream, pkt...)
 	}
 
-	frames, rest := p.Parse(stream)
+	frames, rest, _ := p.Parse(stream)
 	if len(frames) != 2 {
 		t.Fatalf("got %d frames, want 2", len(frames))
 	}
@@ -55,12 +55,12 @@ func TestETVRParseHandlesSplitAtEveryOffset(t *testing.T) {
 		var buf []byte
 		var got [][]byte
 
-		frames, rest := p.Parse(pkt[:split])
+		frames, rest, _ := p.Parse(pkt[:split])
 		got = append(got, frames...)
 		buf = append(buf[:0], rest...)
 
 		buf = append(buf, pkt[split:]...)
-		frames, rest = p.Parse(buf)
+		frames, rest, _ = p.Parse(buf)
 		got = append(got, frames...)
 
 		if len(got) != 1 {
@@ -86,7 +86,7 @@ func TestETVRParseSkipsLeadingGarbage(t *testing.T) {
 	}
 	stream := append([]byte{0x12, 0xFF, 0xA0, 0x34, 0x00, 0x99}, pkt...)
 
-	frames, _ := p.Parse(stream)
+	frames, _, _ := p.Parse(stream)
 	if len(frames) != 1 || !bytes.Equal(frames[0], payload) {
 		t.Fatalf("got %d frames, want the single valid packet", len(frames))
 	}
@@ -107,7 +107,7 @@ func TestETVRParseRejectsImplausibleLength(t *testing.T) {
 	bad = binary.LittleEndian.AppendUint16(bad, 60000) // beyond maxPayload
 	bad = append(bad, 0xAA, 0xBB)
 
-	frames, _ := p.Parse(append(bad, good...))
+	frames, _, _ := p.Parse(append(bad, good...))
 	if len(frames) != 1 || !bytes.Equal(frames[0], payload) {
 		t.Fatalf("got %d frames, want only the packet with a sane length", len(frames))
 	}
@@ -128,7 +128,7 @@ func TestETVRParseDropsCorruptPayload(t *testing.T) {
 		t.Fatalf("EncodePacket: %v", err)
 	}
 
-	frames, _ := p.Parse(append(badPkt, goodPkt...))
+	frames, _, _ := p.Parse(append(badPkt, goodPkt...))
 	if len(frames) != 1 || !bytes.Equal(frames[0], payload) {
 		t.Fatalf("got %d frames, want only the valid one", len(frames))
 	}
@@ -148,7 +148,7 @@ func TestETVRParseHonoursCustomHeader(t *testing.T) {
 	if !bytes.HasPrefix(pkt, []byte{0xAB, 0xCD}) {
 		t.Fatal("custom header was not written to the packet")
 	}
-	frames, _ := p.Parse(pkt)
+	frames, _, _ := p.Parse(pkt)
 	if len(frames) != 1 {
 		t.Fatalf("got %d frames, want 1", len(frames))
 	}
@@ -164,7 +164,7 @@ func TestNewETVRParserRejectsEmptyHeader(t *testing.T) {
 // the stream contains no headers at all.
 func TestETVRParseBoundsLeftoverBytes(t *testing.T) {
 	p := newTestParser(t)
-	frames, rest := p.Parse(bytes.Repeat([]byte{0x01}, 8192))
+	frames, rest, _ := p.Parse(bytes.Repeat([]byte{0x01}, 8192))
 	if len(frames) != 0 {
 		t.Fatalf("got %d frames, want none", len(frames))
 	}

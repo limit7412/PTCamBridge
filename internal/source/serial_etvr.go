@@ -88,6 +88,10 @@ type Serial struct {
 	tried  map[string]struct{}
 	proven string
 
+	// tail is what the parser last reported as lying past the end of the most
+	// recent packet. See splitPackets for why it is carried here.
+	tail int
+
 	// warned remembers, per port, which unparsable streams have already been
 	// reported, so the same complaint is not made on every reconnect.
 	//
@@ -230,11 +234,16 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 			}
 		}
 		if len(frames) > 0 {
-			// Not zero: a read can carry a frame and the start of the next one
-			// together, and those trailing bytes arrived after the frame the
-			// stall is now measured from. Dropping them would report a silent
-			// port for a board that is in fact part way through a packet.
-			sinceFrame = int64(assembler.pending())
+			// Not zero: a read can carry a frame and then more bytes, and those
+			// arrived after the frame the stall is now measured from. Dropping
+			// them would report a silent port for a board that is in fact part
+			// way through a packet, or sending something unparsable.
+			//
+			// From the parser rather than from what the assembler is holding:
+			// the assembler holds only what could still become a packet, and
+			// with a short header that is almost nothing -- with a one byte
+			// header, nothing at all.
+			sinceFrame = int64(s.tail)
 		}
 	}
 }
@@ -251,24 +260,12 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 // packet header is configurable precisely because firmware revisions differ,
 // and the value to configure is sitting in that line.
 func (s *Serial) stalled(name string, frames uint64, sinceFrame int64, preview []byte) error {
-	if frames > 0 {
-		// A board that worked and then stopped. The count is a lower bound
-		// here and says so: bytes arriving after a frame in that same read are
-		// only still countable while the parser is holding them, and it
-		// discards what cannot begin a packet. Which way that lands does not
-		// change the reading -- nothing arrived, or something did -- but the
-		// number should not be quoted as a total when it is not one.
-		//
-		// Nothing is shown of the stream either: this port was producing
-		// frames a moment ago, so its packets are not the problem.
-		return fmt.Errorf("serial: %s produced no frame for %s (at least %d bytes received since the last frame)", name, serialStallTimeout, sinceFrame)
-	}
-
-	// Nothing has ever parsed on this port, so no frame has reset the count:
-	// this total is every byte the session saw.
 	err := fmt.Errorf("serial: %s produced no frame for %s (%d bytes received in that time)", name, serialStallTimeout, sinceFrame)
-	if sinceFrame == 0 {
-		// A silent port. The error says so and there is nothing to show.
+	if frames > 0 || sinceFrame == 0 {
+		// Either the board went quiet after working, or the port is silent.
+		// Both are described by the error; there is nothing to show. A port
+		// that was producing frames a moment ago does not have a packet
+		// format problem.
 		return err
 	}
 
@@ -311,8 +308,15 @@ func hexPreview(b []byte) string {
 
 // splitPackets adapts the parser to the frameAssembler signature. The parser
 // carries its own payload bound, so maxSize is already applied there.
+//
+// The parser's tail is stashed on the driver rather than returned, because the
+// assembler's signature has no room for it and widening that would reach the
+// UVC and MJPEG drivers, which share it and do not need this. Safe because Run
+// is single threaded, like tried and proven above.
 func (s *Serial) splitPackets(buf []byte, _ int) ([][]byte, []byte) {
-	return s.parser.Parse(buf)
+	frames, rest, tail := s.parser.Parse(buf)
+	s.tail = tail
+	return frames, rest
 }
 
 // resolvePort returns the configured port, or searches for one when set to

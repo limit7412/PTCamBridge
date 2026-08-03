@@ -81,12 +81,6 @@ func (a *frameAssembler) feed(chunk []byte) [][]byte {
 // reset drops any partial frame, for use after a reconnect.
 func (a *frameAssembler) reset() { a.buf = a.buf[:0] }
 
-// pending is how many bytes are held waiting to become a frame. A driver
-// reporting what arrived cannot get that from its own read count: a read can
-// carry a frame and the beginning of the next one together, and those trailing
-// bytes belong to the time after that frame, not before it.
-func (a *frameAssembler) pending() int { return len(a.buf) }
-
 // send hands a frame to the pipeline, honouring cancellation. The receiving
 // channel is shallow and the hub past it never blocks, so this waits only for
 // the transform step.
