@@ -15,42 +15,40 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// AutoPort asks the driver to pick a port by USB vendor ID instead of naming
-// one explicitly.
+// AutoPort は、ポートを明示せず USB のベンダー ID から選ぶようドライバに
+// 指示する値です。
 const AutoPort = "auto"
 
-// DefaultSerialBaud is the rate Babble wired firmware runs at.
+// DefaultSerialBaud は、Babble の有線ファームウェアが動作する速度です。
 const DefaultSerialBaud = 3000000
 
-// serialReadTimeout bounds a blocking read so the loop can notice that the
-// context was cancelled. It is not a stall detector.
+// serialReadTimeout は、ループがコンテキストのキャンセルに気づけるよう、
+// ブロッキング読み取りに上限を設けるものです。停滞の検出器ではありません。
 const serialReadTimeout = 200 * time.Millisecond
 
-// serialStallTimeout is how long a port may go without producing a frame
-// before the driver treats the board as gone and reconnects. A var so tests
-// do not have to spend it: what they check is what the stall reports, and
-// waiting five seconds for each one says nothing extra.
+// serialStallTimeout は、ドライバがボードを失われたとみなして再接続するまでに、
+// ポートがフレームを出さずにいられる時間です。var にしているのはテストがこれを
+// 使い切らずに済むようにするためです。テストが見るのは停滞が何を報告するかであり、
+// 毎回 5 秒待っても分かることは増えません。
 var serialStallTimeout = 5 * time.Second
 
-// previewBytes is how much of a stream nothing could be parsed out of is put
-// in the log: enough to see a preamble and the start of a length field,
-// not so much that the line turns into a hex dump.
+// previewBytes は、何も解析できなかったストリームをログにどれだけ載せるかです。
+// 前置きと長さフィールドの先頭が見える程度で、行が丸ごと 16 進ダンプになるほどでは
+// ない量です。
 const previewBytes = 16
 
-// maxWarnedStreams bounds how many different unparsable streams one port is
-// warned about before the rest go to debug.
+// maxWarnedStreams は、1 つのポートについて何種類の「解析できないストリーム」まで
+// 警告し、それ以降を debug に落とすかの上限です。
 //
-// A cap is needed because "the bytes changed" is not always news: a port
-// carrying a live stream hands back different first bytes on every open,
-// depending on where the reader happened to join it, so keying the warning on
-// the stream alone would warn on every reconnect -- the flooding the memory
-// exists to prevent. A few tellings is enough to see that the bytes are
-// varying, and the debug line still carries every one of them.
+// 上限が必要なのは、「バイト列が変わった」ことが常に新しい知らせとは限らないから
+// です。流れているストリームを載せたポートは、読み手がどこで加わったかによって開く
+// たびに違う先頭バイトを返します。ストリームだけを鍵にすると再接続のたびに警告する
+// ことになり、それはこの記憶が防ごうとしている氾濫そのものです。バイト列が変動して
+// いると分かるには数回で十分ですし、debug 行にはその全部が残ります。
 const maxWarnedStreams = 3
 
-// knownCameraVIDs are the USB vendor IDs of the bridges and MCUs that Babble
-// and OpenIris boards ship with: Espressif, Silicon Labs, QinHeng, FTDI and
-// Raspberry Pi.
+// knownCameraVIDs は、Babble や OpenIris のボードに載っているブリッジや MCU の
+// USB ベンダー ID です。Espressif、Silicon Labs、QinHeng、FTDI、Raspberry Pi。
 var knownCameraVIDs = map[string]string{
 	"303A": "Espressif",
 	"10C4": "Silicon Labs CP210x",
@@ -59,72 +57,72 @@ var knownCameraVIDs = map[string]string{
 	"2E8A": "Raspberry Pi",
 }
 
-// ErrNoSerialPort means the search found nothing that could be a camera board.
+// ErrNoSerialPort は、カメラボードであり得るものが探索で 1 つも見つからなかった
+// ことを表します。
 var ErrNoSerialPort = errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
 
-// SerialConfig configures the wired Babble board driver.
+// SerialConfig は、有線 Babble ボードのドライバの設定です。
 type SerialConfig struct {
-	// Port is a port name such as "COM5", or AutoPort to search by vendor ID.
+	// Port は "COM5" のようなポート名、またはベンダー ID で探させる AutoPort です。
 	Port string
-	// Baud defaults to DefaultSerialBaud when zero.
+	// Baud は 0 なら DefaultSerialBaud になります。
 	Baud int
-	// Header overrides the packet preamble for firmware that differs from the
-	// documented 0xFF 0xA0 0xFF 0xA1.
+	// Header は、文書化された 0xFF 0xA0 0xFF 0xA1 と異なるファームウェア向けに
+	// パケットの前置きを上書きします。
 	Header []byte
-	// MaxFrameSize bounds a single JPEG; zero selects the core default.
+	// MaxFrameSize は JPEG 1 枚の上限です。0 なら core の既定値を使います。
 	MaxFrameSize int
 }
 
-// Serial reads the OpenIris/ETVR wired packet stream from a serial port.
+// Serial は、シリアルポートから OpenIris/ETVR の有線パケットストリームを読みます。
 type Serial struct {
 	cfg      SerialConfig
 	parser   core.ETVRParser
 	log      *slog.Logger
 	reporter Reporter
 
-	// tried remembers which ports AutoPort has already handed out and been
-	// brought back from, so the search moves on instead of returning the same
-	// candidate on every reconnect. proven is the last port that actually
-	// produced a frame, which earns it one retry ahead of the rotation.
+	// tried は、AutoPort が既に選び、そして戻ってきたポートを覚えています。再接続の
+	// たびに同じ候補を返すのではなく、探索が先へ進むようにするためです。proven は
+	// 実際にフレームを出した最後のポートで、巡回に先んじて 1 回の再試行を得ます。
 	//
-	// Only Run touches either, and Run is single threaded.
+	// どちらに触れるのも Run だけで、Run は単一スレッドです。
 	tried  map[string]struct{}
 	proven string
 
-	// tail is what the parser last reported as lying past the end of the most
-	// recent packet. See splitPackets for why it is carried here.
+	// tail は、直近のパケットの終端より後ろにあるとパーサーが最後に報告した量です。
+	// なぜここに持つのかは splitPackets を参照してください。
 	tail int
 
-	// warned remembers, per port, which unparsable streams have already been
-	// reported, so the same complaint is not made on every reconnect.
+	// warned は、どの解析できないストリームを既に報告したかをポートごとに覚えて
+	// います。再接続のたびに同じ苦情を繰り返さないためです。
 	//
-	// Per port and per stream, because both change independently: "auto"
-	// rotates between candidates, so remembering only the last stream would
-	// warn again every time the rotation came back round; and a firmware
-	// update or a different device on the same COM number is a new thing to
-	// say. An entry is dropped when that port produces a frame, so a port that
-	// works and later breaks is news again.
+	// ポート単位かつストリーム単位なのは、両者が独立に変わるからです。"auto" は
+	// 候補の間を巡回するので、最後のストリームだけを覚えていると、巡回が一周する
+	// たびにまた警告することになります。またファームウェアの更新や、同じ COM 番号に
+	// 現れた別のデバイスは、改めて言うべき新しい事柄です。そのポートがフレームを
+	// 出せばエントリは捨てるので、動いていたポートが後で壊れたら、それはまた新しい
+	// 知らせになります。
 	warned map[string][]string
 
-	// listPorts is ListSerialPorts, replaced in tests: the rotation is the
-	// part worth checking and it cannot be reached without control over what
-	// enumeration returns.
+	// listPorts は ListSerialPorts で、テストでは差し替えます。確認する価値が
+	// あるのは巡回の部分であり、列挙が何を返すかを操作できなければそこに到達
+	// できません。
 	listPorts func() ([]SerialPort, error)
-	// openPort is serial.Open, replaced in tests for the same reason: what a
-	// stalled session says about the wire cannot be checked without deciding
-	// what comes off it.
+	// openPort は serial.Open で、同じ理由でテストでは差し替えます。停滞した
+	// セッションが線について何を語るかは、そこから何が出てくるかを決められなければ
+	// 確認できません。
 	openPort func(name string, baud int) (serialPort, error)
 }
 
-// serialPort is the part of go.bug.st/serial.Port this driver uses.
+// serialPort は、このドライバが使う go.bug.st/serial.Port の部分です。
 type serialPort interface {
 	Read(p []byte) (int, error)
 	SetReadTimeout(t time.Duration) error
 	Close() error
 }
 
-// NewSerial builds the driver and validates the packet header up front, since
-// a bad header would otherwise fail identically on every reconnect.
+// NewSerial はドライバを組み立て、パケットヘッダーを先に検証します。そうしないと
+// 誤ったヘッダーは再接続のたびにまったく同じ失敗を繰り返すことになります。
 func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, error) {
 	if cfg.Baud <= 0 {
 		cfg.Baud = DefaultSerialBaud
@@ -153,17 +151,17 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 	}, nil
 }
 
-// Name implements Source.
+// Name は Source を実装します。
 func (s *Serial) Name() string { return "serial" }
 
-// Run implements Source.
+// Run は Source を実装します。
 func (s *Serial) Run(ctx context.Context, out chan<- core.Frame) error {
 	return runWithBackoff(ctx, s.log, s.Name(), s.reporter, func(ctx context.Context) error {
 		return s.session(ctx, out)
 	})
 }
 
-// session opens the port and reads until it fails or the context ends.
+// session はポートを開き、失敗するかコンテキストが終わるまで読み続けます。
 func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 	name, err := s.resolvePort()
 	if err != nil {
@@ -184,9 +182,8 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 	buf := make([]byte, readChunk)
 	lastFrame := time.Now()
 	var count uint64
-	// Bytes since the last frame, over the same window the stall is measured
-	// in, and the head of the stream while nothing has parsed out of it. See
-	// stalled for what they are for.
+	// 直前のフレームからのバイト数 (停滞を測るのと同じ窓で数える) と、何も解析
+	// できていない間のストリームの先頭。何のためにあるかは stalled を参照。
 	var sinceFrame int64
 	var preview []byte
 
@@ -194,11 +191,11 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		// Frames, not bytes, and checked on every pass rather than only when a
-		// read times out. "auto" can land on some other serial device that
-		// chatters away without ever forming a packet; keying on arrival would
-		// hold that port open forever and never re-run the search, so the real
-		// board plugged in later would never be found.
+		// バイトではなくフレームで測り、読み取りがタイムアウトしたときだけでなく
+		// 毎回確認する。"auto" は、パケットを形作らないまま喋り続ける別のシリアル
+		// デバイスに当たることがある。到着を鍵にすると、そのポートを永遠に開いた
+		// まま探索をやり直さないので、後から挿された本物のボードは決して
+		// 見つからない。
 		if time.Since(lastFrame) > serialStallTimeout {
 			return s.stalled(name, count, sinceFrame, preview)
 		}
@@ -207,7 +204,7 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 			return fmt.Errorf("serial: read from %s: %w", name, err)
 		}
 		if n == 0 {
-			// A read timeout, not an error.
+			// エラーではなく読み取りのタイムアウト。
 			continue
 		}
 		sinceFrame += int64(n)
@@ -223,11 +220,11 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 		for _, f := range frames {
 			lastFrame = time.Now()
 			if count == 0 {
-				// This port has proved itself, so the auto search should come
-				// back to it first rather than rotating past it.
+				// このポートは実力を示した。自動探索は巡回で通り過ぎるのではなく、
+				// まずここへ戻ってくるべき。
 				s.proven = name
-				// It works now. If it stops parsing later that is news again,
-				// whatever was said about it before.
+				// 今は動いている。後で解析できなくなれば、以前どう言われていようと
+				// それは改めて新しい知らせになる。
 				delete(s.warned, name)
 				s.reporter.Connected(s.Name())
 			}
@@ -237,46 +234,43 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 			}
 		}
 		if len(frames) > 0 {
-			// Not zero: a read can carry a frame and then more bytes, and those
-			// arrived after the frame the stall is now measured from. Dropping
-			// them would report a silent port for a board that is in fact part
-			// way through a packet, or sending something unparsable.
+			// 0 にはしない。1 回の読み取りがフレームとその後のバイト列を同時に
+			// 運ぶことがあり、それらは停滞の起点となったフレームより後に届いた
+			// ものだから。捨ててしまうと、実際にはパケットの途中まで来ている、
+			// あるいは解析できない何かを送っているボードについて、「無言のポート」
+			// と報告することになる。
 			//
-			// From the parser rather than from what the assembler is holding:
-			// the assembler holds only what could still become a packet, and
-			// with a short header that is almost nothing -- with a one byte
-			// header, nothing at all.
+			// assembler が抱えている量ではなくパーサーから取る。assembler が持つ
+			// のはまだパケットになり得る分だけで、ヘッダーが短ければそれはほとんど
+			// 無く、1 バイトのヘッダーならまったく無い。
 			sinceFrame = int64(s.tail)
 		}
 	}
 }
 
-// stalled explains a session that stopped producing frames, and says what was
-// on the wire when nothing could be made of it.
+// stalled は、フレームを出さなくなったセッションについて説明し、何も読み取れな
+// かったときに線上に何があったかを述べます。
 //
-// The stall is counted in frames rather than bytes (see the loop), so on its
-// own it cannot tell a silent port from a talkative one whose packets this
-// parser does not recognise -- and those two need opposite fixes: the first is
-// a board that is not streaming, the second is a header or a baud rate that
-// does not match the firmware. The byte total separates them. For the second,
-// the bytes themselves are what settles it, which is why they are logged: the
-// packet header is configurable precisely because firmware revisions differ,
-// and the value to configure is sitting in that line.
+// 停滞はバイトではなくフレームで数えます (ループを参照)。そのためそれだけでは、
+// 無言のポートと、よく喋るがこのパーサーの知らないパケットを送るポートを区別
+// できません。この 2 つは正反対の対処を要します。前者はストリームを出していない
+// ボード、後者はファームウェアと合っていないヘッダーかボーレートです。両者を
+// 分けるのがバイトの総量です。後者については、決め手になるのはバイト列そのもの
+// であり、だからこそログに出します。パケットヘッダーを設定可能にしているのは
+// まさにファームウェアの版が異なるからで、設定すべき値はその行の中にあります。
 func (s *Serial) stalled(name string, frames uint64, sinceFrame int64, preview []byte) error {
 	err := fmt.Errorf("serial: %s produced no frame for %s (%d bytes received in that time)", name, serialStallTimeout, sinceFrame)
 	if frames > 0 || sinceFrame == 0 {
-		// Either the board went quiet after working, or the port is silent.
-		// Both are described by the error; there is nothing to show. A port
-		// that was producing frames a moment ago does not have a packet
-		// format problem.
+		// 動いていたボードが黙ったか、ポートが無言かのどちらか。どちらもエラーが
+		// 説明しており、見せるものは無い。少し前までフレームを出していたポートに、
+		// パケット形式の問題があるわけではない。
 		return err
 	}
 
 	head := hexPreview(preview)
-	// Said once per stream, and only so many times per port. The reconnect
-	// loop comes back every few seconds, and repeating a complaint already
-	// made adds nothing; the bytes are still in the debug line for anyone
-	// watching a port whose stream keeps moving.
+	// 1 ストリームにつき 1 回、1 ポートにつき決まった回数だけ言う。再接続ループは
+	// 数秒ごとに戻ってくるので、既に述べた苦情を繰り返しても何も足さない。
+	// ストリームが動き続けるポートを見ている人のために、バイト列は debug 行に残る。
 	seen := s.warned[name]
 	if slices.Contains(seen, head) || len(seen) >= maxWarnedStreams {
 		s.log.Debug("still nothing that parses on the serial port", "port", name, "first_bytes", head)
@@ -293,8 +287,8 @@ func (s *Serial) stalled(name string, frames uint64, sinceFrame int64, preview [
 	return err
 }
 
-// hexPreview renders bytes the way a protocol document writes them, so what is
-// logged can be compared with the header in the settings by eye.
+// hexPreview は、プロトコル文書が書くのと同じ形式でバイト列を表します。ログに
+// 出たものを設定のヘッダーと目で見比べられるようにするためです。
 func hexPreview(b []byte) string {
 	if len(b) == 0 {
 		return ""
@@ -309,28 +303,26 @@ func hexPreview(b []byte) string {
 	return sb.String()
 }
 
-// splitPackets adapts the parser to the frameAssembler signature. The parser
-// carries its own payload bound, so maxSize is already applied there.
+// splitPackets は、パーサーを frameAssembler のシグネチャに合わせます。パーサーは
+// 自身のペイロード上限を持っているので、maxSize はそちらで既に適用されています。
 //
-// The parser's tail is stashed on the driver rather than returned, because the
-// assembler's signature has no room for it and widening that would reach the
-// UVC and MJPEG drivers, which share it and do not need this. Safe because Run
-// is single threaded, like tried and proven above.
+// パーサーの tail は返さずドライバに置いています。assembler のシグネチャにその
+// 余地が無く、広げれば UVC と MJPEG のドライバにも及ぶからです。あちらは同じ
+// シグネチャを共有していて、これを必要としていません。上の tried や proven と同じく、
+// Run が単一スレッドなので安全です。
 func (s *Serial) splitPackets(buf []byte, _ int) ([][]byte, []byte) {
 	frames, rest, tail := s.parser.Parse(buf)
 	s.tail = tail
 	return frames, rest
 }
 
-// resolvePort returns the configured port, or searches for one when set to
-// AutoPort.
+// resolvePort は設定されたポートを返し、AutoPort が指定されていれば探索します。
 //
-// The search does not just take the head of the list. Two known-vendor boards
-// can be plugged in at once -- a Babble board and an unrelated CP210x dongle,
-// say -- and always returning the first one means the wrong device is opened,
-// stalled out and reopened forever while the camera sitting next to it is
-// never tried. So each candidate is used once, and the next reconnect moves
-// on to the one after it.
+// 探索は単にリストの先頭を取るわけではありません。既知ベンダーのボードが同時に
+// 2 つ挿さっていることがあります — Babble ボードと、無関係な CP210x のドングルなど。
+// 常に先頭を返すと、誤ったデバイスを開いては停滞し、また開くことを繰り返し、その
+// 隣にあるカメラは一度も試されません。そこで各候補は 1 回ずつ使い、次の再接続では
+// その次へ進みます。
 func (s *Serial) resolvePort() (string, error) {
 	if !strings.EqualFold(s.cfg.Port, AutoPort) {
 		return s.cfg.Port, nil
@@ -345,9 +337,9 @@ func (s *Serial) resolvePort() (string, error) {
 		return "", ErrNoSerialPort
 	}
 
-	// A port that has already delivered frames goes first after a drop: a
-	// tugged cable is far more likely than the board having moved. It only
-	// gets the one attempt, so if it really is gone the rotation continues.
+	// 切断の後は、既にフレームを届けたことのあるポートを先に試す。ボードが移動した
+	// より、ケーブルが引っ張られた可能性の方がはるかに高い。試行は 1 回だけなので、
+	// 本当に居なくなっていれば巡回はそのまま続く。
 	if s.proven != "" {
 		name := s.proven
 		s.proven = ""
@@ -361,19 +353,18 @@ func (s *Serial) resolvePort() (string, error) {
 
 	name, ok := s.firstUntried(candidates)
 	if !ok {
-		// Every candidate has had a turn. Start the rotation again rather than
-		// giving up: a board can be unplugged and put back, and the port that
-		// failed a minute ago may be the right one now.
+		// すべての候補が一巡した。諦めずに巡回をやり直す。ボードは抜き差しされ得る
+		// ので、1 分前に失敗したポートが今は正解かもしれない。
 		s.log.Info("every candidate serial port has been tried, starting over", "ports", len(candidates))
 		clear(s.tried)
 		name, _ = s.firstUntried(candidates)
 	}
 	s.tried[name] = struct{}{}
 	if guessed {
-		// Said in full, because this is a guess and the last one cost somebody
-		// an afternoon: the port was a VR headset, and the log said only that a
-		// port had been "auto-selected". Anything opened on this branch may be
-		// no camera at all, so what it actually is goes in the line.
+		// 省略せず全部言う。これは推測であり、前回の推測は誰かの午後を丸ごと
+		// 奪ったから。そのポートは VR ヘッドセットで、ログはポートが
+		// "auto-selected" されたとしか言っていなかった。この分岐で開くものは
+		// そもそもカメラですらないかもしれないので、それが実際に何なのかを行に書く。
 		s.log.Warn("no serial port matches a known camera board; trying the only port there is, which may not be a camera",
 			"port", name, "device", describePort(ports, name))
 	} else {
@@ -382,8 +373,8 @@ func (s *Serial) resolvePort() (string, error) {
 	return name, nil
 }
 
-// describePort renders what enumeration knows about a port, for a log line
-// that has to let the reader recognise a device they did not mean to open.
+// describePort は、列挙がそのポートについて知っていることを文字列にします。
+// 開くつもりの無かったデバイスを読み手が見分けられる必要のあるログ行のためです。
 func describePort(ports []SerialPort, name string) string {
 	for _, p := range ports {
 		if p.Name != name {
@@ -404,7 +395,7 @@ func describePort(ports []SerialPort, name string) string {
 	return "unknown"
 }
 
-// firstUntried returns the first candidate this driver has not opened yet.
+// firstUntried は、このドライバがまだ開いていない最初の候補を返します。
 func (s *Serial) firstUntried(candidates []string) (string, bool) {
 	for _, name := range candidates {
 		if _, seen := s.tried[name]; !seen {
@@ -414,11 +405,11 @@ func (s *Serial) firstUntried(candidates []string) (string, bool) {
 	return "", false
 }
 
-// autoCandidates lists the ports AutoPort is willing to open, best first.
+// autoCandidates は、AutoPort が開く気のあるポートを、有望なものから順に並べます。
 //
-// A recognised vendor ID is the only positive evidence available, so those
-// come first and in the order ListSerialPorts put them. The lone port on the
-// machine is the fallback: with nothing else it could be, it is worth a try.
+// 得られる積極的な根拠は既知のベンダー ID だけなので、それらが先に来ます。順序は
+// ListSerialPorts が並べたままです。機械に 1 つしかないポートは最後の頼みです。
+// 他にあり得るものが無い以上、試す価値があります。
 func autoCandidates(ports []SerialPort) (names []string, guessed bool) {
 	for _, p := range ports {
 		if p.Vendor != "" {
@@ -431,20 +422,19 @@ func autoCandidates(ports []SerialPort) (names []string, guessed bool) {
 	return names, false
 }
 
-// SerialPort describes a port offered in the tray menu and over the management
-// API.
+// SerialPort は、トレイメニューと管理 API に提示するポートを表します。
 type SerialPort struct {
 	Name string `json:"name"`
-	// Vendor is set when the USB vendor ID belongs to a board family Babble
-	// firmware is known to ship on.
+	// Vendor は、USB のベンダー ID が「Babble のファームウェアが載ることで知られる
+	// ボード系列」のものであるときに設定されます。
 	Vendor  string `json:"vendor,omitempty"`
 	VID     string `json:"vid,omitempty"`
 	PID     string `json:"pid,omitempty"`
 	Product string `json:"product,omitempty"`
 }
 
-// ListSerialPorts enumerates serial ports, with the recognised camera boards
-// listed first so a caller can take the head of the list.
+// ListSerialPorts はシリアルポートを列挙します。既知のカメラボードを先頭に並べる
+// ので、呼び出し側はリストの先頭を取れば済みます。
 func ListSerialPorts() ([]SerialPort, error) {
 	details, err := enumerator.GetDetailedPortsList()
 	if err != nil {

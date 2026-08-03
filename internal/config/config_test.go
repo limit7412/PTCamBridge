@@ -21,8 +21,8 @@ func TestDefaultIsValid(t *testing.T) {
 	}
 }
 
-// The first run has to produce a usable settings file without the user
-// writing one.
+// 初回起動は、ユーザーが何も書かなくても使える設定ファイルを生み出さなければ
+// ならない。
 func TestLoadCreatesTheFileWhenMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", FileName)
 
@@ -118,8 +118,8 @@ func TestApplyEnvOverridesTheFile(t *testing.T) {
 	}
 }
 
-// Skipping a malformed variable starts the bridge on a setting the user did
-// not choose, with nothing anywhere saying their variable was thrown away.
+// 壊れた変数を飛ばすと、ユーザーが選んでいない設定でブリッジが起動する。しかも
+// その変数が捨てられたことは、どこにも書かれない。
 func TestApplyEnvRejectsUnparsableValues(t *testing.T) {
 	cases := map[string]string{
 		"PTCAMBRIDGE_SERIAL_BAUD":   "fast",
@@ -145,7 +145,7 @@ func TestApplyEnvRejectsUnparsableValues(t *testing.T) {
 	}
 }
 
-// One typo must not hide the next: every variable is still attempted.
+// 1 つの打ち間違いが次を隠してはいけない。すべての変数を試す。
 func TestApplyEnvReportsEveryBadValue(t *testing.T) {
 	cfg := Default()
 	err := cfg.ApplyEnv(func(k string) string {
@@ -167,7 +167,7 @@ func TestApplyEnvReportsEveryBadValue(t *testing.T) {
 	}
 }
 
-// Load has to fail on it too, or the check above never reaches a user.
+// Load も失敗しなければならない。さもないと上の検査はユーザーまで届かない。
 func TestLoadRejectsABadEnvironmentValue(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	if err := Save(path, Default()); err != nil {
@@ -187,18 +187,18 @@ func TestValidate(t *testing.T) {
 		want   string
 	}{
 		{"bad listen", func(c *Config) { c.Server.Listen = "not-an-address" }, "server.listen"},
-		// Port 0 is a different port on every start, so the client's cached
-		// address goes stale and the bind stops being the single-instance
-		// guard: a second copy takes a port of its own and rewrites the cache.
+		// ポート 0 は起動のたびに別のポートになるので、クライアントがキャッシュ
+		// したアドレスは古くなり、bind は単一起動の番人でなくなる。2 つ目の実体は
+		// 自分のポートを取り、キャッシュを書き換える。
 		{"ephemeral port", func(c *Config) { c.Server.Listen = "127.0.0.1:0" }, "server.listen"},
 		{"ephemeral port on a wildcard bind", func(c *Config) { c.Server.Listen = ":0" }, "server.listen"},
-		// net.Listen reads all of these as port 0 as well, so rejecting only the
-		// literal "0" would leave the same hole open behind a different spelling.
+		// net.Listen はこれらもすべてポート 0 として読むので、リテラルの "0" だけを
+		// 拒否しても、同じ穴が別の綴りの陰に開いたまま残る。
 		{"padded zero port", func(c *Config) { c.Server.Listen = "127.0.0.1:00" }, "server.listen"},
 		{"signed zero port", func(c *Config) { c.Server.Listen = "127.0.0.1:+0" }, "server.listen"},
 		{"missing port", func(c *Config) { c.Server.Listen = "127.0.0.1:" }, "server.listen"},
-		// A service name resolves too, and the address is written into another
-		// application's settings file, so it has to say the same thing there.
+		// サービス名も解決される。このアドレスは別のアプリケーションの設定ファイルに
+		// 書き込まれるので、あちらでも同じことを言うものでなければならない。
 		{"service name", func(c *Config) { c.Server.Listen = "127.0.0.1:http" }, "server.listen"},
 		{"port out of range", func(c *Config) { c.Server.Listen = "127.0.0.1:70000" }, "server.listen"},
 		{"bad boundary", func(c *Config) { c.Server.Boundary = "has space" }, "server.boundary"},
@@ -228,7 +228,7 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// Zero framerate hands the choice to the device, which is a real answer.
+// framerate が 0 なら選択をデバイスに委ねるということであり、それは実のある答え。
 func TestValidateAcceptsAZeroFramerate(t *testing.T) {
 	cfg := Default()
 	cfg.Source.UVC.Framerate = 0
@@ -237,8 +237,8 @@ func TestValidateAcceptsAZeroFramerate(t *testing.T) {
 	}
 }
 
-// Only zero asks for the default. A negative rate has to reach Validate as
-// written, or a typo comes back as a port that opens and never sends anything.
+// 既定値を求めているのは 0 だけ。負の速度は書かれたまま Validate まで届かなければ
+// ならない。さもないと打ち間違いは「開くのに何も送らないポート」として返ってくる。
 func TestNormaliseLeavesANegativeBaudForValidate(t *testing.T) {
 	cfg := Default()
 	cfg.Source.Serial.Baud = -1
@@ -273,8 +273,8 @@ func TestNormaliseFillsBlanks(t *testing.T) {
 	}
 }
 
-// The management API is only served on loopback, so this decides whether an
-// unauthenticated control surface is exposed.
+// 管理 API を提供するのはループバックのときだけなので、これは「認証の無い操作面を
+// 晒すかどうか」を決めている。
 func TestIsLoopback(t *testing.T) {
 	cases := map[string]bool{
 		"127.0.0.1:18080":   true,
@@ -313,8 +313,8 @@ func TestSerialHeaderConversion(t *testing.T) {
 	}
 }
 
-// Extra headers come from a map, so their order has to be imposed somewhere or
-// the wire format would differ between runs.
+// 追加ヘッダーは map から来るので、どこかで順序を与えないとワイヤ形式が実行ごとに
+// 変わってしまう。
 func TestStreamHeadersAreSorted(t *testing.T) {
 	cfg := Default()
 	cfg.Server.ExtraHeaders = map[string]string{"X-Zulu": "1", "X-Alpha": "2", "X-Mike": "3"}
@@ -376,10 +376,9 @@ func TestValidateRejectsReservedExtraHeaders(t *testing.T) {
 	}
 }
 
-// A positive max_frame_size below the smallest possible JPEG passes as "not
-// negative" and then silently drops every frame, since the parsers use it as a
-// hard ceiling and a source that reads happily but publishes nothing never
-// looks like a failure.
+// あり得る最小の JPEG より小さい正の max_frame_size は「負ではない」として通り、
+// その後すべてのフレームを黙って捨てる。パーサーはこれを絶対的な上限として使うし、
+// 順調に読んでいるのに何も配信しないソースは、決して失敗のようには見えない。
 func TestValidateRejectsATinyMaxFrameSize(t *testing.T) {
 	for _, size := range []int{1, 2, 3} {
 		cfg := Default()
@@ -397,9 +396,8 @@ func TestValidateRejectsATinyMaxFrameSize(t *testing.T) {
 	}
 }
 
-// A misspelled key would decode into nothing and leave the default in place,
-// so the bridge would start on an address or a source the user did not ask for
-// while their file looked accepted.
+// 綴りを誤ったキーは何にもデコードされず既定値が残るので、ファイルは受理された
+// ように見えるのに、ブリッジはユーザーが求めていないアドレスやソースで起動する。
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	body := "[server]\nlsiten = \"127.0.0.1:9\"\n\n[source.uvc]\ndevcie = \"cam\"\n"
@@ -418,16 +416,16 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
-// Strict decoding makes the shipped sample a liability if it ever drifts from
-// the struct, so it is checked here rather than by whoever copies it.
+// 厳格なデコードのもとでは、同梱の見本が構造体からずれた瞬間にそれは負債になる。
+// だから、それを写した人にではなく、ここで確認する。
 func TestSampleConfigLoads(t *testing.T) {
 	if _, err := Load("../../configs/ptcambridge.toml"); err != nil {
 		t.Fatalf("the sample settings file does not load: %v", err)
 	}
 }
 
-// What Save writes has to be what Load accepts, or the first settings change
-// would leave a file the next run refuses.
+// Save が書くものは Load が受け入れるものでなければならない。さもないと最初の
+// 設定変更が、次回の起動が拒否するファイルを残すことになる。
 func TestSavedConfigLoadsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	cfg := Default()
@@ -440,9 +438,9 @@ func TestSavedConfigLoadsBack(t *testing.T) {
 	}
 }
 
-// Saving builds on the file, so LoadFile has to report the file alone. Folding
-// the environment in here would write a variable meant for one run back as a
-// permanent choice.
+// 保存はファイルを土台にするので、LoadFile はファイルだけを報告しなければならない。
+// ここで環境変数を畳み込むと、一度きりの実行のための変数が恒久的な選択として
+// 書き戻される。
 func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	cfg := Default()
@@ -461,7 +459,7 @@ func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
 		t.Errorf("LoadFile device = %q, want the file's value", got)
 	}
 
-	// Load still layers it on, which is what the running config wants.
+	// Load はそれを重ねる。動作中の設定が欲しいのはそちら。
 	effective, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -471,10 +469,10 @@ func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
 	}
 }
 
-// Restoring the client's address has to work on a settings file the bridge
-// itself would refuse to start on. The folder is right there in the file, and
-// the alternative is telling someone uninstalling PTCamBridge that nothing was
-// changed while their client still points at it.
+// クライアントのアドレスを元に戻す処理は、ブリッジ自身が起動を拒否するような設定
+// ファイルの上でも動かなければならない。フォルダはファイルの中にちゃんと書かれて
+// いるし、代わりに起きるのは、PTCamBridge を撤去している人に対して、クライアントが
+// まだそれを指したまま「何も変更していない」と伝えることだ。
 func TestInstallDirFromFileIgnoresTheRestOfTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
 	settings := "[server]\nlsiten = 'oops'\nboundary = 'has space'\n\n" +
@@ -483,7 +481,7 @@ func TestInstallDirFromFileIgnoresTheRestOfTheFile(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	// The strict reading refuses it, which is right for starting up.
+	// 厳格な読み取りはこれを拒否する。起動時の判断としてはそれで正しい。
 	if _, err := LoadFile(path); err == nil {
 		t.Fatal("LoadFile accepted a file with a key that does not exist")
 	}
@@ -497,8 +495,8 @@ func TestInstallDirFromFileIgnoresTheRestOfTheFile(t *testing.T) {
 	}
 }
 
-// A file that is not TOML at all has no folder in it, and saying so beats
-// guessing.
+// そもそも TOML ですらないファイルにフォルダは入っていない。推測するよりそう言う
+// 方がましだ。
 func TestInstallDirFromFileReportsAnUnparsableFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
 	if err := os.WriteFile(path, []byte("[server\nlisten ="), 0o644); err != nil {
@@ -509,11 +507,10 @@ func TestInstallDirFromFileReportsAnUnparsableFile(t *testing.T) {
 	}
 }
 
-// The generated file and Default() are two statements of the same settings, so
-// they have to agree. They are kept apart because only the file carries the
-// comments, and a first run that cannot start until a camera is named needs a
-// file that says so -- but a drift between them would hand new users values
-// nobody chose.
+// 生成されるファイルと Default() は同じ設定についての 2 つの言明なので、一致して
+// いなければならない。分けてあるのはコメントを持つのがファイルだけだからで、カメラが
+// 指定されるまで始まらない初回起動には、そう告げるファイルが要る。ただし両者がずれれば、
+// 新しいユーザーは誰も選んでいない値を手にすることになる。
 func TestDefaultFileMatchesDefault(t *testing.T) {
 	var fromFile Config
 	md, err := toml.Decode(DefaultFile(), &fromFile)
@@ -528,8 +525,8 @@ func TestDefaultFileMatchesDefault(t *testing.T) {
 	}
 }
 
-// It is the file a first run is left staring at, so the two things that run
-// cannot proceed without have to be answered in it.
+// これは初回起動が見つめることになるファイルなので、その起動が先へ進むために
+// 欠かせない 2 つの事柄は、この中で答えられていなければならない。
 func TestDefaultFileSaysHowToNameACamera(t *testing.T) {
 	for _, want := range []string{"-list-devices", "device"} {
 		if !strings.Contains(DefaultFile(), want) {
@@ -538,8 +535,8 @@ func TestDefaultFileSaysHowToNameACamera(t *testing.T) {
 	}
 }
 
-// A first run must end up with the annotated file, not an encoding of the
-// struct: the comments are the only thing telling the user what to do next.
+// 初回起動が手にするのは、構造体を符号化したものではなく注釈付きのファイルで
+// なければならない。次に何をすべきかをユーザーに伝えるのはコメントだけだから。
 func TestLoadFileCreatesTheAnnotatedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 
@@ -565,7 +562,7 @@ func TestLanguageSetting(t *testing.T) {
 	t.Setenv("LC_MESSAGES", "")
 	t.Setenv("LANG", "ja_JP.UTF-8")
 
-	// Auto follows the system, which the environment above pins to Japanese.
+	// auto はシステムに従い、上の環境変数によりそれは日本語に固定される。
 	cfg := Default()
 	cfg.Normalise()
 	if got := cfg.Language(); got != i18n.Japanese {
@@ -577,8 +574,8 @@ func TestLanguageSetting(t *testing.T) {
 		t.Errorf("Language() = %q, want the configured English", got)
 	}
 
-	// Blank means auto, so an older settings file without the section still
-	// picks up the system language rather than falling to English.
+	// 空は auto を意味するので、このセクションを持たない古い設定ファイルでも
+	// 英語に落ちずシステムの言語を拾う。
 	cfg.UI.Language = ""
 	cfg.Normalise()
 	if cfg.UI.Language != string(i18n.Auto) {
@@ -589,8 +586,8 @@ func TestLanguageSetting(t *testing.T) {
 	}
 }
 
-// A language nobody has text for is refused rather than ignored: a user who
-// wrote "jp" would otherwise see an English menu and no explanation.
+// 誰もテキストを持たない言語は、無視せず拒否する。そうしないと "jp" と書いた
+// ユーザーは、説明の無いまま英語のメニューを見ることになる。
 func TestValidateRejectsAnUnknownLanguage(t *testing.T) {
 	cfg := Default()
 	cfg.UI.Language = "jp"
@@ -620,9 +617,8 @@ func TestLanguageFromTheEnvironment(t *testing.T) {
 	}
 }
 
-// -restore-cache is what somebody runs while uninstalling, so reading the
-// language must not put the settings folder back on a machine they are
-// clearing.
+// -restore-cache はアンインストールの最中に走らせるものなので、言語を読むことが、
+// 片付けている機械に設定フォルダを戻すことになってはいけない。
 func TestLanguageWithoutLoadingCreatesNothing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gone", FileName)
@@ -642,8 +638,8 @@ func TestLanguageWithoutLoadingCreatesNothing(t *testing.T) {
 	}
 }
 
-// It reads only its one setting, so a file the bridge itself would refuse to
-// start on still answers the question.
+// 読むのは 1 つの設定だけなので、ブリッジ自身が起動を拒否するファイルからでも
+// 答えは得られる。
 func TestLanguageWithoutLoadingIgnoresTheRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	if err := os.WriteFile(path, []byte("[ui]\nlanguage = 'ja'\n\n[server]\nlsiten = 'typo'\n"), 0o644); err != nil {
@@ -654,9 +650,9 @@ func TestLanguageWithoutLoadingIgnoresTheRest(t *testing.T) {
 	}
 }
 
-// The documented order is environment, then file, then system, and it has to
-// hold for the command that reads the language outside the usual layering too.
-// A variable that works everywhere except here is worse than not offering it.
+// 文書化された順序は環境変数、ファイル、システムであり、通常の層を通らずに言語を
+// 読むコマンドでもそれは成り立たなければならない。ここ以外のどこでも効く変数は、
+// 用意していないより悪い。
 func TestLanguageWithoutLoadingPrefersTheEnvironment(t *testing.T) {
 	t.Setenv("LC_ALL", "")
 	t.Setenv("LC_MESSAGES", "")
@@ -677,14 +673,14 @@ func TestLanguageWithoutLoadingPrefersTheEnvironment(t *testing.T) {
 		t.Errorf("LanguageWithoutLoading = %q, want the variable to beat the file", got)
 	}
 
-	// An empty variable is not a choice, so the file still decides.
+	// 空の変数は選択ではないので、決めるのは引き続きファイル。
 	blank := func(string) string { return "" }
 	if got := LanguageWithoutLoading(path, blank); got != i18n.English {
 		t.Errorf("LanguageWithoutLoading = %q, want the file's English", got)
 	}
 
-	// Neither is an unusable one: it falls through rather than failing, since
-	// this runs when the settings are already in a bad state.
+	// 使えない値も同じ。失敗させずに次へ落とす。これは設定が既に悪い状態にある
+	// ときに走るものだから。
 	bad := func(name string) string {
 		if name == EnvLanguage {
 			return "jp"

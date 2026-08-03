@@ -1,9 +1,9 @@
-// Package console reattaches a GUI-subsystem process to the terminal that
-// launched it.
+// Package console は、GUI サブシステムのプロセスを、それを起動した端末に繋ぎ直します。
 //
-// PTCamBridge is linked with -H=windowsgui so the tray application does not
-// drag a console window along, but that also detaches stdout and stderr. The
-// command line flags (-list-devices, -version) would then print into the void.
+// PTCamBridge は -H=windowsgui でリンクしており、トレイアプリがコンソールウィンドウを
+// 連れ回さないようにしています。ただしそれは標準出力と標準エラー出力の切り離しも
+// 意味します。そのままではコマンドラインのフラグ (-list-devices、-version) の出力が
+// どこにも出ません。
 package console
 
 import (
@@ -16,12 +16,12 @@ var (
 	procAttachConsole = kernel32.NewProc("AttachConsole")
 )
 
-// attachParentProcess is ATTACH_PARENT_PROCESS, defined as (DWORD)-1.
+// attachParentProcess は ATTACH_PARENT_PROCESS で、(DWORD)-1 と定義されています。
 var attachParentProcess = ^uintptr(0)
 
-// Attach binds the standard streams to the parent process's console, if there
-// is one. It is a no-op when launched from Explorer or already attached, so it
-// is safe to call unconditionally at startup.
+// Attach は、親プロセスのコンソールがあれば標準ストリームをそこに繋ぎます。
+// エクスプローラーから起動された場合や既に繋がっている場合は何もしないので、
+// 起動時に無条件で呼んで構いません。
 func Attach() {
 	if ret, _, _ := procAttachConsole.Call(attachParentProcess); ret == 0 {
 		return

@@ -4,11 +4,11 @@ package tray
 
 import "context"
 
-// Run blocks until ctx is cancelled.
+// Run は ctx がキャンセルされるまでブロックします。
 //
-// The tray only exists on Windows, which is the platform the PaperTracker
-// client ships for. Elsewhere the bridge runs headless and the same control
-// surface is available over the management API.
+// トレイは Windows にしか存在しません。PaperTracker クライアントが配布されている
+// のがそのプラットフォームだからです。それ以外ではブリッジはヘッドレスで動作し、
+// 同じ操作面は管理 API から利用できます。
 func Run(ctx context.Context, opts Options) {
 	opts.Log.Info("no system tray on this platform, running headless", "address", opts.Address)
 	<-ctx.Done()

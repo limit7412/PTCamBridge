@@ -2,24 +2,24 @@ package bridge
 
 import "github.com/limit7412/PTCamBridge/internal/config"
 
-// captureRunningForTest reports whether the capture goroutines are still
-// alive, which is otherwise only visible under the lock.
+// captureRunningForTest は、キャプチャの goroutine がまだ生きているかを返す。
+// これは通常ロックの下でしか見えない。
 func (b *Bridge) captureRunningForTest() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.captureAsExpectedLocked()
 }
 
-// holdPendingForTest puts the bridge in the state a failed save leaves behind:
-// want is the configuration that never reached the file, from is what the file
-// held when that write was built.
+// holdPendingForTest は、保存の失敗が残す状態にブリッジを置く。want はファイルまで
+// 届かなかった設定、from はその書き込みが組み立てられた時点でファイルが持っていた
+// 内容。
 func (b *Bridge) holdPendingForTest(from, want config.Config) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.unsaved = &pendingSave{want: want, from: from}
 }
 
-// saveBaseForTest is what the next save would build on.
+// saveBaseForTest は、次の保存が土台にするもの。
 func (b *Bridge) saveBaseForTest() (config.Config, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

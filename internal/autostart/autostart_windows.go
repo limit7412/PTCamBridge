@@ -10,19 +10,19 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// runKey is the per-user autostart key. HKCU needs no elevation, unlike the
-// machine-wide equivalent.
+// runKey は、ユーザーごとの自動起動キーです。マシン全体の同等物と違い、HKCU は
+// 昇格を必要としません。
 const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 
 const supported = true
 
-// command is the Run value: the quoted executable path, so a path containing
-// spaces still launches, followed by the settings file when one was named.
+// command は Run に書く値です。空白を含むパスでも起動できるよう実行ファイルの
+// パスを引用符で囲み、設定ファイルが指定されていればそれを続けます。
 //
-// Carrying -config through matters because the registered command is all the
-// next sign-in gets. Without it a bridge set up against a settings file
-// elsewhere would come back on the default one, quietly running a different
-// source and port than the user configured.
+// -config を持ち回すことが重要なのは、次のサインインが手にするのは登録された
+// コマンドだけだからです。これが無いと、別の場所の設定ファイルで構成したブリッジが
+// 既定のファイルで起き上がり、ユーザーが設定したのとは違うソースとポートで
+// 黙って動くことになります。
 func command(configPath string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -59,9 +59,8 @@ func enabled(configPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// An entry left behind by a copy that has since moved is stale, not
-	// enabled: reporting it as enabled would leave the user unable to fix it
-	// from the menu.
+	// すでに移動した実体が残していったエントリは、有効なのではなく古いだけ。
+	// 有効と報告すると、ユーザーはメニューからそれを直せなくなる。
 	return strings.EqualFold(strings.TrimSpace(value), want), nil
 }
 

@@ -19,68 +19,66 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 )
 
-// UVC capture runs through an ffmpeg child process rather than a native
-// binding. Windows has no usable cgo-free camera API, and shelling out keeps
-// the bridge buildable with CGO_ENABLED=0 as a single executable.
+// UVC のキャプチャは、ネイティブのバインディングではなく ffmpeg の子プロセスを
+// 通して行います。Windows には cgo 無しで使えるカメラ API が無く、外部プロセスに
+// 委ねることで CGO_ENABLED=0 の単一実行ファイルとしてビルドできる構成を保てます。
 
-// readChunk is the stdout read size. A 240x240 JPEG is a few kilobytes, so
-// this holds several frames per read without wasting memory.
+// readChunk は標準出力の読み取り単位です。240x240 の JPEG は数キロバイトなので、
+// メモリを無駄にせず 1 回の読み取りで数フレーム分を収められます。
 const readChunk = 64 << 10
 
-// stderrTail is how much of ffmpeg's diagnostic output is kept to explain a
-// failure.
+// stderrTail は、失敗を説明するために残しておく ffmpeg の診断出力の量です。
 const stderrTail = 4 << 10
 
-// defaultUVCStallTimeout is how long ffmpeg may go without producing a frame
-// before the child is killed and the attempt retried.
+// defaultUVCStallTimeout は、子プロセスを殺して試行をやり直すまでに、ffmpeg が
+// フレームを出さずにいられる時間です。
 //
-// A wedged USB camera or DirectShow filter leaves ffmpeg running and silent
-// rather than exiting, and a blocking read on its stdout never returns. The
-// reconnect loop is downstream of that read, so without this the bridge stays
-// dead until the user restarts it. The window has to cover ffmpeg's own
-// startup, which on Windows takes a second or two before the first frame.
+// 詰まった USB カメラや DirectShow フィルタは、ffmpeg を終了させるのではなく
+// 動いたまま黙らせます。その標準出力に対するブロッキング読み取りは決して返って
+// きません。再接続ループはその読み取りの下流にあるので、これが無ければブリッジは
+// ユーザーが再起動するまで死んだままです。この窓は ffmpeg 自身の起動も覆う必要が
+// あります。Windows では最初のフレームまでに 1〜2 秒かかります。
 const defaultUVCStallTimeout = 10 * time.Second
 
-// UVCConfig configures the ffmpeg-backed camera driver.
+// UVCConfig は、ffmpeg を後ろに置いたカメラドライバの設定です。
 type UVCConfig struct {
-	// Device is the platform capture device: a DirectShow friendly name on
-	// Windows, a /dev/video* path on Linux, an AVFoundation index on macOS.
+	// Device はプラットフォームのキャプチャデバイスです。Windows では DirectShow の
+	// フレンドリ名、Linux では /dev/video* のパス、macOS では AVFoundation の番号です。
 	Device string
-	// Size is a WxH string such as "240x240". Empty lets the device choose.
+	// Size は "240x240" のような WxH 文字列です。空ならデバイスに任せます。
 	Size string
-	// Framerate is the requested capture rate. Zero lets the device choose.
+	// Framerate は要求するキャプチャ速度です。0 ならデバイスに任せます。
 	Framerate int
-	// FFmpegPath overrides the bundled binary.
+	// FFmpegPath は同梱のバイナリを上書きします。
 	FFmpegPath string
-	// MaxFrameSize bounds a single JPEG; zero selects the core default.
+	// MaxFrameSize は JPEG 1 枚の上限です。0 なら core の既定値を使います。
 	MaxFrameSize int
-	// StallTimeout is how long ffmpeg may go without producing a frame before
-	// it is killed and the attempt retried; zero selects
-	// defaultUVCStallTimeout.
+	// StallTimeout は、殺して試行をやり直すまでに ffmpeg がフレームを出さずに
+	// いられる時間です。0 なら defaultUVCStallTimeout を使います。
 	StallTimeout time.Duration
 }
 
-// UVC captures from a camera by reading ffmpeg's MJPEG output.
+// UVC は、ffmpeg の MJPEG 出力を読むことでカメラからキャプチャします。
 type UVC struct {
 	cfg      UVCConfig
 	log      *slog.Logger
 	reporter Reporter
-	// copyCodec asks the camera for MJPEG and passes it through. It is cleared
-	// when passthrough produces nothing, and set again if re-encoding produces
-	// nothing either -- see chooseCodec.
+	// copyCodec は、カメラに MJPEG を要求してそのまま流す指定です。そのまま流して
+	// 何も得られなければ下ろし、再エンコードでも何も得られなければまた立てます。
+	// chooseCodec を参照。
 	copyCodec bool
-	// reencodeWorked records that re-encoding has produced frames from this
-	// camera at least once. On its own that is not proof the camera has no
-	// MJPEG: the passthrough attempt before it may simply have caught the
-	// device busy, with the camera free again by the time re-encoding ran.
+	// reencodeWorked は、このカメラから再エンコードで少なくとも一度フレームが
+	// 得られたことを記録します。それだけではカメラに MJPEG が無い証拠にはなりません。
+	// 直前のそのまま流す試みは、単にデバイスが使用中の瞬間に当たっただけで、再
+	// エンコードが走る頃には空いていたのかもしれないからです。
 	reencodeWorked bool
-	// reencodeReal records that passthrough failed a second time, on a device
-	// known by then to work. That is the comparison the two modes exist to
-	// make, and it is what settles the question for good.
+	// reencodeReal は、その時点で動作すると分かっているデバイスに対して、そのまま
+	// 流す試みが 2 度目も失敗したことを記録します。2 つのモードはこの比較のために
+	// あり、これが問いに決着をつけます。
 	reencodeReal bool
 }
 
-// NewUVC builds the driver. The device must be set.
+// NewUVC はドライバを組み立てます。デバイスの指定は必須です。
 func NewUVC(cfg UVCConfig, log *slog.Logger, reporter Reporter) (*UVC, error) {
 	if strings.TrimSpace(cfg.Device) == "" {
 		return nil, ErrNoDevice
@@ -94,54 +92,53 @@ func NewUVC(cfg UVCConfig, log *slog.Logger, reporter Reporter) (*UVC, error) {
 	return &UVC{cfg: cfg, log: log, reporter: reporter, copyCodec: true}, nil
 }
 
-// Name implements Source.
+// Name は Source を実装します。
 func (u *UVC) Name() string { return "uvc" }
 
-// Run implements Source.
+// Run は Source を実装します。
 func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 	return runWithBackoff(ctx, u.log, u.Name(), u.reporter, func(ctx context.Context) error {
-		// A camera that is simply not plugged in yet reports the same thing as
-		// one that will never exist, so nothing here is treated as fatal: the
-		// driver keeps retrying and a camera attached later is picked up. It
-		// is the bridge that decides whether a source is working, by waiting
-		// for the first frame when the caller needs an answer.
+		// まだ挿さっていないだけのカメラと、永遠に存在しないカメラは同じことを
+		// 報告してくる。だからここでは何も致命的として扱わない。ドライバは再試行を
+		// 続け、後から繋がれたカメラを拾う。ソースが機能しているかを決めるのは
+		// ブリッジの側であり、呼び出し側が答えを必要とするときに最初のフレームを
+		// 待つことでそれを判断する。
 		frames, diag, err := u.capture(ctx, out, u.copyCodec)
 		u.chooseCodec(frames, diag, err)
 		return err
 	})
 }
 
-// chooseCodec picks the mode the next attempt runs in.
+// chooseCodec は、次の試行をどのモードで走らせるかを選びます。
 //
-// Passthrough failing is not evidence that the camera has no MJPEG output. A
-// device that is busy, or still settling after sign-in, fails the same way and
-// says so in words this cannot be expected to recognise -- the diagnostics
-// differ by ffmpeg version, backend and driver. Matching them positively would
-// only move the guess somewhere harder to see.
+// そのまま流す試みが失敗したことは、カメラに MJPEG 出力が無い証拠にはなりません。
+// 使用中のデバイスや、サインイン直後でまだ落ち着いていないデバイスも同じように
+// 失敗し、しかもこちらが認識できるとは期待できない言葉でそう言います。診断の文言は
+// ffmpeg の版、バックエンド、ドライバによって違います。文言の一致で判定しようとすると、
+// 推測をより見えにくい場所へ移すだけです。
 //
-// What does distinguish the two is what happens next. Re-encoding asks for a
-// different output format from the same device: if it produces nothing either,
-// the device was the problem all along and passthrough is tried again, so a
-// camera that comes back later is not decoded and re-encoded for the rest of
-// the process.
+// 両者を区別するのは、その次に起きることです。再エンコードは同じデバイスに別の出力
+// 形式を要求します。それでも何も得られなければ、最初から問題はデバイスの側にあった
+// ということなので、そのまま流す方をもう一度試します。後で復帰したカメラが、以降
+// ずっとデコードと再エンコードにかけられずに済みます。
 //
-// Re-encoding that works is not the end of it either. The camera may have been
-// busy for the passthrough attempt and free by the time this one ran, and the
-// two results are minutes apart on a device whose state changed in between. So
-// the next attempt asks passthrough once more, on a device now known to work,
-// and only a second failure settles it. That costs one attempt after the first
-// disconnect on a camera that really has no MJPEG, and it is what keeps a
-// momentary conflict from turning every later frame into a decode and re-encode.
+// 再エンコードが成功した場合も、それで終わりではありません。そのまま流す試みの
+// ときだけカメラが使用中で、この試みの頃には空いていたのかもしれません。2 つの結果は
+// 数分離れており、その間にデバイスの状態は変わり得ます。そこで次の試行では、動作
+// すると分かったデバイスに対してもう一度そのまま流す方を試し、2 度目の失敗で初めて
+// 決着とします。本当に MJPEG を持たないカメラでは最初の切断の後に 1 回分の試行を
+// 余計に払うことになりますが、これが、一瞬の競合のせいで以降のすべてのフレームが
+// デコードと再エンコードになるのを防いでいます。
 func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 	if frames > 0 {
 		switch {
 		case u.copyCodec:
-			// Passthrough works, so whatever went wrong before was the device.
+			// そのまま流せている。つまり以前おかしかったのはデバイスの側。
 			u.reencodeWorked = false
 		case !u.reencodeWorked:
-			// Worth knowing, but not yet worth believing: try passthrough once
-			// more when this attempt ends, now that the camera has proven it
-			// can deliver frames at all.
+			// 知る価値はあるが、まだ信じる段階ではない。カメラがフレームを出せる
+			// こと自体は示されたので、この試行が終わったらもう一度そのまま流す方を
+			// 試す。
 			u.reencodeWorked = true
 			u.copyCodec = true
 			u.log.Debug("re-encoding worked; passthrough gets one more try on the next attempt", "device", u.cfg.Device)
@@ -154,14 +151,13 @@ func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 
 	if u.copyCodec {
 		if deviceUnavailable(diag) {
-			// The device never opened, so nothing was learned about its
-			// formats. Trying the re-encode is pointless as well as misleading.
+			// デバイスがそもそも開かなかったので、その形式について何も分かって
+			// いない。再エンコードを試すのは無意味であるうえに誤解を招く。
 			return
 		}
 		if u.reencodeWorked {
-			// Twice now, either side of a re-encode that delivered frames from
-			// this same camera. That is as close to a positive answer as this
-			// can get.
+			// これで 2 度目。しかもその間に、同じカメラからフレームを届けた再
+			// エンコードを挟んでいる。ここで得られる最も確かな答えがこれ。
 			u.copyCodec = false
 			u.reencodeReal = true
 			u.log.Info("camera has no MJPEG output of its own, re-encoding from here on", "device", u.cfg.Device)
@@ -178,17 +174,16 @@ func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 	u.log.Debug("re-encoding produced no frames either, going back to passthrough", "device", u.cfg.Device)
 }
 
-// capture runs one ffmpeg process to completion and returns how many frames it
-// yielded along with ffmpeg's diagnostic output.
+// capture は ffmpeg のプロセスを 1 つ最後まで走らせ、得られたフレーム数と ffmpeg の
+// 診断出力を返します。
 func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, string, error) {
 	path, err := u.ffmpegPath()
 	if err != nil {
-		// Only a configured path that does not work is fatal: the settings name
-		// a specific file and it is not there, which no amount of retrying
-		// fixes. Finding none at all is not the same thing -- the tray can
-		// fetch one while the bridge is running, and the retry loop is what
-		// picks it up. Giving up here would mean the fetch finishes and the
-		// camera stays dead until the user restarts.
+		// 致命的なのは、設定されたパスが機能しない場合だけ。設定が特定のファイルを
+		// 名指しており、それが存在しないのだから、いくら再試行しても直らない。
+		// 1 つも見つからないのは別の話で、ブリッジが動いている最中にトレイから
+		// 取得でき、それを拾うのが再試行ループ。ここで諦めると、取得が終わっても
+		// ユーザーが再起動するまでカメラは死んだままになる。
 		if errors.Is(err, ErrNoFFmpeg) {
 			return 0, "", err
 		}
@@ -197,9 +192,8 @@ func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool
 	args := u.args(copyCodec)
 	u.log.Debug("starting ffmpeg", "path", path, "args", strings.Join(args, " "))
 
-	// Killing the child is what unblocks the read: a silent ffmpeg that is
-	// still running holds the pipe open, so there is nothing to time out on
-	// the reading side.
+	// 読み取りを解除するのは子プロセスを殺すこと。黙ったまま動き続ける ffmpeg は
+	// パイプを開いたままにするので、読む側にはタイムアウトさせるものが無い。
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	stall := time.AfterFunc(u.cfg.StallTimeout, cancelRun)
@@ -207,7 +201,7 @@ func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool
 
 	cmd := exec.CommandContext(runCtx, path, args...)
 	configureChildProcess(cmd)
-	// Without a delay a killed ffmpeg can leave the pipe open and wedge Wait.
+	// 猶予を入れないと、殺された ffmpeg がパイプを開いたまま残り、Wait が詰まる。
 	cmd.WaitDelay = 5 * time.Second
 
 	stdout, err := cmd.StdoutPipe()
@@ -227,8 +221,8 @@ func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool
 	waitErr := cmd.Wait()
 	stderr := diag.String()
 
-	// Waiting for the child guarantees the device is released before a source
-	// switch opens it again; UVC access is exclusive.
+	// 子プロセスを待つことが、ソース切替が再び開く前にデバイスが解放されている
+	// ことを保証する。UVC のアクセスは排他的。
 	if ctx.Err() != nil {
 		return frames, stderr, nil
 	}
@@ -244,11 +238,11 @@ func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool
 	}
 }
 
-// deviceUnavailableSigns are the ffmpeg diagnostics that mean the device could
-// not be opened at all, as opposed to one that opened and could not deliver
-// MJPEG. Matching text is a heuristic, so it only guards the codec fallback
-// and never a decision to stop retrying: a missed match costs a needless
-// re-encode, which is what happened unconditionally before.
+// deviceUnavailableSigns は、「デバイスがそもそも開けなかった」ことを意味する
+// ffmpeg の診断です。「開いたが MJPEG を出せなかった」場合とは異なります。文言の
+// 一致は経験則なので、コーデックのフォールバックだけを左右し、再試行をやめる判断には
+// 決して使いません。取りこぼしても余計な再エンコードを 1 回払うだけであり、それは
+// 以前は無条件に起きていたことです。
 var deviceUnavailableSigns = []string{
 	"could not find video device",       // dshow
 	"could not enumerate video devices", // dshow
@@ -258,8 +252,8 @@ var deviceUnavailableSigns = []string{
 	"video device not found",    // avfoundation
 }
 
-// deviceUnavailable reports whether an ffmpeg diagnostic blames the device
-// rather than the format asked of it.
+// deviceUnavailable は、ffmpeg の診断が、要求した形式ではなくデバイスの側を
+// 咎めているかどうかを返します。
 func deviceUnavailable(diag string) bool {
 	lower := strings.ToLower(diag)
 	for _, sign := range deviceUnavailableSigns {
@@ -270,8 +264,8 @@ func deviceUnavailable(diag string) bool {
 	return false
 }
 
-// pump reads ffmpeg's MJPEG stdout and forwards each complete image, calling
-// alive for every frame so the caller can tell a slow camera from a wedged one.
+// pump は ffmpeg の MJPEG 標準出力を読み、完結した画像を順に転送します。フレーム
+// ごとに alive を呼ぶので、呼び出し側は遅いカメラと詰まったカメラを区別できます。
 func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame, alive func()) (uint64, error) {
 	assembler := newFrameAssembler(core.SplitJPEGStream, u.cfg.MaxFrameSize)
 	buf := make([]byte, readChunk)
@@ -281,9 +275,9 @@ func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame,
 		n, err := stdout.Read(buf)
 		if n > 0 {
 			for _, f := range assembler.feed(buf[:n]) {
-				// Frames, not bytes: ffmpeg writing something that never
-				// assembles into an image is as dead as ffmpeg writing
-				// nothing, and only one of those would be noticed otherwise.
+				// バイトではなくフレームで測る。画像として組み上がらない何かを
+				// 書き続ける ffmpeg は、何も書かない ffmpeg と同じく死んでいる。
+				// そうしなければ気づけるのは片方だけになる。
 				alive()
 				if count == 0 {
 					u.reporter.Connected(u.Name())
@@ -303,8 +297,9 @@ func (u *UVC) pump(ctx context.Context, stdout io.Reader, out chan<- core.Frame,
 	}
 }
 
-// args builds the ffmpeg command line for the current platform. Passthrough
-// avoids a decode/encode round trip when the camera already emits MJPEG.
+// args は、現在のプラットフォーム向けの ffmpeg コマンドラインを組み立てます。
+// カメラが既に MJPEG を出しているなら、そのまま流すことでデコードとエンコードの
+// 往復を避けられます。
 func (u *UVC) args(copyCodec bool) []string {
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
 
@@ -317,7 +312,7 @@ func (u *UVC) args(copyCodec bool) []string {
 		args = append(args, "-framerate", fmt.Sprint(u.cfg.Framerate))
 	}
 	if copyCodec {
-		// Ask the device itself for MJPEG so the frames can be passed through.
+		// フレームをそのまま流せるよう、デバイス自身に MJPEG を要求する。
 		switch format {
 		case "v4l2":
 			args = append(args, "-input_format", "mjpeg")
@@ -335,8 +330,8 @@ func (u *UVC) args(copyCodec bool) []string {
 	return append(args, "-f", "mjpeg", "pipe:1")
 }
 
-// platformInput maps a configured device onto the ffmpeg input format and
-// argument for the running OS.
+// platformInput は、設定されたデバイスを、動作中の OS に応じた ffmpeg の入力形式と
+// 引数に対応付けます。
 func platformInput(device string) (format, input string) {
 	switch runtime.GOOS {
 	case "windows":
@@ -348,14 +343,13 @@ func platformInput(device string) (format, input string) {
 	}
 }
 
-// ffmpegPath resolves the binary: the configured override, then a copy sitting
-// next to the executable, then PATH, then one fetched by the bridge itself.
+// ffmpegPath はバイナリを解決します。設定による上書き、実行ファイルの隣にある
+// コピー、PATH、そしてブリッジ自身が取得したもの、の順です。
 //
-// The fetched copy comes last on purpose. It is the one PTCamBridge manages, so
-// it is also the one the user cannot easily choose against -- putting it ahead
-// of PATH would mean an installation that has deliberately been pointed at a
-// particular ffmpeg silently stops using it the first time somebody clicks the
-// tray item.
+// 取得したコピーを最後にしているのは意図的です。それは PTCamBridge が管理するもの
+// であり、つまりユーザーが避けにくいものでもあります。PATH より前に置くと、特定の
+// ffmpeg を意図して指しているインストールが、誰かがトレイの項目を一度押した途端に
+// それを黙って使わなくなります。
 func (u *UVC) ffmpegPath() (string, error) {
 	if u.cfg.FFmpegPath != "" {
 		if _, err := os.Stat(u.cfg.FFmpegPath); err != nil {
@@ -378,21 +372,20 @@ func (u *UVC) ffmpegPath() (string, error) {
 	return "", ErrNoFFmpeg
 }
 
-// ErrNoDevice means no camera has been named.
+// ErrNoDevice は、カメラが指定されていないことを意味します。
 //
-// This is the state a first run starts in -- the settings file is written with
-// the field empty, because there is no camera name that could be guessed -- so
-// it is the error most likely to be the first thing a new user ever sees from
-// this program. It says the whole remedy rather than only the symptom: what to
-// run to find the name, and where to put it once found.
+// これは初回起動が始まる時点の状態です。推測できるカメラ名など無いので、設定ファイルは
+// このフィールドを空にして書き出されます。つまり、新しいユーザーがこのプログラムから
+// 最初に目にするエラーである可能性が最も高いものです。だから症状だけでなく対処の全体を
+// 述べます。名前を調べるために何を実行するのか、そして見つけた名前をどこに書くのか。
 var ErrNoDevice = errors.New(`uvc: no camera configured. Run "ptcambridge -list-devices" to see the cameras attached, then put one of the names in [source.uvc] device in the settings file (or set PTCAMBRIDGE_UVC_DEVICE)`)
 
-// ErrNoFFmpeg means there is no ffmpeg anywhere the driver looks.
+// ErrNoFFmpeg は、ドライバが探すどこにも ffmpeg が無いことを意味します。
 //
-// Deliberately not fatal: unlike a mistyped ffmpeg_path, this is a state the
-// machine can leave without the bridge being restarted -- the user fetches
-// ffmpeg from the tray, or installs one on PATH -- and the retry loop is what
-// notices. It is the same reasoning as a camera that is not plugged in yet.
+// 意図的に致命的にしていません。打ち間違えた ffmpeg_path と違い、これはブリッジを
+// 再起動しなくても機械が抜け出せる状態です。ユーザーがトレイから ffmpeg を取得するか、
+// PATH に入れれば済みます。それに気づくのが再試行ループです。まだ挿さっていない
+// カメラと同じ理屈です。
 var ErrNoFFmpeg = errors.New("uvc: ffmpeg not found next to the executable, on PATH, or in the settings folder; fetch it from the tray menu or set source.uvc.ffmpeg_path")
 
 func ffmpegBinaryName() string {
@@ -402,16 +395,16 @@ func ffmpegBinaryName() string {
 	return "ffmpeg"
 }
 
-// Device is a capture device offered to the user in the tray menu and over the
-// management API.
+// Device は、トレイメニューと管理 API を通じてユーザーに提示するキャプチャ
+// デバイスです。
 type Device struct {
 	Name string `json:"name"`
-	// Alternative is the DirectShow device path, which is stable across
-	// reboots where the friendly name is not.
+	// Alternative は DirectShow のデバイスパスです。フレンドリ名と違い、再起動を
+	// またいでも変わりません。
 	Alternative string `json:"alternative,omitempty"`
 }
 
-// dshowDeviceLine matches ffmpeg's device listing, for example:
+// dshowDeviceLine は ffmpeg のデバイス一覧に一致します。たとえば次の形です。
 //
 //	[dshow @ 0000...] "HD Webcam" (video)
 var (
@@ -419,9 +412,9 @@ var (
 	dshowAltLine    = regexp.MustCompile(`Alternative name\s*"([^"]+)"`)
 )
 
-// ListDevices enumerates video capture devices. On Windows this asks ffmpeg
-// for the DirectShow list, which it writes to stderr and then exits non-zero;
-// elsewhere the /dev/video* nodes are returned.
+// ListDevices は映像キャプチャデバイスを列挙します。Windows では ffmpeg に
+// DirectShow の一覧を要求します。ffmpeg はそれを標準エラー出力に書いたうえで
+// 非ゼロで終了します。それ以外の環境では /dev/video* のノードを返します。
 func ListDevices(ctx context.Context, ffmpegPath string) ([]Device, error) {
 	if runtime.GOOS != "windows" {
 		return listVideoNodes()
@@ -444,10 +437,10 @@ func ListDevices(ctx context.Context, ffmpegPath string) ([]Device, error) {
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("uvc: listing capture devices did not finish: %w", ctx.Err())
 	}
-	// A non-zero exit is expected here: "dummy" is not a real device, and the
-	// listing itself goes to stderr. Anything that is not an exit status means
-	// ffmpeg never ran, which is worth reporting rather than showing the user
-	// an empty camera list.
+	// ここで非ゼロ終了になるのは想定どおり。"dummy" は実在のデバイスではないし、
+	// 一覧そのものが標準エラー出力に出る。終了ステータス以外のものが返ったなら
+	// ffmpeg が動かなかったということであり、それは空のカメラ一覧を見せるより
+	// 報告する価値がある。
 	var exitErr *exec.ExitError
 	if runErr != nil && !errors.As(runErr, &exitErr) {
 		return nil, fmt.Errorf("uvc: run ffmpeg to list devices: %w", runErr)
@@ -456,7 +449,7 @@ func ListDevices(ctx context.Context, ffmpegPath string) ([]Device, error) {
 	return parseDshowDevices(diag.String()), nil
 }
 
-// parseDshowDevices extracts the video entries from an ffmpeg device listing.
+// parseDshowDevices は、ffmpeg のデバイス一覧から映像の項目を取り出します。
 func parseDshowDevices(out string) []Device {
 	var devices []Device
 	for _, line := range strings.Split(out, "\n") {
@@ -475,8 +468,9 @@ func parseDshowDevices(out string) []Device {
 	return devices
 }
 
-// listVideoNodes enumerates V4L2 capture nodes, the Linux equivalent of the
-// DirectShow listing. It keeps the tray menu populated on non-Windows builds.
+// listVideoNodes は V4L2 のキャプチャノードを列挙します。DirectShow の一覧に
+// 相当する Linux 版です。Windows 以外のビルドでもトレイメニューが埋まるように
+// するためのものです。
 func listVideoNodes() ([]Device, error) {
 	matches, err := filepath.Glob("/dev/video*")
 	if err != nil {
@@ -489,8 +483,8 @@ func listVideoNodes() ([]Device, error) {
 	return devices, nil
 }
 
-// tailWriter keeps the last max bytes written to it, so a child process can be
-// left running without its diagnostics growing without bound.
+// tailWriter は、書き込まれた末尾 max バイトだけを保持します。子プロセスを走らせ
+// 続けても、その診断出力が無制限に太らないようにするためです。
 type tailWriter struct {
 	mu  sync.Mutex
 	buf []byte

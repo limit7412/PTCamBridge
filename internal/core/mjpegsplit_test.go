@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// A thumbnail inside an APP1 segment contains its own SOI/EOI pair. A scanner
-// that searched for 0xFF 0xD9 would cut the frame short here.
+// APP1 セグメントの中のサムネイルは、それ自身の SOI/EOI 対を持つ。0xFF 0xD9 を
+// 探すだけのスキャナは、ここでフレームを切り詰めてしまう。
 func TestScanJPEGIgnoresEOIInsideASegment(t *testing.T) {
 	base := encodeJPEG(t, 32, 32)
 	withThumb := injectAPP1(t, base, []byte{0xFF, 0xD8, 0xFF, 0xD9, 0x00, 0x11})
@@ -38,8 +38,8 @@ func TestScanJPEGReportsIncompleteAndInvalid(t *testing.T) {
 	}
 }
 
-// ScanJPEG must stop at the end of the first image even when more data follows,
-// which is what makes back-to-back frames separable.
+// ScanJPEG は、後ろにデータが続いていても最初の画像の終端で止まらなければ
+// ならない。連続したフレームを切り分けられるのはそのおかげ。
 func TestScanJPEGStopsAtFirstImage(t *testing.T) {
 	a := encodeJPEG(t, 16, 16)
 	b := encodeJPEG(t, 16, 16)
@@ -101,8 +101,8 @@ func TestSplitMultipartUsesContentLength(t *testing.T) {
 	}
 }
 
-// Some firmware omits Content-Length; the body then runs up to the next
-// boundary and the trailing CRLF must not be counted as image data.
+// Content-Length を省くファームウェアがある。その場合、本体は次の boundary まで
+// 続くので、末尾の CRLF を画像データとして数えてはいけない。
 func TestSplitMultipartWithoutContentLength(t *testing.T) {
 	jpg := encodeJPEG(t, 16, 16)
 	var body []byte
@@ -188,9 +188,9 @@ func TestBoundaryFromContentType(t *testing.T) {
 	}
 }
 
-// Without Content-Length the end of an image is found by walking its markers.
-// A frame that happens to carry the boundary bytes -- inside an EXIF blob here
-// -- must come through whole rather than being cut at the false delimiter.
+// Content-Length が無ければ、画像の終端はマーカーをたどって見つける。boundary の
+// バイト列をたまたま含むフレーム — ここでは EXIF の中 — は、偽の区切りで切られる
+// ことなく丸ごと通らなければならない。
 func TestSplitMultipartKeepsBoundaryBytesInsideAFrame(t *testing.T) {
 	jpg := injectAPP1(t, encodeJPEG(t, 16, 16), []byte("\r\n--b\r\nContent-Type: image/jpeg\r\n\r\n"))
 	if !bytes.Contains(jpg, []byte("--b")) {
@@ -211,8 +211,8 @@ func TestSplitMultipartKeepsBoundaryBytesInsideAFrame(t *testing.T) {
 	}
 }
 
-// An upstream that sends a boundary and then dribbles header bytes without ever
-// terminating them must not be able to grow the reader's buffer without bound.
+// boundary を送った後、終端しないヘッダーバイトをだらだらと送り続ける上流に、
+// 読み手のバッファを無制限に太らせることを許してはいけない。
 func TestSplitMultipartBoundsUnterminatedHeaders(t *testing.T) {
 	buf := []byte("--b\r\nX-Filler: ")
 	buf = append(buf, bytes.Repeat([]byte("a"), 64<<10)...)
@@ -226,9 +226,9 @@ func TestSplitMultipartBoundsUnterminatedHeaders(t *testing.T) {
 	}
 }
 
-// A run of fill bytes ending in EOI is structurally a JPEG of whatever length
-// the run happens to be, so the ceiling has to be applied inside the run too --
-// otherwise source.max_frame_size is bypassed and the frame reaches the hub.
+// 末尾が EOI である詰め物の列は、その長さが何であれ構造上は JPEG なので、上限は
+// 列の内側でも適用しなければならない。さもないと source.max_frame_size は迂回され、
+// そのフレームが hub まで届く。
 func TestScanJPEGAppliesMaxSizeToFillBytes(t *testing.T) {
 	padded := []byte{markerPrefix, markerSOI}
 	padded = append(padded, bytes.Repeat([]byte{markerPrefix}, 40<<10)...)
@@ -243,15 +243,14 @@ func TestScanJPEGAppliesMaxSizeToFillBytes(t *testing.T) {
 		t.Errorf("SplitJPEGStream produced %d frames past the limit", len(frames))
 	}
 
-	// A generous limit still accepts it: fill bytes are legal.
+	// 上限を大きく取れば通る。詰め物のバイト自体は正当なもの。
 	if _, err := ScanJPEG(padded, 1<<20); err != nil {
 		t.Errorf("ScanJPEG rejected legal fill bytes under a large limit: %v", err)
 	}
 }
 
-// max_frame_size can be set near MaxInt, and Content-Length comes off the
-// wire, so adding the two before the bounds check wraps negative: the check
-// passes and the slice that follows panics.
+// max_frame_size は MaxInt 付近に設定でき、Content-Length は線上から来る。境界
+// 検査の前にこの 2 つを足すと負に回り込み、検査は通過して直後のスライスで panic する。
 func TestSplitMultipartSurvivesAnEnormousContentLength(t *testing.T) {
 	body := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", math.MaxInt)
 	frames, rest := SplitMultipart([]byte(body), "frame", math.MaxInt)
@@ -264,15 +263,14 @@ func TestSplitMultipartSurvivesAnEnormousContentLength(t *testing.T) {
 	}
 }
 
-// Resynchronising has to cost each byte one step in total, not one scan.
+// 再同期のコストは、各バイトにつき走査 1 回ではなく 1 歩でなければならない。
 //
-// A bare upstream can send an SOI every two bytes. Treating each of those as a
-// harmless standalone marker made a scan walk to the size ceiling before
-// failing, and resuming the search two bytes along made the next one do it all
-// again: quadratic in the read. The driver cannot check its context inside
-// that, so a source switch or a quit would be left waiting on it.
+// 裸の上流は 2 バイトごとに SOI を送ってくることがある。そのそれぞれを無害な単独
+// マーカーとして扱うと、走査は失敗するまでサイズ上限まで歩き、検索を 2 バイト先から
+// 再開すると次の SOI がまた同じことをする。読み取りに対して二乗になる。ドライバは
+// その最中にコンテキストを確認できないので、ソース切替も終了もそこで待たされる。
 func TestSplitJPEGStreamResyncIsLinear(t *testing.T) {
-	// Nothing but image starts, overrunning the ceiling.
+	// 画像の始まりだけが並び、上限を超えていく。
 	const size = 1 << 20
 	buf := bytes.Repeat([]byte{markerPrefix, markerSOI}, size/2)
 
@@ -288,20 +286,19 @@ func TestSplitJPEGStreamResyncIsLinear(t *testing.T) {
 			t.Errorf("got %d frames from a run of image starts", n)
 		}
 	case <-time.After(2 * time.Second):
-		// Linear is a few milliseconds here. Quadratic is upwards of
-		// 10^11 steps, so this is not a close call to make.
+		// 線形ならここは数ミリ秒。二乗なら 10^11 歩を超えるので、
+		// 判定が際どくなることはない。
 		t.Fatal("resynchronising over 1 MiB of image starts did not finish in 2s")
 	}
 }
 
-// A frame cut short by a dropped connection is followed immediately by the
-// next one. Resynchronising past that SOI instead of onto it would throw the
-// good frame away too, so an upstream alternating between broken and whole
-// frames would publish nothing at all.
+// 接続が切れて途中で終わったフレームの直後には、次のフレームが続く。その SOI の
+// 上に着地せず通り過ぎて再同期すると、無事なフレームまで捨てることになる。壊れた
+// フレームと無事なフレームが交互に来る上流は、何も配信できなくなる。
 func TestSplitJPEGStreamRecoversTheFrameAfterATruncatedOne(t *testing.T) {
 	good := encodeJPEG(t, 32, 32)
-	// Cut inside the entropy-coded data, which is where a dropped connection
-	// almost always lands: it is the bulk of the frame.
+	// エントロピー符号化データの中で切る。接続断はほぼ必ずここに落ちる。
+	// フレームの大部分を占めているため。
 	truncated := good[:len(good)-8]
 	buf := append(append([]byte{}, truncated...), good...)
 

@@ -7,23 +7,23 @@ import (
 	"strings"
 )
 
-// DefaultBoundary is the multipart delimiter PTCamBridge advertises.
+// DefaultBoundary は、PTCamBridge が名乗る multipart の区切り文字列です。
 const DefaultBoundary = "ptcambridge"
 
-// ErrInvalidBoundary is returned for a boundary that cannot be written into a
-// Content-Type header or a delimiter line.
+// ErrInvalidBoundary は、Content-Type ヘッダーや区切り行に書き出せない
+// boundary に対して返されます。
 var ErrInvalidBoundary = errors.New("invalid multipart boundary")
 
-// StreamHeader is an extra part header appended to every frame. The PaperTracker
-// client is closed source and its parser has changed between releases, so the
-// header set is configurable rather than fixed.
+// StreamHeader は、各フレームに付ける追加のパートヘッダーです。PaperTracker
+// クライアントはソースが公開されておらず、パーサーもリリースによって変わって
+// きたため、ヘッダーの構成は固定ではなく設定可能にしています。
 type StreamHeader struct {
 	Name  string
 	Value string
 }
 
-// MultipartEncoder renders frames in the multipart/x-mixed-replace form the
-// PaperTracker client expects:
+// MultipartEncoder は、PaperTracker クライアントが期待する
+// multipart/x-mixed-replace の形にフレームを整えます。
 //
 //	--boundary\r\n
 //	Content-Type: image/jpeg\r\n
@@ -31,16 +31,16 @@ type StreamHeader struct {
 //	\r\n
 //	<N bytes of JPEG>\r\n
 //
-// Content-Length is mandatory: the client sizes each frame from it, and
-// omitting it makes the client lose frame boundaries. Chunked transfer
-// encoding is never used; the body is written as an unbounded stream.
+// Content-Length は必須です。クライアントはこれで各フレームの大きさを判断して
+// おり、省くとフレームの切れ目を見失います。チャンク転送は使いません。ボディは
+// 終わりのないストリームとして書き出します。
 type MultipartEncoder struct {
 	boundary string
 	extra    []StreamHeader
 }
 
-// NewMultipartEncoder validates the boundary and returns an encoder for it. An
-// empty boundary selects DefaultBoundary.
+// NewMultipartEncoder は boundary を検証し、それを使うエンコーダを返します。
+// 空を渡すと DefaultBoundary を使います。
 func NewMultipartEncoder(boundary string, extra []StreamHeader) (MultipartEncoder, error) {
 	if boundary == "" {
 		boundary = DefaultBoundary
@@ -56,19 +56,17 @@ func NewMultipartEncoder(boundary string, extra []StreamHeader) (MultipartEncode
 	return MultipartEncoder{boundary: boundary, extra: append([]StreamHeader(nil), extra...)}, nil
 }
 
-// reservedPartHeaders are the part headers the encoder writes itself. A second
-// copy with a different value would leave the client choosing between them,
-// and picking the wrong Content-Length loses the frame boundary for good.
+// reservedPartHeaders は、エンコーダ自身が書くパートヘッダーです。値の異なる
+// 2 つ目が並ぶとクライアントはどちらを取るか選ぶことになり、Content-Length を
+// 選び間違えればフレームの切れ目は二度と戻りません。
 var reservedPartHeaders = []string{"Content-Type", "Content-Length"}
 
-// ValidateStreamHeader reports whether a name and value are usable as an extra
-// part header.
+// ValidateStreamHeader は、名前と値が追加パートヘッダーとして使えるかを返します。
 //
-// The syntax is the one RFC 7230 defines for a header field, not merely
-// "contains no line break". A name like "Bad Header" or a value carrying a
-// stray control byte is written out happily but makes a strict MIME parser
-// reject the whole part, which turns a settings change that returned 200 into
-// a stream the client cannot read.
+// 判定は「改行を含まない」ではなく、RFC 7230 がヘッダーフィールドに定めた構文で
+// 行います。"Bad Header" のような名前や、制御バイトが紛れ込んだ値は何事もなく
+// 書き出せてしまう一方、厳格な MIME パーサーはパート全体を拒否します。200 を
+// 返した設定変更が、クライアントの読めないストリームに化けることになります。
 func ValidateStreamHeader(name, value string) error {
 	if name == "" {
 		return errors.New("an extra header name cannot be empty")
@@ -94,7 +92,7 @@ func ValidateStreamHeader(name, value string) error {
 	return nil
 }
 
-// ValidateBoundary reports whether s is usable as a multipart delimiter.
+// ValidateBoundary は、s が multipart の区切りとして使えるかを返します。
 func ValidateBoundary(s string) error {
 	if s == "" {
 		return fmt.Errorf("%w: empty", ErrInvalidBoundary)
@@ -113,29 +111,29 @@ func ValidateBoundary(s string) error {
 	return nil
 }
 
-// Boundary reports the delimiter in use.
+// Boundary は、使用中の区切り文字列を返します。
 func (e MultipartEncoder) Boundary() string { return e.boundary }
 
-// ContentType is the response Content-Type for the stream endpoint.
+// ContentType は、ストリームエンドポイントの応答 Content-Type です。
 //
-// RFC 2046 allows delimiter characters that RFC 2045 does not allow in a bare
-// parameter token, so such a boundary is written as a quoted string. Left
-// unquoted, a value like "a:b" would make the whole media type unparsable and
-// a standards-compliant client could not find the delimiter at all.
+// RFC 2046 が区切りに許す文字の中には、RFC 2045 が裸のパラメータトークンに
+// 許さないものがあるため、そうした boundary は引用符付き文字列として書きます。
+// 引用しなければ "a:b" のような値はメディアタイプ全体を解析不能にし、規格に
+// 忠実なクライアントは区切りをまったく見つけられません。
 func (e MultipartEncoder) ContentType() string {
 	if strings.ContainsAny(e.boundary, nonTokenBoundaryChars) {
-		// ValidateBoundary rejects '"' and '\', so nothing needs escaping.
+		// ValidateBoundary が '"' と '\\' を弾いているので、エスケープは不要。
 		return `multipart/x-mixed-replace; boundary="` + e.boundary + `"`
 	}
 	return "multipart/x-mixed-replace; boundary=" + e.boundary
 }
 
-// nonTokenBoundaryChars are the characters ValidateBoundary accepts that are
-// not RFC 2045 token characters, and so force a quoted parameter.
+// nonTokenBoundaryChars は、ValidateBoundary が受け入れる文字のうち RFC 2045 の
+// トークン文字ではないもので、これがあるとパラメータの引用が必要になります。
 const nonTokenBoundaryChars = "()/:=?,"
 
-// isTokenRune reports whether r may appear in a header field name, per the
-// RFC 7230 token production.
+// isTokenRune は、RFC 7230 の token 定義に従って、r がヘッダーフィールド名に
+// 現れてよいかを返します。
 func isTokenRune(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
@@ -144,8 +142,8 @@ func isTokenRune(r rune) bool {
 	return strings.ContainsRune("!#$%&'*+-.^_`|~", r)
 }
 
-// AppendPart appends one encoded part to dst and returns the extended slice,
-// letting a writer reuse a single scratch buffer across frames.
+// AppendPart は、エンコードしたパート 1 つを dst に追加し、伸びたスライスを
+// 返します。書き手がフレームをまたいで 1 つの作業バッファを使い回せます。
 func (e MultipartEncoder) AppendPart(dst, jpeg []byte) []byte {
 	dst = append(dst, "--"...)
 	dst = append(dst, e.boundary...)
@@ -166,7 +164,7 @@ func (e MultipartEncoder) AppendPart(dst, jpeg []byte) []byte {
 	return dst
 }
 
-// EncodePart returns one encoded part as a fresh buffer.
+// EncodePart は、エンコードしたパート 1 つを新しいバッファとして返します。
 func (e MultipartEncoder) EncodePart(jpeg []byte) []byte {
 	return e.AppendPart(nil, jpeg)
 }

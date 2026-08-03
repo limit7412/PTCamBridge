@@ -35,8 +35,7 @@ func TestPublishReachesEverySubscriber(t *testing.T) {
 	}
 }
 
-// A subscriber that has not read its slot must receive the newest frame, not
-// the one that was already waiting.
+// 枠を読んでいない購読者が受け取るべきは、既に待っていた方ではなく最新のフレーム。
 func TestPublishReplacesTheQueuedFrame(t *testing.T) {
 	h := New()
 	ch, cancel := h.Subscribe()
@@ -60,7 +59,7 @@ func TestPublishReplacesTheQueuedFrame(t *testing.T) {
 	}
 }
 
-// A wedged subscriber must not hold up the others.
+// 詰まった購読者が、他の購読者を足止めしてはいけない。
 func TestSlowSubscriberDoesNotBlockOthers(t *testing.T) {
 	h := New()
 	slow, cancelSlow := h.Subscribe()
@@ -132,8 +131,8 @@ func TestStatsTracksRateAndSize(t *testing.T) {
 	}
 }
 
-// A gap longer than the reset window means the source dropped out; the rate
-// must not be smoothed across the outage.
+// リセット幅より長い間隔が空いたということはソースが落ちたということ。その断絶を
+// またいでレートを平滑化してはいけない。
 func TestStatsResetsRateAfterAGap(t *testing.T) {
 	h := New()
 	now := time.Now()

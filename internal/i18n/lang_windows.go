@@ -5,31 +5,29 @@ import (
 	"unsafe"
 )
 
-// systemLanguage asks Windows what the user's display language is.
+// systemLanguage は、ユーザーの表示言語を Windows に問い合わせます。
 //
-// Windows sets none of the POSIX locale variables, so there is nothing to read
-// from the environment on a normal machine -- but they are honoured first
-// anyway, because someone running the bridge from a shell that sets them means
-// it, and it is the only way to try the other language without changing a
-// system setting.
+// Windows は POSIX のロケール変数を一切設定しないので、通常の機械では環境から
+// 読めるものはありません。それでも先に環境変数を見るのは、それを設定するシェルから
+// ブリッジを起動する人はそう意図しているからであり、システム設定を変えずにもう一方の
+// 言語を試せる唯一の手段でもあるからです。
 //
-// GetUserPreferredUILanguages, not GetUserDefaultLocaleName. Those are two
-// different settings and Windows lets them disagree: the locale is the
-// regional format, the number and date conventions, while the UI language is
-// the one menus are drawn in. A machine displaying Japanese with its region
-// set to the United States would be handed English by the locale call, which
-// is precisely the case this has to get right.
+// GetUserDefaultLocaleName ではなく GetUserPreferredUILanguages です。この 2 つは
+// 別の設定で、Windows は両者が食い違うことを許します。ロケールは地域形式、つまり
+// 数値や日付の慣習であり、UI 言語はメニューが描かれる言語です。表示が日本語で
+// 地域が米国という機械は、ロケール側の呼び出しでは英語を返されます。まさにここで
+// 間違えてはいけない場合です。
 //
-// The list is preferred languages in order; the first is the one Windows draws
-// its own interface in, and the only one considered here.
+// 返るのは優先順のリストで、先頭が Windows 自身が画面を描いている言語です。ここで
+// 見るのはそれだけです。
 func systemLanguage() string {
 	if v := envLanguage(); v != "" {
 		return v
 	}
 
 	var count, length uint32
-	// A nil buffer asks for the size, in wide characters, of the whole
-	// double-null-terminated list.
+	// バッファに nil を渡すと、二重 null 終端のリスト全体の大きさを
+	// ワイド文字数で問い合わせることになる。
 	ok, _, _ := getUserPreferredUILanguages.Call(
 		muiLanguageName,
 		uintptr(unsafe.Pointer(&count)),
@@ -50,13 +48,12 @@ func systemLanguage() string {
 	if ok == 0 || count == 0 {
 		return ""
 	}
-	// UTF16ToString stops at the first null, which is the end of the first
-	// name in the list.
+	// UTF16ToString は最初の null で止まる。それがリストの先頭要素の終わり。
 	return syscall.UTF16ToString(buf)
 }
 
-// muiLanguageName asks for names such as "ja-JP" rather than numeric language
-// identifiers, so the result parses the same way the POSIX side does.
+// muiLanguageName は、数値の言語識別子ではなく "ja-JP" のような名前を要求します。
+// 結果を POSIX 側とまったく同じ方法で解釈できるようにするためです。
 const muiLanguageName = 0x8
 
 var (

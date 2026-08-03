@@ -16,8 +16,8 @@ func decodeSize(t *testing.T, data []byte) (int, int) {
 	return cfg.Width, cfg.Height
 }
 
-// A no-op transform must hand back the very same slice: re-encoding an
-// untouched frame costs CPU and loses quality for nothing.
+// 何もしない変換は、まったく同じスライスを返さなければならない。手を加えていない
+// フレームの再エンコードは、CPU を使ったうえに画質を無駄に落とす。
 func TestTransformNoopForwardsInputUnchanged(t *testing.T) {
 	src := encodeJPEG(t, 32, 16)
 	var tr Transform
@@ -57,8 +57,8 @@ func TestTransformRotateSwapsDimensions(t *testing.T) {
 	}
 }
 
-// Four 90 degree turns must land back on the original geometry, which catches
-// a rotation whose coordinate mapping is transposed rather than rotated.
+// 90 度を 4 回まわせば元の形に戻らなければならない。回転ではなく転置になっている
+// 座標写像は、これで捕まる。
 func TestTransformRotateFourTimesReturnsToStart(t *testing.T) {
 	src := encodeJPEG(t, 32, 16)
 	out := src
@@ -82,8 +82,8 @@ func TestTransformRotateFourTimesReturnsToStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	// Compare a corner rather than every pixel: JPEG is lossy, but a
-	// mis-mapped rotation moves content far enough to show up here.
+	// 全画素ではなく隅を比べる。JPEG は不可逆だが、写像を誤った回転は
+	// ここに現れる程度には内容を動かす。
 	or, og, ob, _ := original.At(1, 1).RGBA()
 	tr, tg, tb, _ := turned.At(1, 1).RGBA()
 	const tolerance = 0x2000
@@ -121,7 +121,7 @@ func TestTransformFlipKeepsDimensions(t *testing.T) {
 	}
 }
 
-// Quality alone is not a geometry change but still forces a re-encode.
+// quality だけの指定は幾何変換ではないが、それでも再エンコードを強制する。
 func TestTransformQualityOnlyReencodes(t *testing.T) {
 	src := encodeJPEG(t, 64, 64)
 	tr := Transform{Quality: 20}
@@ -158,19 +158,19 @@ func TestTransformRejectsNonJPEG(t *testing.T) {
 	}
 }
 
-// A JPEG states its size in a header a few bytes long, so a frame that passes
-// the compressed-byte limit can still ask the decoder for gigabytes. The
-// header has to be checked before Decode is allowed to allocate.
+// JPEG は自身の大きさを数バイトのヘッダーで宣言するので、圧縮バイト数の上限を
+// 通ったフレームでもデコーダにギガバイト単位を要求できる。Decode に確保させる前に
+// ヘッダーを確認しなければならない。
 func TestTransformRejectsAnOversizedImageBeforeDecoding(t *testing.T) {
-	// A real, small frame whose SOF is rewritten to claim 65535x65535. The
-	// file stays well under any byte limit while telling the decoder to size
-	// its buffers for four gigapixels.
+	// 本物の小さなフレームの SOF を 65535x65535 と偽るように書き換えたもの。
+	// ファイル自体はどのバイト上限にも余裕で収まりながら、デコーダには 4 ギガ
+	// ピクセル分のバッファを用意させようとする。
 	bomb := bytes.Clone(encodeJPEG(t, 16, 16))
 	sof := bytes.Index(bomb, []byte{markerPrefix, 0xC0})
 	if sof < 0 {
 		t.Fatal("fixture has no baseline SOF0 to rewrite")
 	}
-	// FF C0, length(2), precision(1), height(2), width(2)
+	// FF C0、長さ(2)、精度(1)、高さ(2)、幅(2)
 	copy(bomb[sof+5:sof+9], []byte{0xFF, 0xFF, 0xFF, 0xFF})
 
 	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(bomb)); err != nil {
@@ -187,7 +187,7 @@ func TestTransformRejectsAnOversizedImageBeforeDecoding(t *testing.T) {
 	}
 }
 
-// The ceiling must not get in the way of the images this actually carries.
+// 上限が、実際に扱う画像の邪魔をしてはいけない。
 func TestTransformAcceptsAnOrdinaryFrame(t *testing.T) {
 	tr := Transform{Rotate: 90}
 	if _, err := tr.Apply(encodeJPEG(t, 240, 240)); err != nil {
@@ -195,7 +195,7 @@ func TestTransformAcceptsAnOrdinaryFrame(t *testing.T) {
 	}
 }
 
-// MaxPixels is what the check is against, so a low one has to bite.
+// 検査の基準は MaxPixels なので、小さく設定すれば効かなければならない。
 func TestTransformHonoursAConfiguredPixelLimit(t *testing.T) {
 	tr := Transform{Rotate: 90, MaxPixels: 16}
 	if _, err := tr.Apply(encodeJPEG(t, 32, 32)); err == nil {
@@ -203,9 +203,9 @@ func TestTransformHonoursAConfiguredPixelLimit(t *testing.T) {
 	}
 }
 
-// Structure is not an image. The parsers upstream accept anything with the
-// right markers around it, which is the right trade at capture rate, but it
-// means "a frame arrived" and "the source works" are different claims.
+// 構造は画像ではない。上流のパーサーは正しいマーカーで囲まれていれば受け入れる。
+// キャプチャ速度での判断としてはそれで正しいが、「フレームが届いた」と「ソースが
+// 機能している」は別の主張だということでもある。
 func TestDecodableJPEGRejectsAStructureWithNoImageInIt(t *testing.T) {
 	cases := map[string][]byte{
 		"soi and eoi alone": {markerPrefix, markerSOI, markerPrefix, markerEOI},
@@ -220,14 +220,14 @@ func TestDecodableJPEGRejectsAStructureWithNoImageInIt(t *testing.T) {
 	}
 }
 
-// The check must not turn away the frames this actually carries.
+// この検査が、実際に扱うフレームを追い返してはいけない。
 func TestDecodableJPEGAcceptsARealFrame(t *testing.T) {
 	if err := DecodableJPEG(encodeJPEG(t, 240, 240), 0); err != nil {
 		t.Errorf("DecodableJPEG() = %v, want a 240x240 frame accepted", err)
 	}
 }
 
-// Decoding is the expensive step, so the declared size is checked first.
+// 高くつくのはデコードなので、宣言された大きさを先に確認する。
 func TestDecodableJPEGRefusesAnOversizedImage(t *testing.T) {
 	if err := DecodableJPEG(encodeJPEG(t, 64, 64), 16); err == nil {
 		t.Error("DecodableJPEG() = nil, want the pixel limit applied")

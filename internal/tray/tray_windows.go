@@ -10,14 +10,15 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
 
-// refreshInterval paces the status line in the menu. It is a display concern
-// only; nothing in the pipeline depends on it.
+// refreshInterval は、メニューの状態表示を更新する間隔です。表示上の都合でしか
+// なく、パイプラインの何もこれに依存していません。
 const refreshInterval = time.Second
 
-// Run shows the tray icon and blocks until the user quits or ctx is cancelled.
+// Run はトレイアイコンを表示し、ユーザーが終了するか ctx がキャンセルされるまで
+// ブロックします。
 //
-// It must be called from the main goroutine: the tray runs a Windows message
-// loop, which is tied to the thread that created the window.
+// main の goroutine から呼ぶ必要があります。トレイは Windows のメッセージループを
+// 走らせ、それはウィンドウを作成したスレッドに結び付いているからです。
 func Run(ctx context.Context, opts Options) {
 	systray.Run(func() { onReady(ctx, opts) }, func() {
 		if opts.OnQuit != nil {
@@ -87,7 +88,7 @@ func onReady(ctx context.Context, opts Options) {
 	})
 }
 
-// menu groups the items so the event loop reads as a single switch.
+// menu は項目をまとめ、イベントループが 1 つの switch として読めるようにします。
 type menu struct {
 	status    *systray.MenuItem
 	address   *systray.MenuItem
@@ -100,14 +101,14 @@ type menu struct {
 	quit      *systray.MenuItem
 }
 
-// run handles menu clicks and refreshes the status line until the tray exits.
+// run は、トレイが終了するまでメニューのクリックを処理し、状態表示を更新します。
 func run(ctx context.Context, opts Options, m menu) {
 	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 
-	// Every entry that changes the bridge is watched in one place, so the
-	// order they reach the worker in is the order they were clicked. See
-	// watchClicks for why a case each in the select below would not do.
+	// ブリッジを変更する項目はすべて 1 箇所で監視するので、ワーカーに届く順序は
+	// クリックされた順序になる。下の select で case を分けてはいけない理由は
+	// watchClicks を参照。
 	actions := make(chan string, commandQueueDepth)
 	clicks := make(map[string]<-chan struct{}, len(m.sources)+1)
 	for kind, item := range m.sources {
@@ -116,8 +117,8 @@ func run(ctx context.Context, opts Options, m menu) {
 	clicks[actionPause] = m.pause.ClickedCh
 	go watchClicks(ctx, opts.Log, clicks, actions)
 
-	// Everything that changes the bridge goes through one worker, in the
-	// order it was clicked. See commandQueue.
+	// ブリッジを変更するものはすべて、クリックされた順に 1 つのワーカーを通る。
+	// commandQueue を参照。
 	queue := newCommandQueue(opts.Log, commandQueueDepth)
 	defer queue.close()
 
@@ -134,20 +135,20 @@ func run(ctx context.Context, opts Options, m menu) {
 			refresh(opts, m)
 
 		case action := <-actions:
-			// Nothing is refreshed on completion. The ticker redraws once a
-			// second from state the bridge exposes without a lock, so the menu
-			// catches up on its own whichever way the action goes.
+			// 完了時に更新はしない。ticker が、ブリッジがロック無しで公開している
+			// 状態から 1 秒ごとに再描画するので、操作がどう転んでもメニューは
+			// 自力で追いつく。
 			if action == actionPause {
-				// The toggle is against what the last click asked for, not
-				// what the bridge currently reports. Two clicks in quick
-				// succession both see the old state otherwise -- the first has
-				// not reached SetPaused yet -- so they ask for the same thing
-				// twice and the pair does not cancel out.
+				// 切り替えの基準は、ブリッジが今報告している状態ではなく、
+				// 直前のクリックが要求した内容。そうしないと立て続けの 2 回の
+				// クリックはどちらも古い状態を見ることになり — 1 回目はまだ
+				// SetPaused に届いていない — 同じことを 2 回要求して、対で
+				// 打ち消し合わない。
 				//
-				// Only a request that was actually queued counts. A dropped
-				// one changed nothing, and moving the target anyway would
-				// leave the next click asking for the state the bridge is
-				// already in, which looks like a button that does nothing.
+				// 数に入れるのは実際にキューへ入った要求だけ。捨てられた要求は
+				// 何も変えていないので、それでも目標を動かすと、次のクリックが
+				// ブリッジの既にある状態を要求することになり、何もしないボタンの
+				// ように見える。
 				paused := !wantPaused
 				queued := queue.submit(actionPause, func() {
 					if err := opts.Controller.SetPaused(paused); err != nil {
@@ -177,10 +178,10 @@ func run(ctx context.Context, opts Options, m menu) {
 			openTarget(opts.ConfigPath, opts)
 
 		case <-m.ffmpeg.ClickedCh:
-			// Not on the command queue: this neither touches the bridge's
-			// settings nor competes with a source switch, and it blocks on a
-			// person reading a dialog. Queueing it would hold every later
-			// click behind however long that takes.
+			// コマンドキューには載せない。これはブリッジの設定に触れず、ソース
+			// 切替と競合もせず、そのうえ人がダイアログを読むまでブロックする。
+			// キューに入れると、それにかかる時間の分だけ後続のクリックすべてが
+			// 足止めされる。
 			go startFFmpegFetch(opts)
 
 		case <-m.autostart.ClickedCh:
@@ -193,7 +194,7 @@ func run(ctx context.Context, opts Options, m menu) {
 	}
 }
 
-// refresh redraws the parts of the menu that reflect live state.
+// refresh は、実時間の状態を映すメニュー部分を再描画します。
 func refresh(opts Options, m menu) {
 	snapshot := opts.Status.Snapshot()
 	stats := opts.Hub.Stats()
@@ -222,7 +223,7 @@ func refresh(opts Options, m menu) {
 	systray.SetTooltip(opts.Printer.S(i18n.DialogTitle) + " - " + m.status.String())
 }
 
-// startFFmpegFetch asks first, then downloads.
+// startFFmpegFetch は、先に確認を取ってからダウンロードします。
 func startFFmpegFetch(opts Options) {
 	if opts.FFmpeg == nil {
 		return
@@ -233,8 +234,8 @@ func startFFmpegFetch(opts Options) {
 	case state.Downloading:
 		return
 	case state.Installed:
-		// Already there. Saying so beats a click that looks like it did
-		// nothing, and re-downloading a working ffmpeg is not what it means.
+		// 既にある。そう言う方が、何もしなかったように見えるクリックよりまし
+		// だし、動いている ffmpeg を取り直すことがその意味ではない。
 		confirm(p.S(i18n.DialogTitle), p.F(i18n.DialogFFmpegInstalled, state.Path))
 		return
 	}

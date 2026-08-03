@@ -6,18 +6,17 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
 
-// ErrorKey names the message for a failure the interface should show in the
-// user's language, or returns empty for one it should not.
+// ErrorKey は、画面がユーザーの言語で見せるべき失敗に対応するメッセージ名を返し、
+// そうでない失敗には空を返します。
 //
-// Only the failures a person can act on without reading the log: no camera
-// named, no ffmpeg found, no port that could be a board. Everything else --
-// a refused port, a device that vanished mid-capture, a malformed URL -- is
-// reported as the driver wrote it, because those messages carry the detail
-// that makes them useful and a translated summary would carry less.
+// 対象は、ログを読まずに対処できる失敗だけです。カメラが指定されていない、ffmpeg が
+// 見つからない、ボードらしいポートが無い。それ以外 — 拒否されたポート、キャプチャ中に
+// 消えたデバイス、壊れた URL — はドライバが書いたまま報告します。それらのメッセージは
+// それらを有用にしている詳細を含んでおり、翻訳した要約では情報が減るからです。
 //
-// It lives here rather than in the tray or the status tracker because this is
-// where the errors are defined: a sentinel added next door should be one edit
-// away from being translatable, not two packages away.
+// トレイや status tracker ではなくここに置いているのは、エラーが定義されているのが
+// ここだからです。隣に sentinel を足した人が、翻訳可能にするまでに 2 つ隣のパッケージ
+// まで行かずに済み、1 箇所の編集で届くようにしています。
 func ErrorKey(err error) string {
 	switch {
 	case err == nil:

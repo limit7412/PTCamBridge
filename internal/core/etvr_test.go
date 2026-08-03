@@ -41,8 +41,8 @@ func TestETVRParseConsecutivePackets(t *testing.T) {
 	}
 }
 
-// A serial read can end anywhere, including in the middle of the preamble or
-// the length field. The parser must hold those bytes rather than drop them.
+// シリアルの読み取りはどこで終わってもおかしくない。前置きや長さフィールドの
+// 途中も含む。パーサーはそのバイトを捨てず保持しなければならない。
 func TestETVRParseHandlesSplitAtEveryOffset(t *testing.T) {
 	p := newTestParser(t)
 	payload := encodeJPEG(t, 16, 16)
@@ -75,8 +75,8 @@ func TestETVRParseHandlesSplitAtEveryOffset(t *testing.T) {
 	}
 }
 
-// Joining a stream that is already running means the first bytes seen are the
-// tail of some earlier packet; they must be skipped, not misparsed.
+// すでに流れているストリームに途中から加わると、最初に見えるバイトは前のパケットの
+// 尻尾になる。誤って解析せず、読み飛ばさなければならない。
 func TestETVRParseSkipsLeadingGarbage(t *testing.T) {
 	p := newTestParser(t)
 	payload := encodeJPEG(t, 16, 16)
@@ -134,7 +134,7 @@ func TestETVRParseDropsCorruptPayload(t *testing.T) {
 	}
 }
 
-// Firmware revisions differ in the preamble, so it has to be overridable.
+// 前置きはファームウェアの版によって異なるので、上書きできる必要がある。
 func TestETVRParseHonoursCustomHeader(t *testing.T) {
 	p, err := NewETVRParser([]byte{0xAB, 0xCD}, 0)
 	if err != nil {
@@ -160,8 +160,8 @@ func TestNewETVRParserRejectsEmptyHeader(t *testing.T) {
 	}
 }
 
-// The buffer a driver carries between reads must not grow without bound when
-// the stream contains no headers at all.
+// ストリームにヘッダーがまったく含まれない場合でも、ドライバが読み取りをまたいで
+// 持ち越すバッファが無制限に太ってはいけない。
 func TestETVRParseBoundsLeftoverBytes(t *testing.T) {
 	p := newTestParser(t)
 	frames, rest, _ := p.Parse(bytes.Repeat([]byte{0x01}, 8192))

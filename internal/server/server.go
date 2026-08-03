@@ -1,5 +1,6 @@
-// Package server publishes the bridged camera as the MJPEG-over-HTTP stream
-// the PaperTracker client expects, plus the status and management endpoints.
+// Package server は、中継したカメラを PaperTracker クライアントが期待する
+// MJPEG-over-HTTP ストリームとして公開します。状態エンドポイントと管理
+// エンドポイントも併せて提供します。
 package server
 
 import (
@@ -27,36 +28,37 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
-// sourceLossTimeout is how long a stream may go without a frame before the
-// source counts as lost. It also gates /healthz.
+// sourceLossTimeout は、ソースを失われたとみなすまでにストリームがフレームを
+// 出さずにいられる時間です。/healthz の判定にも使います。
 const sourceLossTimeout = 2 * time.Second
 
-// readHeaderTimeout bounds the request line and headers. The response body is
-// deliberately unbounded: it is an endless stream.
+// readHeaderTimeout は、リクエスト行とヘッダーに対する上限です。応答本体に上限を
+// 設けていないのは意図的です。終わりのないストリームだからです。
 const readHeaderTimeout = 10 * time.Second
 
-// streamBufferSize preallocates the per-client encode buffer.
+// streamBufferSize は、クライアントごとのエンコードバッファをあらかじめ確保する
+// 大きさです。
 const streamBufferSize = 64 << 10
 
-// writeTimeout bounds a single frame write to one client.
+// writeTimeout は、1 クライアントへのフレーム 1 枚の書き込みに対する上限です。
 //
-// The response as a whole is endless, so the server has no WriteTimeout; that
-// leaves a client which stops reading able to block the write forever once the
-// socket buffer fills, and a blocked write reaches neither the watchdog nor
-// the cancelled context. A frame that cannot be handed over in this long says
-// the client is gone whether or not it has closed the connection.
+// 応答全体は終わりがないのでサーバに WriteTimeout はありません。そのため、読むのを
+// やめたクライアントは、ソケットバッファが埋まった時点で書き込みを永遠にブロック
+// できてしまいます。ブロックした書き込みは、監視にもキャンセルされたコンテキストにも
+// 届きません。これだけ待っても渡せないフレームは、接続が閉じられているかどうかに
+// 関わらず、そのクライアントが居なくなったことを意味します。
 const writeTimeout = 5 * time.Second
 
-// Devices is what the management API reports for the source pickers.
+// Devices は、ソース選択のために管理 API が報告する内容です。
 //
-// The two lists are gathered independently and each carries its own error,
-// because they fail independently: a machine with no ffmpeg cannot enumerate
-// cameras and can still enumerate serial ports perfectly well. Failing the
-// whole request on either would hide the devices the user does have.
+// 2 つのリストは独立に集め、それぞれが自分のエラーを持ちます。失敗の仕方が独立して
+// いるからです。ffmpeg の無い機械はカメラを列挙できませんが、シリアルポートの列挙は
+// 何の問題もなくできます。どちらかの失敗でリクエスト全体を失敗させると、ユーザーが
+// 実際に持っているデバイスを隠すことになります。
 //
-// An empty list with no error means there is nothing attached. An empty list
-// with an error means nobody knows, which is the distinction a picker has to
-// show rather than swallow.
+// エラーの無い空のリストは「何も繋がっていない」を意味します。エラーを伴う空の
+// リストは「誰にも分からない」を意味します。選択画面は、その違いを飲み込まずに
+// 見せなければなりません。
 type Devices struct {
 	Cameras     []source.Device     `json:"cameras"`
 	CameraError string              `json:"camera_error,omitempty"`
@@ -64,74 +66,74 @@ type Devices struct {
 	SerialError string              `json:"serial_error,omitempty"`
 }
 
-// Controller lets the management API drive the bridge without the server
-// package knowing how sources are started.
+// Controller は、ソースがどう起動されるかを server パッケージに知らせないまま、
+// 管理 API がブリッジを操作できるようにします。
 type Controller interface {
-	// Snapshot returns the settings currently in effect.
+	// Snapshot は、現在有効な設定を返します。
 	Snapshot() config.Config
-	// Apply validates and adopts new settings.
+	// Apply は新しい設定を検証し、採用します。
 	Apply(ctx context.Context, cfg config.Config) error
-	// Switch changes the active source type.
+	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
-	// Devices lists the cameras and serial ports available right now, with
-	// whatever went wrong reported per list rather than as one error.
+	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
+	// 1 つのエラーにまとめず、リストごとに報告します。
 	Devices(ctx context.Context) Devices
 }
 
-// FFmpegFetcher is the slice of the ffmpeg download the management API drives.
+// FFmpegFetcher は、管理 API が操作する ffmpeg ダウンロードの一部です。
 //
-// An interface rather than the type itself so the server keeps knowing nothing
-// about how the download works, and so a build with no fetcher wired in simply
-// leaves the endpoint off.
+// 型そのものではなくインターフェースにしているのは、サーバがダウンロードの仕組みを
+// 何も知らずに済むようにするため、そして fetcher を組み込まないビルドでは単に
+// エンドポイントが無くなるようにするためです。
 type FFmpegFetcher interface {
-	// State reports what is installed and what is in flight.
+	// State は、何が導入済みで何が進行中かを報告します。
 	State() ffmpegfetch.State
-	// Start begins a download, or reports why it cannot. It returns as soon as
-	// the download is under way: a hundred megabytes does not fit inside an
-	// HTTP request, so the caller polls State instead.
+	// Start はダウンロードを開始するか、開始できない理由を返します。ダウンロードが
+	// 走り出した時点で戻ります。100 メガバイトは HTTP リクエストの中に収まらないので、
+	// 呼び出し側は代わりに State を polling します。
 	Start() error
 }
 
-// Options configures a Server.
+// Options は Server を設定します。
 type Options struct {
 	Hub    *hub.Hub
 	Status *status.Tracker
-	// Encoder is the initial wire format; SetStreamOptions replaces it.
+	// Encoder は初期のワイヤ形式です。SetStreamOptions が差し替えます。
 	Encoder core.MultipartEncoder
 	Logger  *slog.Logger
-	// Controller enables the management API. It is ignored unless
-	// EnableAdmin is also set.
+	// Controller は管理 API を有効にします。EnableAdmin も立っていなければ
+	// 無視されます。
 	Controller Controller
-	// EnableAdmin serves /api/v1/*. The bridge turns this off whenever the
-	// listener is not on loopback, because the API has no authentication.
+	// EnableAdmin は /api/v1/* を提供します。listen 先がループバックでない場合、
+	// ブリッジはこれを切ります。この API には認証が無いからです。
 	EnableAdmin bool
-	// FFmpeg enables /api/v1/ffmpeg. Nil leaves the endpoint off, which is
-	// what a platform with no published build gets.
+	// FFmpeg は /api/v1/ffmpeg を有効にします。nil ならエンドポイントは無くなり、
+	// 公式ビルドの無いプラットフォームはそうなります。
 	FFmpeg FFmpegFetcher
-	// HoldOnSourceLoss keeps stream clients connected while the camera
-	// reconnects rather than closing the response. It is the initial value;
-	// SetStreamOptions replaces it.
+	// HoldOnSourceLoss は、カメラの再接続中に応答を閉じず、ストリームの
+	// クライアントを繋いだままにします。これは初期値で、SetStreamOptions が
+	// 差し替えます。
 	HoldOnSourceLoss bool
 	Version          string
 }
 
-// streamOptions are the response settings a running server can swap out.
+// streamOptions は、動作中のサーバが差し替えられる応答設定です。
 type streamOptions struct {
 	encoder core.MultipartEncoder
 	hold    bool
 }
 
-// Server serves the stream and status endpoints.
+// Server は、ストリームと状態のエンドポイントを提供します。
 type Server struct {
 	opts Options
 	log  *slog.Logger
 
-	// stream is replaced wholesale when the settings change, so a client that
-	// is already connected keeps the wire format it started parsing.
+	// stream は設定変更時に丸ごと差し替えます。既に接続しているクライアントは、
+	// 解析を始めたときのワイヤ形式を保ちます。
 	stream atomic.Pointer[streamOptions]
 }
 
-// New builds a server. Hub, Status and Logger must be set.
+// New はサーバを組み立てます。Hub・Status・Logger は必須です。
 func New(opts Options) (*Server, error) {
 	switch {
 	case opts.Hub == nil:
@@ -146,20 +148,20 @@ func New(opts Options) (*Server, error) {
 	return s, nil
 }
 
-// SetStreamOptions adopts a new wire format for the streams started from here
-// on. The bridge calls it after a settings change so that adjusting the
-// boundary or the extra headers -- the knobs that exist purely to match a
-// PaperTracker release -- does not need a restart to take effect.
+// SetStreamOptions は、これ以降に始まるストリームに新しいワイヤ形式を適用します。
+// ブリッジは設定変更の後にこれを呼びます。boundary や追加ヘッダー — PaperTracker の
+// リリースに合わせるためだけに存在するつまみ — の調整が、再起動なしで効くように
+// するためです。
 func (s *Server) SetStreamOptions(encoder core.MultipartEncoder, holdOnSourceLoss bool) {
 	s.stream.Store(&streamOptions{encoder: encoder, hold: holdOnSourceLoss})
 	s.log.Info("stream settings updated", "boundary", encoder.Boundary(), "hold_on_source_loss", holdOnSourceLoss)
 }
 
-// Handler returns the routed handler.
+// Handler は、経路を設定したハンドラを返します。
 //
-// The stream is served from "/" as well as "/stream" because the PaperTracker
-// client requests the bare cached address with no path. That is the whole
-// point of the compatibility surface.
+// ストリームを "/stream" だけでなく "/" でも提供するのは、PaperTracker クライアントが
+// キャッシュした裸のアドレスをパス無しで要求するからです。この互換のための面は、
+// まさにそのために存在します。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
@@ -179,16 +181,16 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Listen binds the address. Binding is separate from serving so the caller can
-// learn the real address (a port of 0 resolves here) and can treat a bind
-// failure as another instance already running.
+// Listen はアドレスを bind します。bind を提供と分けているのは、呼び出し側が実際の
+// アドレスを知れるようにするため (ポート 0 はここで解決されます)、そして bind の失敗を
+// 「既に別の実体が動いている」と解釈できるようにするためです。
 func Listen(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
 
-// Serve runs until ctx is cancelled, then shuts down gracefully. Stream
-// clients hold their connections open forever, so shutdown closes them rather
-// than waiting for responses that will never finish.
+// Serve は ctx がキャンセルされるまで動き、その後穏当に停止します。ストリームの
+// クライアントは接続を永遠に開いたままにするので、停止処理は終わることのない応答を
+// 待つのではなく、それらを閉じます。
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
 		Handler:           s.Handler(),
@@ -227,8 +229,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	s.handleStream(w, r)
 }
 
-// handleStream writes frames as multipart/x-mixed-replace for as long as the
-// client stays connected.
+// handleStream は、クライアントが接続している限り、フレームを
+// multipart/x-mixed-replace として書き続けます。
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -241,8 +243,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the settings once: the boundary announced in the Content-Type has
-	// to be the one every part of this response then uses.
+	// 設定は一度だけ読む。Content-Type で名乗った boundary は、この応答の
+	// すべてのパートがその後使うものと同じでなければならない。
 	stream := s.stream.Load()
 
 	header := w.Header()
@@ -250,10 +252,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	header.Set("Pragma", "no-cache")
 	header.Set("Expires", "0")
-	// Declaring identity encoding is what stops net/http from framing the
-	// body as chunked. The client reads the socket looking for our boundary
-	// and for Content-Length, so chunk size lines interleaved with the
-	// multipart framing would desynchronise its parser.
+	// identity エンコーディングを宣言することが、net/http が本体をチャンクで
+	// 包むのを止めている。クライアントはこちらの boundary と Content-Length を
+	// 探しながらソケットを読むので、multipart の枠組みの間にチャンク長の行が
+	// 挟まればパーサーの同期が外れる。
 	header.Set("Transfer-Encoding", "identity")
 	header.Set("Connection", "close")
 	w.WriteHeader(http.StatusOK)
@@ -266,9 +268,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	frames, unsubscribe := s.opts.Hub.Subscribe()
 	defer unsubscribe()
 
-	// A deadline per frame is the only thing that unblocks a write to a client
-	// that has stopped reading. Not every ResponseWriter supports one; where it
-	// does not, the behaviour is what it was before.
+	// 読むのをやめたクライアントへの書き込みを解除できるのは、フレームごとの
+	// 期限だけ。すべての ResponseWriter が対応しているわけではなく、対応して
+	// いない場合の挙動は従来どおり。
 	rc := http.NewResponseController(w)
 	writeFrame := func(b []byte) error {
 		if err := rc.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
@@ -282,17 +284,15 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	buf := make([]byte, 0, streamBufferSize)
 	lastFrame := time.Now()
 
-	// Send whatever is current straight away so a reconnecting client sees an
-	// image without waiting for the next capture. A frame older than the loss
-	// timeout is withheld: the hub keeps the last image indefinitely, and
-	// replaying it to every reconnect while the camera is down would feed the
-	// tracker a stale mouth shape over and over.
+	// 今あるものをすぐ送る。再接続したクライアントが、次のキャプチャを待たずに
+	// 画像を見られるようにするため。ただし喪失タイムアウトより古いフレームは
+	// 送らない。hub は最後の画像を無期限に保持するので、カメラが落ちている間の
+	// 再接続すべてにそれを流すと、トラッカーに古い口の形を何度も食わせることになる。
 	//
-	// The sequence number of whatever goes out here is kept. Subscribing and
-	// reading the latest frame are two steps, and a frame published in between
-	// lands in this client's queue and becomes the latest at the same moment --
-	// so without this the stream would open by sending that one image twice in
-	// a row, and the tracker would see the same mouth shape as two samples.
+	// ここで送ったものの連番は控えておく。購読と最新フレームの読み取りは 2 段階で
+	// あり、その間に配信されたフレームはこのクライアントのキューに入ると同時に
+	// 最新にもなる。これが無いと、ストリームは同じ画像を 2 回続けて送ることで
+	// 始まり、トラッカーは同じ口の形を 2 つの標本として見ることになる。
 	var sent uint64
 	if latest, ok := s.opts.Hub.Latest(); ok && time.Since(latest.RecvedAt) <= sourceLossTimeout {
 		buf = stream.encoder.AppendPart(buf[:0], latest.Data)
@@ -303,8 +303,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		sent = latest.Seq
 	}
 
-	// The ticker only exists to notice a source that stopped producing; it
-	// does not pace the stream.
+	// この ticker は、出力を止めたソースに気づくためだけにある。ストリームの
+	// 間隔を刻んでいるのではない。
 	watchdog := time.NewTicker(sourceLossTimeout / 2)
 	defer watchdog.Stop()
 
@@ -318,7 +318,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if frame.Seq != 0 && frame.Seq <= sent {
-				// Already sent above, straight after subscribing.
+				// 購読の直後に上で送信済み。
 				continue
 			}
 			buf = stream.encoder.AppendPart(buf[:0], frame.Data)
@@ -333,17 +333,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			if stream.hold || time.Since(lastFrame) <= sourceLossTimeout {
 				continue
 			}
-			// Closing prompts the client to reconnect. Holding the connection
-			// open instead recovers faster from a brief dropout, which is why
-			// the behaviour is configurable.
+			// 閉じるとクライアントは再接続する。代わりに接続を開いたまま保つと、
+			// 短い断絶からの復帰は速い。だからこの挙動は設定可能にしてある。
 			s.log.Debug("closing stream after source loss", "remote", r.RemoteAddr)
 			return
 		}
 	}
 }
 
-// handleSnapshot returns the most recent frame as a plain JPEG, for debugging
-// without an MJPEG-capable client.
+// handleSnapshot は、直近のフレームをそのままの JPEG として返します。MJPEG を
+// 扱えるクライアントが無くても調査できるようにするためです。
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	frame, ok := s.opts.Hub.Latest()
 	if !ok {
@@ -359,15 +358,16 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(frame.Data)
 }
 
-// Health is the /healthz body.
+// Health は /healthz の応答本体です。
 type Health struct {
 	OK     bool            `json:"ok"`
 	Reason string          `json:"reason,omitempty"`
 	Source status.Snapshot `json:"source"`
 }
 
-// handleHealth reports 200 while frames are arriving and 503 otherwise, so a
-// supervisor or the tray can tell "running" from "working".
+// handleHealth は、フレームが届いている間は 200 を、そうでなければ 503 を返します。
+// 監視プロセスやトレイが「動いている」と「機能している」を区別できるようにするため
+// です。
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.opts.Status.Snapshot()
 	stats := s.opts.Hub.Stats()
@@ -391,7 +391,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, code, health)
 }
 
-// Stats is the /stats body.
+// Stats は /stats の応答本体です。
 type Stats struct {
 	Version string          `json:"version"`
 	Frames  hub.Stats       `json:"frames"`
@@ -406,36 +406,35 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// guardAdmin rejects management API requests that a web page could have caused
-// the browser to send.
+// guardAdmin は、Web ページがブラウザに送らせた可能性のある管理 API リクエストを
+// 拒否します。
 //
-// Binding to loopback is not on its own a control: any page the user visits can
-// reach 127.0.0.1, and a form-style POST needs no preflight to do it. Reaching
-// this API is the whole authority it has, so unless a request proves it did not
-// come from a foreign page it does not get to change the source.
+// ループバックへの bind はそれ自体では防御になりません。ユーザーが訪れたどのページも
+// 127.0.0.1 に到達できますし、フォーム形式の POST はそのために preflight を必要と
+// しません。この API に到達できること自体がその権限のすべてなので、外部のページから
+// 来たものではないと示せないリクエストに、ソースを変更させるわけにはいきません。
 func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) bool {
-	// A rebound DNS name resolves to loopback but still carries its own name
-	// in Host, which is what makes the bind address meaningful again.
+	// 再バインドされた DNS 名はループバックに解決されるが、Host には自身の名前が
+	// 載ったまま。それが bind アドレスに再び意味を与えている。
 	if !isLoopbackHost(r.Host) {
 		http.Error(w, "the management API only answers requests addressed to loopback", http.StatusForbidden)
 		return false
 	}
-	// Browsers attach Origin to every cross-site request. Command line clients
-	// send none at all, which is why an absent header is allowed through.
+	// ブラウザはクロスサイトのリクエストすべてに Origin を付ける。コマンドライン
+	// のクライアントはまったく送らないので、ヘッダーが無い場合は通す。
 	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
 		http.Error(w, "cross-origin requests are not accepted", http.StatusForbidden)
 		return false
 	}
-	// Origin is not enough on its own for a GET. A page can request this URL as
-	// a subresource -- <img src>, <script src> -- and a browser sends no Origin
-	// for those, so the Host check would be all that stood in the way. It
-	// cannot read the answer, but GET /devices is not free: on Windows it runs
-	// ffmpeg and waits up to fifteen seconds, so a page cycling URLs can keep
-	// spawning processes on the machine.
+	// GET に対して Origin だけでは足りない。ページはこの URL をサブリソースとして
+	// 要求できる — <img src>、<script src> — が、ブラウザはそれらに Origin を
+	// 付けないので、立ちはだかるのは Host の検査だけになる。応答は読めないものの、
+	// GET /devices はただではない。Windows では ffmpeg を起動して最大 15 秒待つので、
+	// URL を次々に叩くページは、その機械でプロセスを生み出し続けられる。
 	//
-	// Sec-Fetch-Site says where the request came from and cannot be set by a
-	// page. Browsers that send it are held to it; anything that does not send
-	// it is not a browser, and no page can make one stop sending it.
+	// Sec-Fetch-Site はリクエストの出所を述べるもので、ページからは設定できない。
+	// 送ってくるブラウザにはそれを守らせる。送ってこないものはブラウザではないし、
+	// どのページもブラウザにそれを送るのをやめさせられない。
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		http.Error(w, "the management API does not answer requests made by another site", http.StatusForbidden)
 		return false
@@ -443,9 +442,9 @@ func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return true
 	}
-	// text/plain, form and multipart are the body types a page can post
-	// without a preflight. Insisting on JSON is what forces the preflight,
-	// which the Origin check above then fails.
+	// text/plain、フォーム、multipart は、ページが preflight 無しに POST できる
+	// 本体の種類。JSON を要求することが preflight を強制し、それを上の Origin の
+	// 検査が失敗させる。
 	if !hasJSONBody(r) {
 		http.Error(w, "Content-Type: application/json is required", http.StatusUnsupportedMediaType)
 		return false
@@ -453,8 +452,8 @@ func (s *Server) guardAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// isLoopbackHost reports whether an authority names this machine. The port is
-// irrelevant and a missing one is fine.
+// isLoopbackHost は、authority がこの機械を指しているかを返します。ポートは
+// 関係なく、無くても構いません。
 func isLoopbackHost(authority string) bool {
 	host, _, err := net.SplitHostPort(authority)
 	if err != nil {
@@ -467,8 +466,8 @@ func isLoopbackHost(authority string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// isLoopbackOrigin reports whether an Origin header value is a page served from
-// this machine.
+// isLoopbackOrigin は、Origin ヘッダーの値が、この機械から提供されたページを
+// 指しているかを返します。
 func isLoopbackOrigin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
@@ -477,7 +476,7 @@ func isLoopbackOrigin(origin string) bool {
 	return isLoopbackHost(u.Host)
 }
 
-// hasJSONBody reports whether the request declares a JSON body.
+// hasJSONBody は、リクエストが JSON の本体を宣言しているかを返します。
 func hasJSONBody(r *http.Request) bool {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	return err == nil && mediaType == "application/json"
@@ -536,11 +535,11 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// A body of {} decodes cleanly into an empty type, and empty is not a
-	// missing value further down: Normalise reads it as "unset" and fills in
-	// the default, so a request with no type at all would quietly move a
-	// working serial or MJPEG source onto UVC. Trimmed, because Normalise
-	// trims too -- "   " reaches that same default.
+	// {} という本体は空の type として問題なくデコードされるが、その先で空は
+	// 「値が無い」を意味しない。Normalise はそれを「未設定」と読んで既定値を
+	// 埋めるので、type をまったく含まないリクエストが、動いている serial や
+	// MJPEG のソースを黙って UVC へ移してしまう。空白を落とすのは Normalise も
+	// そうするから。"   " も同じ既定値に行き着く。
 	if strings.TrimSpace(body.Type) == "" {
 		http.Error(w, `"type" is required`, http.StatusBadRequest)
 		return
@@ -552,9 +551,9 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
 }
 
-// applyStatus maps a settings failure onto a status code. A change that took
-// effect but could not be written to disk is the one case where the request
-// was fine and this side failed, so it is the only one that is not a 400.
+// applyStatus は、設定の失敗をステータスコードに対応付けます。反映はされたが
+// ディスクに書けなかった変更だけが「リクエストは正しく、こちら側が失敗した」場合
+// なので、400 にならないのはそれだけです。
 func applyStatus(err error) int {
 	if errors.Is(err, config.ErrNotSaved) {
 		return http.StatusInternalServerError
@@ -571,17 +570,16 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// No error return: a half-answer is still an answer, and which half
-	// failed is reported inside the body.
+	// エラーは返さない。半分の答えでも答えではあるし、どちらが失敗したかは
+	// 本体の中で報告している。
 	writeJSON(w, r, http.StatusOK, s.opts.Controller.Devices(r.Context()))
 }
 
-// handleFFmpeg reports whether ffmpeg has been fetched, and starts a fetch.
+// handleFFmpeg は、ffmpeg が取得済みかどうかを報告し、取得を開始します。
 //
-// POST rather than PUT, and no body: this is not a resource being set to a
-// value, it is a job being asked to run. The body it would carry -- which
-// archive, from where -- is pinned in the code precisely so that a request
-// cannot choose it.
+// PUT ではなく POST で、本体はありません。これはリソースに値を設定するのではなく、
+// 仕事に実行を頼むものだからです。本体が運ぶことになるはずのもの — どのアーカイブを、
+// どこから — は、リクエストに選ばせないためにこそコード側で固定してあります。
 func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 	if !s.guardAdmin(w, r) {
 		return
@@ -591,17 +589,17 @@ func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, r, http.StatusOK, s.opts.FFmpeg.State())
 
 	case http.MethodPost:
-		// A download already installed is not repeated. Fetching the same
-		// hundred megabytes again is not what a second click means, and
-		// replacing a working ffmpeg is not something to do on a stray request.
+		// 既に導入済みのダウンロードは繰り返さない。同じ 100 メガバイトをもう一度
+		// 取ってくることは 2 回目のクリックの意味ではないし、動いている ffmpeg の
+		// 置き換えは、迷い込んだリクエストでやることではない。
 		state := s.opts.FFmpeg.State()
 		if state.Installed {
 			writeJSON(w, r, http.StatusOK, state)
 			return
 		}
 		if err := s.opts.FFmpeg.Start(); err != nil {
-			// Busy is not a failure of the request: the thing it asked for is
-			// happening. Anything else is this machine saying it cannot.
+			// 「実行中」はリクエストの失敗ではない。頼まれたことは起きている。
+			// それ以外は、この機械ができないと言っているということ。
 			if errors.Is(err, ffmpegfetch.ErrBusy) {
 				writeJSON(w, r, http.StatusAccepted, s.opts.FFmpeg.State())
 				return
@@ -617,29 +615,26 @@ func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// carryUnmentioned keeps a setting the request never named at its current
-// value, for the ones a client written before that setting existed cannot know
-// to send.
+// carryUnmentioned は、リクエストが名前を挙げなかった設定を現在値のまま保ちます。
+// 対象は、その設定が存在する前に書かれたクライアントには送りようがないものです。
 //
-// PUT replaces the whole configuration, so a field left out of the body comes
-// back from Normalise as its default. That is right for the caller this API
-// was built for -- read the settings, change one, send them all back -- and
-// wrong for a caller written against an older schema, which cannot send a
-// field that did not exist when it was written.
+// PUT は設定全体を置き換えるので、本体から漏れたフィールドは Normalise を経て
+// 既定値として戻ってきます。この API が想定する呼び出し側 — 設定を読み、1 つ変え、
+// 全部送り返す — に対してはそれで正しく、古いスキーマに対して書かれた呼び出し側に
+// 対しては誤りです。そちらは、書かれた当時に存在しなかったフィールドを送れません。
 //
-// For most settings the difference goes unnoticed. For one that may only
-// change while stopped it does not: the default it decays to differs from the
-// running value, so the whole request is refused and that client finds the
-// management API closed to it over a setting it never touched.
+// ほとんどの設定ではこの違いは表に出ません。停止中にしか変更できない設定では表に
+// 出ます。既定値へ落ちた結果が動作中の値と食い違うので、リクエスト全体が拒否され、
+// そのクライアントは、自分が触れてもいない設定のせいで管理 API から締め出されます。
 //
-// Only ui, because it is the only setting added since anything could have been
-// written against this API. Anything added later belongs here too.
+// 対象が ui だけなのは、この API に対して何かが書かれ得るようになって以降に追加された
+// 設定がそれだけだからです。今後追加するものも、ここに属します。
 func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) {
 	var mentioned struct {
 		UI *json.RawMessage `json:"ui"`
 	}
 	if err := json.Unmarshal(body, &mentioned); err != nil {
-		// Undecodable bodies never reach here; strict decoding ran first.
+		// デコードできない本体がここに届くことはない。厳格なデコードが先に走っている。
 		return
 	}
 	if mentioned.UI == nil {
@@ -647,18 +642,17 @@ func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) {
 	}
 }
 
-// decodeStrict rejects a body carrying fields the target does not have, or
-// anything at all after the first JSON value.
+// decodeStrict は、対象が持たないフィールドを含む本体と、最初の JSON 値より後ろに
+// 何かが続く本体を拒否します。
 //
-// The settings file already refuses unknown keys; without the same rule here a
-// misspelled field over the API is silently dropped, the value it was meant to
-// set stays at its zero value, and the caller gets a 200 for a change that did
-// something other than what it asked for.
+// 設定ファイルは既に未知のキーを拒否しています。ここに同じ規則が無ければ、API 越しに
+// 綴りを誤ったフィールドは黙って捨てられ、それが設定するはずだった値はゼロ値のまま
+// 残り、呼び出し側は「頼んだのとは違うことをした変更」に対して 200 を受け取ります。
 //
-// The trailing check is the same argument one step out. A body of
-// {"type":"uvc"}{"type":"mjpeg"} is not a request with a typo in it, it is two
-// requests; decoding only the first and reporting success tells the caller the
-// second one was honoured.
+// 末尾の検査は同じ主張を一段外側に広げたものです。{"type":"uvc"}{"type":"mjpeg"} と
+// いう本体は、打ち間違いのあるリクエスト 1 つではなくリクエスト 2 つです。最初の
+// 1 つだけをデコードして成功と報告することは、2 つ目も聞き入れたと呼び出し側に
+// 告げることになります。
 func decodeStrict(r io.Reader, target any) error {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()

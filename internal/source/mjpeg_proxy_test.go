@@ -32,7 +32,7 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// countingReporter records the connection transitions a driver reports.
+// countingReporter は、ドライバが報告する接続状態の遷移を記録する。
 type countingReporter struct {
 	connects    atomic.Int64
 	disconnects atomic.Int64
@@ -41,8 +41,8 @@ type countingReporter struct {
 func (r *countingReporter) Connected(string)           { r.connects.Add(1) }
 func (r *countingReporter) Disconnected(string, error) { r.disconnects.Add(1) }
 
-// collect runs a driver until it has produced want frames or the deadline
-// passes, then cancels it and returns what arrived.
+// collect は、want 枚のフレームが得られるか期限が来るまでドライバを走らせ、
+// キャンセルして届いた分を返す。
 func collect(t *testing.T, drv Source, want int, timeout time.Duration) [][]byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -71,8 +71,8 @@ func collect(t *testing.T, drv Source, want int, timeout time.Duration) [][]byte
 	return got
 }
 
-// serveMultipart writes an endless multipart MJPEG stream in the shape ESP32
-// firmware produces.
+// serveMultipart は、ESP32 のファームウェアが出すのと同じ形で、終わりのない
+// multipart MJPEG ストリームを書く。
 func serveMultipart(t *testing.T, jpg []byte, boundary string, withContentLength bool, limit int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -127,8 +127,8 @@ func TestMJPEGProxyReadsAMultipartStream(t *testing.T) {
 	}
 }
 
-// Firmware that omits Content-Length still has to work, since the body then
-// runs to the next boundary.
+// Content-Length を省くファームウェアでも動かなければならない。その場合、本体は
+// 次の boundary まで続く。
 func TestMJPEGProxyWithoutContentLength(t *testing.T) {
 	jpg := testJPEG(t)
 	upstream := serveMultipart(t, jpg, "frame", false, 0)
@@ -144,8 +144,8 @@ func TestMJPEGProxyWithoutContentLength(t *testing.T) {
 	}
 }
 
-// Some cameras answer with a bare concatenated JPEG stream and no multipart
-// wrapper at all.
+// multipart の包みをまったく持たず、裸の JPEG を連結しただけのストリームで応答する
+// カメラもある。
 func TestMJPEGProxyWithBareJPEGStream(t *testing.T) {
 	jpg := testJPEG(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -173,8 +173,7 @@ func TestMJPEGProxyWithBareJPEGStream(t *testing.T) {
 	}
 }
 
-// FR-5: an upstream that drops out must be picked up again without restarting
-// the bridge.
+// FR-5。落ちた上流は、ブリッジを再起動せずに拾い直せなければならない。
 func TestMJPEGProxyReconnectsAfterTheUpstreamCloses(t *testing.T) {
 	jpg := testJPEG(t)
 	var sessions atomic.Int64
@@ -185,7 +184,7 @@ func TestMJPEGProxyReconnectsAfterTheUpstreamCloses(t *testing.T) {
 		fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
 		w.Write(jpg)
 		fmt.Fprint(w, "\r\n")
-		// Then hang up, which is what a rebooting camera looks like.
+		// そして切る。再起動中のカメラはこう見える。
 	}))
 	defer upstream.Close()
 
@@ -195,7 +194,7 @@ func TestMJPEGProxyReconnectsAfterTheUpstreamCloses(t *testing.T) {
 		t.Fatalf("NewMJPEGProxy: %v", err)
 	}
 
-	// The first retry waits one second, so two frames means one reconnect.
+	// 最初の再試行は 1 秒待つので、2 枚届いたということは 1 回再接続したということ。
 	got := collect(t, drv, 2, 15*time.Second)
 	if len(got) < 2 {
 		t.Fatalf("got %d frames, want 2 (one per connection)", len(got))
@@ -208,8 +207,8 @@ func TestMJPEGProxyReconnectsAfterTheUpstreamCloses(t *testing.T) {
 	}
 }
 
-// A stream that connects and then goes silent is not the same as a closed
-// one; without a stall timeout the driver would wait forever.
+// 接続した後に黙り込んだストリームは、閉じたストリームとは違う。停滞タイムアウトが
+// 無ければドライバは永遠に待つことになる。
 func TestMJPEGProxyTimesOutOnASilentStream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -270,8 +269,8 @@ func TestMJPEGProxyName(t *testing.T) {
 	}
 }
 
-// A server that answers and refuses us is not going to change its mind on a
-// retry, and Apply has to hear about it while it can still roll back.
+// 応答したうえで拒否してくるサーバが、再試行で気を変えることはない。Apply は
+// まだ巻き戻せるうちにそれを知らされる必要がある。
 func TestMJPEGProxyTreatsAPermanent4xxAsFatal(t *testing.T) {
 	for _, code := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
@@ -303,8 +302,8 @@ func TestMJPEGProxyTreatsAPermanent4xxAsFatal(t *testing.T) {
 	}
 }
 
-// 429 and friends are the server asking us to come back, which is what the
-// reconnect loop already does.
+// 429 とその仲間は「後で来い」とサーバが言っているのであり、それは再接続ループが
+// 既にしていることだ。
 func TestMJPEGProxyKeepsRetryingATransient4xx(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -330,11 +329,9 @@ func TestMJPEGProxyKeepsRetryingATransient4xx(t *testing.T) {
 	<-done
 }
 
-// A camera behind basic auth must not write its password into the log on every
-// reconnect.
+// Basic 認証の内側にあるカメラが、再接続のたびにパスワードをログへ書いてはいけない。
 func TestMJPEGProxyKeepsCredentialsOutOfMessages(t *testing.T) {
-	// Port 1 on loopback refuses immediately, so the connect error is the one
-	// carrying the URL.
+	// ループバックのポート 1 は即座に拒否するので、URL を含むのは接続エラーの方。
 	p, err := NewMJPEGProxy(MJPEGConfig{URL: "http://camera:hunter2@127.0.0.1:1/"}, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("NewMJPEGProxy: %v", err)
@@ -354,9 +351,9 @@ func TestMJPEGProxyKeepsCredentialsOutOfMessages(t *testing.T) {
 	}
 }
 
-// url.Parse accepts "http:///stream"; the transport does not. Catching it here
-// makes it a configuration error the bridge can roll back from, rather than
-// something the reconnect loop retries forever.
+// url.Parse は "http:///stream" を受け入れるが、transport は受け入れない。ここで
+// 捕まえれば、再接続ループが永遠に再試行する何かではなく、ブリッジが巻き戻せる
+// 設定の誤りになる。
 func TestNewMJPEGProxyRejectsAURLWithNoHost(t *testing.T) {
 	for _, raw := range []string{"http:///stream", "http://", "https:///"} {
 		if _, err := NewMJPEGProxy(MJPEGConfig{URL: raw}, discardLogger(), nil); err == nil {
@@ -365,12 +362,12 @@ func TestNewMJPEGProxyRejectsAURLWithNoHost(t *testing.T) {
 	}
 }
 
-// The stall timer must not start until the response is in hand. Started before
-// the request it spends its budget on connecting, so a camera that answers
-// slowly but streams fine gets its body cancelled out from under it.
+// 停滞タイマーは応答を手にするまで開始してはならない。リクエストより前に始めると
+// 持ち時間を接続に使ってしまい、応答は遅いが配信は問題ないカメラが、本体を足元から
+// キャンセルされる。
 func TestMJPEGProxyStallTimerStartsAfterTheResponse(t *testing.T) {
 	jpg := testJPEG(t)
-	// Headers after most of the stall budget, then frames at a normal rate.
+	// 停滞の持ち時間の大半を使ってからヘッダー、その後は通常の間隔でフレーム。
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(400 * time.Millisecond)
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -416,16 +413,16 @@ func TestMJPEGProxyStallTimerStartsAfterTheResponse(t *testing.T) {
 	}
 }
 
-// Bytes arriving is not the same as frames arriving. An upstream that keeps
-// the socket busy with data no parser can use would otherwise hold the session
-// open forever while /healthz reported the source as lost.
+// バイトが届くことと、フレームが届くことは違う。どのパーサーも使えないデータで
+// ソケットを忙しくさせ続ける上流は、そうしなければ、/healthz がソースを失ったと
+// 報告している間もセッションを永遠に開いたままにする。
 func TestMJPEGProxyGivesUpOnDataThatNeverBecomesFrames(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
 		for {
-			// Well-formed enough to keep reading, never a whole image.
+			// 読み続けられる程度には整っているが、画像 1 枚には決してならない。
 			if _, err := io.WriteString(w, "--frame\r\nContent-Type: image/jpeg\r\n"); err != nil {
 				return
 			}
@@ -465,10 +462,10 @@ func TestMJPEGProxyGivesUpOnDataThatNeverBecomesFrames(t *testing.T) {
 	}
 }
 
-// Cancellation is not a failure, and the difference carries: the bridge reads
-// a non-nil error from Run as the source having died under it, and stops
-// counting the settings that produced it as working. A driver that reported
-// its own shutdown as an error would make every pause look like a fault.
+// キャンセルは失敗ではなく、その違いは下流まで効いてくる。ブリッジは Run が返す
+// 非 nil のエラーを「ソースが足元で死んだ」と読み、その設定を動いているものとして
+// 数えるのをやめる。自身の停止をエラーとして報告するドライバがあれば、一時停止の
+// たびにそれが障害に見えることになる。
 func TestMJPEGReturnsNilWhenCancelled(t *testing.T) {
 	upstream := serveMultipart(t, testJPEG(t), "frame", true, 0)
 	defer upstream.Close()
@@ -483,8 +480,8 @@ func TestMJPEGReturnsNilWhenCancelled(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx, frames) }()
 
-	// Cancel once it is streaming, so the stop lands mid-read rather than
-	// before the driver has done anything.
+	// 流れ始めてからキャンセルする。ドライバが何もしないうちではなく、読み取りの
+	// 途中で止まるようにするため。
 	select {
 	case <-frames:
 	case <-time.After(5 * time.Second):

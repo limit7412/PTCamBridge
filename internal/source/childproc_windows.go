@@ -5,8 +5,8 @@ import (
 	"syscall"
 )
 
-// createNoWindow keeps ffmpeg from flashing a console window on a machine
-// where PTCamBridge itself runs without one.
+// createNoWindow は、PTCamBridge 自身がコンソール無しで動いている機械で、ffmpeg が
+// コンソールウィンドウを一瞬表示するのを防ぎます。
 const createNoWindow = 0x08000000
 
 func configureChildProcess(cmd *exec.Cmd) {

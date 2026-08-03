@@ -1,6 +1,6 @@
-// Command ptcambridge bridges a Baballonia-compatible mouth tracking camera to
-// the PaperTracker client, re-serving it as the MJPEG-over-HTTP stream that
-// client expects on loopback.
+// Command ptcambridge は、Baballonia 互換の口トラッキングカメラを PaperTracker
+// クライアントへ橋渡しし、そのクライアントがループバック上で期待する
+// MJPEG-over-HTTP ストリームとして配信し直します。
 package main
 
 import (
@@ -36,12 +36,12 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/tray"
 )
 
-// Version is stamped at build time with -ldflags "-X main.Version=...".
+// Version はビルド時に -ldflags "-X main.Version=..." で埋め込まれます。
 var Version = "dev"
 
 func main() {
-	// A -H=windowsgui build has no streams of its own; borrow the launching
-	// terminal's so the command line flags can still print.
+	// -H=windowsgui のビルドは自前のストリームを持たない。コマンドラインフラグの
+	// 出力を出せるよう、起動元の端末のものを借りる。
 	console.Attach()
 
 	if err := run(); err != nil {
@@ -50,8 +50,8 @@ func main() {
 	}
 }
 
-// options are the command line flags, which sit above the environment and the
-// settings file in the precedence order.
+// options はコマンドラインフラグです。優先順位では環境変数と設定ファイルの上に
+// 位置します。
 type options struct {
 	configPath   string
 	listen       string
@@ -98,8 +98,8 @@ func run() error {
 	}
 	switch {
 	case opts.autostartOn:
-		// The -config the user gave here is registered alongside the
-		// executable, so the next sign-in starts on the same settings file.
+		// ここでユーザーが渡した -config を実行ファイルと一緒に登録するので、
+		// 次のサインインは同じ設定ファイルで始まる。
 		return autostart.Enable(opts.configPath)
 	case opts.autostartNo:
 		return autostart.Disable()
@@ -108,9 +108,8 @@ func run() error {
 		return listDevices(opts)
 	}
 	if opts.restoreCache {
-		// Separate from turning write_cache off, because uninstalling is the
-		// case where the settings file is about to be deleted too and there
-		// will never be another start to notice the change.
+		// write_cache を切る操作とは分けてある。アンインストールは設定ファイルも
+		// 一緒に消える場面であり、その変更に気づく次の起動が二度と来ないから。
 		return restoreCache(opts)
 	}
 
@@ -118,9 +117,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// The layers are separated here rather than inside Load, because saving
-	// has to start from the file alone: an environment variable or a flag is
-	// for this run, and writing it back would make it permanent.
+	// 層を分けるのは Load の中ではなくここ。保存はファイルだけを土台にしなければ
+	// ならないから。環境変数やフラグはこの実行のためのものであり、書き戻せば
+	// 恒久的なものになってしまう。
 	fileCfg, err := config.LoadFile(cfgPath)
 	if err != nil {
 		return err
@@ -144,8 +143,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Binding first doubles as the single-instance guard: the listen port is
-	// this application's identity, so a second copy cannot take it.
+	// 先に bind することが単一起動の番人も兼ねる。listen ポートはこの
+	// アプリケーションの身元であり、2 つ目の実体はそれを取れない。
 	listener, err := server.Listen(cfg.Server.Listen)
 	if err != nil {
 		return describeBindFailure(cfg.Server.Listen, err)
@@ -166,26 +165,26 @@ func run() error {
 	}
 
 	frames := hub.New()
-	// The tracker names the failures the tray should translate; which ones
-	// those are is the drivers' business, so the answer comes from there.
+	// tracker はトレイが翻訳すべき失敗に名前を付ける。どれがそれに当たるかは
+	// ドライバの領分なので、答えはそちらから来る。
 	tracker := status.New(status.WithErrorKeys(source.ErrorKey))
 	app := bridge.New(cfg, cfgPath, frames, tracker, log)
-	// Saving starts from what the file said, not from the effective settings:
-	// a -device or a PTCAMBRIDGE_* is for this run, and must not be written
-	// back the first time the tray changes something unrelated. fileCfg has
-	// had neither layer applied.
+	// 保存の起点は実効設定ではなくファイルが述べていた内容。-device や
+	// PTCAMBRIDGE_* はこの実行のためのものであり、トレイが無関係な何かを変えた
+	// 最初の瞬間に書き戻されてはいけない。fileCfg にはどちらの層も適用していない。
 	app.SetPersistBase(fileCfg)
 
 	admin := cfg.IsLoopback()
 	if !admin {
-		// The management API can change the source and rewrite settings, and
-		// it has no authentication. Off the loopback it is not offered.
+		// 管理 API はソースを変更し設定を書き換えられるが、認証は無い。ループ
+		// バックを離れたら提供しない。
 		log.Warn("listening off loopback, the management API is disabled", "address", address)
 	}
-	// PTCamBridge does not ship ffmpeg -- see internal/ffmpegfetch for why --
-	// so on the platform where a build is published it can fetch one when the
-	// user asks. Nowhere else: elsewhere ffmpeg is a package manager away, and
-	// offering a Windows binary would be worse than saying nothing.
+	// PTCamBridge は ffmpeg を同梱していない — 理由は internal/ffmpegfetch を
+	// 参照 — ので、ビルドが公開されているプラットフォームでは、ユーザーが求めた
+	// ときに取得できる。それ以外では提供しない。他の環境では ffmpeg はパッケージ
+	// マネージャ 1 つで手に入るし、Windows のバイナリを勧めるのは何も言わないより
+	// 悪い。
 	var fetcher *ffmpegfetch.Manager
 	if ffmpegfetch.Supported() {
 		fetcher = ffmpegfetch.New(ffmpegfetch.Options{Lifetime: ctx, Log: log})
@@ -204,55 +203,52 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// The stream settings exist to match whatever the PaperTracker client
-	// currently parses, so a change to them has to reach the server without
-	// going through a restart.
+	// ストリーム設定は、今の PaperTracker クライアントが解析するものに合わせる
+	// ために存在するので、その変更は再起動を経ずにサーバまで届かなければならない。
 	app.SetStreamConfigurator(srv)
 
 	switch {
 	case cfg.PaperTracker.WriteCache:
 		if err := papertracker.WriteCache(cfg.PaperTracker.InstallDir, connectAddress(address)); err != nil {
-			// The bridge still works; the user just has to point the client at
-			// it by hand.
+			// ブリッジ自体は動く。ユーザーが手でクライアントをこちらへ向ければ
+			// よいだけ。
 			log.Error("could not update the PaperTracker address cache", "error", err)
 		} else {
 			log.Info("PaperTracker address cache updated", "dir", cfg.PaperTracker.InstallDir, "address", address)
-			// Noted so it can be undone later even if the setting naming it is
-			// gone by then, which is what going back to the defaults looks like.
+			// 後から取り消せるよう書き留めておく。その頃にはそれを指す設定が
+			// 消えているかもしれない。既定へ戻すというのは、そういう姿をしている。
 			if err := rememberWrittenDir(cfg.PaperTracker.InstallDir); err != nil {
 				log.Warn("could not record which folder was changed, so restoring may not find it", "error", err)
 			}
 		}
 
 	default:
-		// Turning write_cache off has to undo what turning it on did.
-		// Otherwise the client keeps its cached loopback address and, once the
-		// bridge is gone, connects to nothing at all -- a setting the user
-		// switched off would still be in force with no way to lift it.
+		// write_cache を切ることは、入れたときにしたことを取り消すことでなければ
+		// ならない。さもないとクライアントはキャッシュしたループバックアドレスを
+		// 持ち続け、ブリッジが居なくなった後は何にも繋がらなくなる。ユーザーが
+		// 切ったはずの設定が、持ち上げる手段の無いまま効き続けることになる。
 		//
-		// The folder is searched for when the settings no longer name one.
-		// Going back to the defaults usually means deleting the whole
-		// [papertracker] section, which clears install_dir along with
-		// write_cache -- and that is exactly when the backup still needs
-		// putting back.
+		// 設定がフォルダを指さなくなっている場合は探索する。既定へ戻すというのは
+		// たいてい [papertracker] セクションを丸ごと削除することであり、それは
+		// write_cache と一緒に install_dir も消す。そしてまさにそのとき、
+		// バックアップを戻す必要が残っている。
 		restoreCacheQuietly(log, cfg.PaperTracker.InstallDir)
 	}
 
 	if err := app.Start(ctx); err != nil {
 		log.Error("could not start the configured source", "error", err)
-		// Keep serving anyway: the user can pick a working source from the
-		// tray or the API without restarting.
+		// それでも配信は続ける。ユーザーは再起動せずに、トレイか API から動く
+		// ソースを選べる。
 	}
 	defer app.Stop()
 
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- srv.Serve(ctx, listener)
-		// A listener that dies takes the stream endpoint with it. Cancelling
-		// brings the tray or the headless wait down too, so the process exits
-		// and a supervisor can restart it, rather than staying up looking
-		// healthy while serving nothing. The error is still buffered for the
-		// shutdown wait below to report.
+		// listener が死ねばストリームのエンドポイントも道連れになる。キャンセル
+		// すればトレイやヘッドレスの待機も落ちるので、プロセスは終了し監視側が
+		// 再起動できる。何も配信していないのに健全そうな顔で居座り続けるよりよい。
+		// エラーは、下の停止待ちが報告できるようバッファしてある。
 		stop()
 	}()
 
@@ -261,8 +257,8 @@ func run() error {
 		log.Info("running headless", "address", address)
 		<-ctx.Done()
 	} else {
-		// The tray owns the main goroutine from here: it runs a native
-		// message loop that is bound to this thread.
+		// ここから main の goroutine はトレイのもの。トレイはこのスレッドに
+		// 結び付いたネイティブのメッセージループを走らせる。
 		tray.Run(ctx, tray.Options{
 			Controller: app,
 			Hub:        frames,
@@ -288,10 +284,9 @@ func run() error {
 		log.Warn("the HTTP server did not shut down in time")
 	}
 
-	// Quitting during a download cancels the transfer, but the goroutine still
-	// has to delete the part-downloaded archive. Returning without waiting for
-	// that leaves a hundred-odd megabytes in the settings folder, and nothing
-	// left running to clean it up.
+	// ダウンロード中の終了は転送をキャンセルするが、goroutine には途中まで
+	// 落としたアーカイブを削除する仕事が残っている。それを待たずに返ると、設定
+	// フォルダに 100 メガバイト強が残り、それを片付けるものは何も動いていない。
 	if fetcher != nil {
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
 		fetcher.Wait(waitCtx)
@@ -302,12 +297,13 @@ func run() error {
 	return nil
 }
 
-// ffmpegOption and trayFFmpeg hand the fetcher over, or nothing at all.
+// ffmpegOption と trayFFmpeg は、fetcher を渡すか、まったく何も渡さないかの
+// どちらかにします。
 //
-// Assigning an absent one straight into the interface field would not be
-// nothing: an interface holding a nil pointer is itself non-nil, so the
-// endpoint would be routed and the menu entry shown, both of them calling
-// through a pointer that is not there.
+// 存在しないものをそのままインターフェースのフィールドへ代入することは「何も渡さない」
+// ことにはなりません。nil ポインタを保持したインターフェースはそれ自体が非 nil なので、
+// エンドポイントは経路に載り、メニュー項目も表示され、そのどちらもが存在しない
+// ポインタを通して呼び出すことになります。
 func ffmpegOption(m *ffmpegfetch.Manager) server.FFmpegFetcher {
 	if m == nil {
 		return nil
@@ -322,7 +318,7 @@ func trayFFmpeg(m *ffmpegfetch.Manager) tray.FFmpegFetcher {
 	return m
 }
 
-// resolveConfigPath falls back to the per-user location when no path is given.
+// resolveConfigPath は、パスが与えられていなければユーザーごとの場所を使います。
 func resolveConfigPath(override string) (string, error) {
 	if override != "" {
 		return override, nil
@@ -330,7 +326,7 @@ func resolveConfigPath(override string) (string, error) {
 	return config.Path()
 }
 
-// applyFlags overlays the command line, which outranks everything else.
+// applyFlags はコマンドラインを重ねます。これは他のすべてに優先します。
 func applyFlags(cfg *config.Config, o options) {
 	if o.listen != "" {
 		cfg.Server.Listen = o.listen
@@ -355,20 +351,20 @@ func applyFlags(cfg *config.Config, o options) {
 func setupLogging(cfg config.Config, console bool) (*slog.Logger, io.Closer, error) {
 	dir, err := cfg.LogDir()
 	if err != nil {
-		// Console-only logging beats none, but it only counts as logging if
-		// the console is actually switched on: a tray launch does not pass
-		// -console, and without this every later error goes to io.Discard.
+		// コンソールだけのログでも無いよりましだが、それがログとして数えられるのは
+		// コンソールが実際に有効なときだけ。トレイからの起動は -console を渡さない
+		// ので、これが無いと以降のエラーはすべて io.Discard へ流れる。
 		fmt.Fprintln(os.Stderr, "ptcambridge: logging to the console only:", err)
 		dir, console = "", true
 	}
 	return logging.Setup(logging.Options{Dir: dir, Level: cfg.Log.Level, Console: console})
 }
 
-// connectAddress turns a listen address into one the client can dial.
+// connectAddress は、listen アドレスをクライアントが接続できるアドレスに変えます。
 //
-// A wildcard bind resolves to something like "[::]:18080", which is a valid
-// thing to listen on and a useless thing to connect to. The client runs on
-// this machine, so loopback is the address it wants.
+// ワイルドカードの bind は "[::]:18080" のような形に解決されます。listen する対象
+// としては妥当で、接続先としては役に立ちません。クライアントはこの機械の上で
+// 動くので、欲しいのはループバックのアドレスです。
 func connectAddress(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -380,8 +376,8 @@ func connectAddress(addr string) string {
 	return addr
 }
 
-// describeBindFailure turns "address already in use" into an answer to the
-// question the user actually has: is PTCamBridge already running?
+// describeBindFailure は "address already in use" を、ユーザーが実際に抱いている
+// 問い — PTCamBridge はもう動いているのか — への答えに変えます。
 func describeBindFailure(addr string, err error) error {
 	if !errors.Is(err, syscall.EADDRINUSE) && !isAddrInUse(err) {
 		return fmt.Errorf("listen on %s: %w", addr, err)
@@ -392,7 +388,8 @@ func describeBindFailure(addr string, err error) error {
 	return fmt.Errorf("%s is already in use by another program; set server.listen to a free port", addr)
 }
 
-// probeExistingInstance asks whoever holds the port whether they are us.
+// probeExistingInstance は、そのポートを握っている相手に、それが自分たちかどうかを
+// 尋ねます。
 func probeExistingInstance(addr string) (bool, string) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://" + addr + "/stats")
@@ -412,16 +409,14 @@ func listDevices(opts options) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// The settings are read here too: an installation that points at ffmpeg
-	// with source.uvc.ffmpeg_path rather than bundling it would otherwise get
-	// an empty list from a command whose whole job is to find the camera.
+	// ここでも設定を読む。ffmpeg を同梱せず source.uvc.ffmpeg_path で指している
+	// インストールは、そうしなければ、カメラを見つけることだけが仕事のコマンドから
+	// 空のリストを受け取ることになる。
 	//
-	// The language is resolved separately from that read, and before it. The
-	// messages most in need of the user's own language are the ones about the
-	// settings being unusable, and those are exactly the ones a language taken
-	// from the settings cannot reach: the load has already failed. An empty
-	// path is not a special case -- it finds no file and falls through to the
-	// variable or the system.
+	// 言語はその読み取りとは別に、しかも先に解決する。ユーザー自身の言語を最も
+	// 必要とするメッセージは「設定が使えない」という類のものであり、それはまさに、
+	// 設定から取った言語では届かないものだ。読み込みは既に失敗している。空のパスは
+	// 特別扱いしない。ファイルが見つからないだけで、環境変数かシステムへ落ちる。
 	cfgPath, pathErr := resolveConfigPath(opts.configPath)
 	p := i18n.NewPrinter(config.LanguageWithoutLoading(cfgPath, os.Getenv))
 
@@ -471,8 +466,7 @@ func listDevices(opts options) error {
 	return nil
 }
 
-// isAddrInUse covers the Windows spelling of the error, which does not map
-// onto the POSIX constant.
+// isAddrInUse は、POSIX の定数に対応しない Windows 側のエラー表現も拾います。
 func isAddrInUse(err error) bool {
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) {
@@ -487,19 +481,19 @@ func isAddrInUse(err error) bool {
 	return errors.Is(sysErr.Err, syscall.EADDRINUSE) || errors.Is(sysErr.Err, wsaEAddrInUse)
 }
 
-// decodeJSON is a small wrapper so the probe does not need the encoding/json
-// import at the top of an otherwise wiring-only file.
+// decodeJSON は小さな包みです。組み立てだけのこのファイルの先頭に、probe のために
+// encoding/json の import を持ち込まずに済ませます。
 func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(io.LimitReader(r, 1<<20)).Decode(v)
 }
 
-// restoreCacheQuietly puts the client's address back if the bridge ever
-// changed it, saying nothing when there is nothing to undo.
+// restoreCacheQuietly は、ブリッジが変更したことがあればクライアントのアドレスを
+// 戻し、取り消すものが無ければ何も言いません。
 //
-// This runs on every start with write_cache off, so "no backup here" and "no
-// PaperTracker here" are ordinary answers rather than failures: they describe
-// a machine the bridge has not touched, and logging them as errors would cry
-// wolf on every boot.
+// これは write_cache が切られていれば起動のたびに走るので、「ここにバックアップは
+// 無い」「ここに PaperTracker は無い」は失敗ではなく普通の答えです。それらは
+// ブリッジが触れていない機械を描写しているだけであり、エラーとして記録すれば
+// 起動のたびに狼が来たと叫ぶことになります。
 func restoreCacheQuietly(log *slog.Logger, installDir string) {
 	restored, err := restoreEverywhereItWas(installDir)
 	for _, dir := range restored {
@@ -510,26 +504,27 @@ func restoreCacheQuietly(log *slog.Logger, installDir string) {
 	}
 }
 
-// restoreEverywhereItWas puts back every client the bridge changed, and returns
-// the folders it restored. Finding nothing to do is not an error and shows up
-// as an empty list.
+// restoreEverywhereItWas は、ブリッジが変更したクライアントをすべて元に戻し、
+// 復元したフォルダを返します。することが無いのはエラーではなく、空のリストとして
+// 現れます。
 //
-// Every folder, not the first one: install_dir can be changed while
-// write_cache is on -- the client is reinstalled or moved -- and the bridge
-// then leaves a record in the old folder as well as the new one. Stopping at
-// the first success is what leaves the other copy of the client pointing at a
-// bridge that is no longer running, with nothing left to notice it.
+// 最初の 1 つではなくすべてのフォルダが対象です。write_cache が有効なまま
+// install_dir は変わり得ます — クライアントが再インストールされたり移動されたり —
+// そしてブリッジは、新しいフォルダと同様に古いフォルダにも記録を残します。最初の
+// 成功で止めることが、もう一方のクライアントを、もう動いていないブリッジを指した
+// まま、それに気づくものも無いまま残すことになります。
 //
-// The search asks which folders hold the bridge's own record, not which ones
-// hold a client, so it cannot touch an installation the bridge never changed.
+// 探索が問うのは「どのフォルダにクライアントがあるか」ではなく「どのフォルダに
+// ブリッジ自身の記録があるか」なので、ブリッジが一度も変更していないインストールに
+// 触れることはありません。
 func restoreEverywhereItWas(installDir string) ([]string, error) {
 	found, err := papertracker.FindRestoreDirs()
 	if err != nil {
 		return nil, err
 	}
 
-	// The folder the settings name goes first and is tried even when the search
-	// did not turn it up, so an installation somewhere unusual is still undone.
+	// 設定が指すフォルダを先に置き、探索が見つけられなかった場合も試す。珍しい
+	// 場所にあるインストールも取り消されるようにするため。
 	var dirs []string
 	add := func(dir string) {
 		if dir != "" && !slices.Contains(dirs, dir) {
@@ -537,9 +532,9 @@ func restoreEverywhereItWas(installDir string) ([]string, error) {
 		}
 	}
 	add(installDir)
-	// The bridge's own note of where it has written covers the folder that no
-	// setting names any more: install_dir pointed somewhere unusual and has
-	// since been cleared, which is exactly what returning to the defaults does.
+	// どこへ書いたかについてのブリッジ自身の覚書が、もうどの設定も指していない
+	// フォルダを覆う。install_dir が珍しい場所を指していて、その後消された場合で
+	// あり、既定へ戻すというのはまさにそれをすることだから。
 	remembered, rememberErr := rememberedWrittenDirs()
 	for _, dir := range remembered {
 		add(dir)
@@ -549,16 +544,16 @@ func restoreEverywhereItWas(installDir string) ([]string, error) {
 	}
 
 	var restored []string
-	// A note that could not be read is reported, not swallowed: it may have
-	// held the only mention of a folder the search cannot reach.
+	// 読めなかった覚書は飲み込まず報告する。探索の届かないフォルダについての、
+	// 唯一の言及を持っていたかもしれないから。
 	errs := []error{rememberErr}
 	for _, dir := range dirs {
 		switch err := papertracker.RestoreCache(dir); {
 		case err == nil:
 			restored = append(restored, dir)
 		case errors.Is(err, papertracker.ErrNoBackup):
-			// Nothing here to undo, which is the ordinary answer for the folder
-			// the settings name on a machine the bridge wrote to elsewhere.
+			// ここに取り消すものは無い。ブリッジが別の場所に書いた機械において、
+			// 設定が指すフォルダについての普通の答え。
 		default:
 			errs = append(errs, err)
 		}
@@ -566,8 +561,8 @@ func restoreEverywhereItWas(installDir string) ([]string, error) {
 	return restored, errors.Join(errs...)
 }
 
-// rememberWrittenDir records a folder the bridge has pointed at itself, beside
-// the bridge's own settings.
+// rememberWrittenDir は、ブリッジが自分へ向けたフォルダを、ブリッジ自身の設定の
+// 隣に記録します。
 func rememberWrittenDir(installDir string) error {
 	dir, err := config.Dir()
 	if err != nil {
@@ -576,11 +571,11 @@ func rememberWrittenDir(installDir string) error {
 	return papertracker.RememberWrittenDir(dir, installDir)
 }
 
-// rememberedWrittenDirs reads that record back.
+// rememberedWrittenDirs はその記録を読み返します。
 //
-// It lives with the bridge's settings, so deleting those by hand loses it --
-// and with it the only way to find an installation the search does not cover.
-// Running -restore-cache before removing the folder is what the flag is for.
+// これはブリッジの設定と一緒に置かれているので、それを手で削除すれば失われます。
+// そして、探索が覆わないインストールを見つける唯一の手段も一緒に失われます。
+// フォルダを消す前に -restore-cache を走らせること。このフラグはそのためにあります。
 func rememberedWrittenDirs() ([]string, error) {
 	dir, err := config.Dir()
 	if err != nil {
@@ -589,17 +584,16 @@ func rememberedWrittenDirs() ([]string, error) {
 	return papertracker.WrittenDirs(dir)
 }
 
-// restoreCache puts the PaperTracker client back on the address it had before
-// the bridge first wrote to its cache.
+// restoreCache は、ブリッジが初めてキャッシュに書き込む前のアドレスへ
+// PaperTracker クライアントを戻します。
 //
-// This exists for uninstalling. Turning write_cache off restores it on the
-// next start, but someone removing PTCamBridge deletes the settings file and
-// the executable together, and there is no next start to notice.
+// これはアンインストールのためにあります。write_cache を切れば次の起動で復元
+// されますが、PTCamBridge を撤去する人は設定ファイルと実行ファイルを一緒に消すので、
+// それに気づく次の起動が存在しません。
 func restoreCache(opts options) error {
-	// Read without the ordinary Load, which writes a default settings file when
-	// there is none. This command is what somebody runs while uninstalling, so
-	// putting the settings folder back on a machine they are clearing is the
-	// one thing it must not do.
+	// 通常の Load を使わずに読む。あちらは設定ファイルが無ければ既定のものを書く。
+	// このコマンドはアンインストールの最中に走らせるものなので、片付けている機械に
+	// 設定フォルダを戻すことこそ、決してやってはいけない唯一のこと。
 	cfgPath, _ := resolveConfigPath(opts.configPath)
 	p := i18n.NewPrinter(config.LanguageWithoutLoading(cfgPath, os.Getenv))
 
@@ -611,34 +605,33 @@ func restoreCache(opts options) error {
 		return err
 	}
 	if len(restored) == 0 {
-		// The search covers every usual folder, so this says the bridge has not
-		// written to any of them.
+		// 探索はよくあるフォルダをすべて覆うので、これはブリッジがそのどれにも
+		// 書いていないということを述べている。
 		fmt.Println(p.S(i18n.CLINothingToRestore))
 		fmt.Println(p.S(i18n.CLIRestoreHint))
 	}
 	return nil
 }
 
-// configuredInstallDir is the folder the settings name, or empty when there is
-// nothing to read. Restoring falls back to searching, so the flag still works
-// once the settings file has been deleted, which is the situation it is for.
+// configuredInstallDir は設定が指すフォルダで、読むものが無ければ空です。復元は
+// 探索に落ちるので、設定ファイルが削除された後でもこのフラグは機能します。それが
+// 想定している状況そのものです。
 //
-// The file is only read if it is already there. config.Load writes a default
-// one when it is not, and creates %APPDATA%\PTCamBridge to hold it -- so the
-// command meant to be run while uninstalling would put back the folder the
-// user was in the middle of removing.
-// Only that one setting is read, and it is read without validating anything
-// else. A file the bridge would refuse to start on -- a misspelled key, a
-// baud rate out of range, an environment variable that does not parse -- still
-// names the folder perfectly well, and refusing to look would send someone
-// uninstalling PTCamBridge away with "nothing was changed" while their client
-// still points at it.
+// ファイルは、既に存在する場合にのみ読みます。config.Load は無ければ既定のものを
+// 書き、それを収める %APPDATA%\PTCamBridge を作ります。つまりアンインストール中に
+// 走らせるはずのコマンドが、ユーザーが取り除いている最中のフォルダを戻すことに
+// なります。
+// 読むのはその 1 つの設定だけで、他は何も検証しません。ブリッジが起動を拒否する
+// ファイル — 綴りを誤ったキー、範囲外のボーレート、解釈できない環境変数 — でも、
+// フォルダは何の問題もなく書かれています。見ることを拒めば、PTCamBridge を
+// アンインストールしている人は、クライアントがまだそれを指したまま「何も変更されて
+// いない」と告げられて帰されることになります。
 func configuredInstallDir(opts options) string {
-	// The environment outranks the file here as it does everywhere else. A
-	// folder named only by PTCAMBRIDGE_PAPERTRACKER_DIR is one the bridge has
-	// been writing to, and it is very likely not among the usual places the
-	// search covers -- so ignoring the variable would mean saying "nothing was
-	// changed" about the one client that was.
+	// 他のどこでもそうであるように、ここでも環境変数がファイルに優先する。
+	// PTCAMBRIDGE_PAPERTRACKER_DIR だけで指定されたフォルダは、ブリッジが書き込んで
+	// きたフォルダであり、探索が覆うよくある場所には含まれていない可能性が非常に
+	// 高い。この変数を無視することは、実際に変更された唯一のクライアントについて
+	// 「何も変更されていない」と言うことを意味する。
 	if dir := strings.TrimSpace(os.Getenv(config.EnvInstallDir)); dir != "" {
 		return dir
 	}
@@ -651,9 +644,8 @@ func configuredInstallDir(opts options) string {
 	}
 	dir, err := config.InstallDirFromFile(cfgPath)
 	if err != nil {
-		// Said out loud rather than swallowed: the search below still runs, and
-		// it covers the usual folders, but not one named only in a file that
-		// cannot be read.
+		// 飲み込まずはっきり言う。下の探索は引き続き走り、よくあるフォルダは
+		// 覆うが、読めないファイルの中だけで指定されたフォルダは覆わない。
 		fmt.Fprintln(os.Stderr, "ptcambridge:", err)
 		return ""
 	}

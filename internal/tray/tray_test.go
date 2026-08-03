@@ -19,8 +19,8 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// clickSources builds one unblocked click channel per source type, the shape
-// systray hands over.
+// clickSources は、ソース種別ごとに非バッファのクリックチャネルを 1 本ずつ作る。
+// systray が渡してくるのと同じ形。
 func clickSources(extra ...string) (map[string]chan struct{}, map[string]<-chan struct{}) {
 	send := map[string]chan struct{}{}
 	watch := map[string]<-chan struct{}{}
@@ -37,11 +37,10 @@ func clickSources(extra ...string) (map[string]chan struct{}, map[string]<-chan 
 	return send, watch
 }
 
-// Each entry has its own channel, so nothing about them carries an order on
-// its own. Receiving them in one place is what supplies it: with a goroutine
-// per entry, two clicks are taken independently and then race to forward, and
-// picking UVC and then MJPEG could arrive the other way round -- leaving the
-// bridge on the source the user chose first.
+// 各項目はそれぞれのチャネルを持つので、それら自体は順序を運ばない。順序を与えるのは
+// 1 箇所で受け取ること。項目ごとに goroutine を立てると、2 つのクリックは独立に
+// 取られてから転送を競い、UVC を選んでから MJPEG を選んだつもりが逆順で届き得る。
+// ブリッジはユーザーが最初に選んだソースに残ることになる。
 func TestSourceClicksArriveInTheOrderTheyWereClicked(t *testing.T) {
 	want := []string{config.SourceUVC, config.SourceMJPEG, config.SourceSerial, config.SourceMJPEG}
 
@@ -52,8 +51,8 @@ func TestSourceClicksArriveInTheOrderTheyWereClicked(t *testing.T) {
 	defer cancel()
 	go watchClicks(ctx, discardLogger(), watch, out)
 
-	// The channels are unblocked, so each send returns only once the watcher
-	// has taken it. That is the same handover systray does.
+	// チャネルは非バッファなので、各送信は監視側が受け取って初めて返る。systray が
+	// 行う受け渡しと同じ。
 	for _, kind := range want {
 		select {
 		case send[kind] <- struct{}{}:
@@ -74,12 +73,12 @@ func TestSourceClicksArriveInTheOrderTheyWereClicked(t *testing.T) {
 	}
 }
 
-// systray sends with a select and a default: a click only lands if a receiver
-// is parked on that channel right then. So the watcher has to be back waiting
-// straight away, which means it must never block handing a click on.
+// systray は select と default で送る。クリックが届くのは、ちょうどそのチャネルで
+// 受信側が待っている場合だけ。だから監視側はすぐ待機へ戻らなければならず、それは
+// クリックを渡すときに決してブロックしてはならないということ。
 func TestSourceClickWatcherKeepsListeningWhenNobodyDrains(t *testing.T) {
 	send, watch := clickSources()
-	// Depth 1, then left full on purpose.
+	// 深さ 1 にして、意図的に埋まったままにしておく。
 	out := make(chan string, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -114,11 +113,11 @@ func TestSourceClickWatcherStopsWithTheContext(t *testing.T) {
 	}
 }
 
-// Pause and the source entries share one ordered input, not a case each in the
-// event loop. Go picks among ready select cases at random, so a case each
-// would let a pause overtake the source click before it -- and since a source
-// cannot be changed while paused, that pauses the old source instead of the
-// new one the user had just chosen.
+// 一時停止とソースの各項目は、イベントループの case を分けるのではなく、順序の
+// ある 1 本の入力を共有する。Go は準備完了の select case からランダムに選ぶので、
+// case を分けると一時停止がその前のソースクリックを追い越し得る。そして一時停止中は
+// ソースを変更できないので、ユーザーが今選んだ新しいソースではなく、古いソースが
+// 一時停止される。
 func TestPauseAndSourceClicksShareOneOrder(t *testing.T) {
 	want := []string{config.SourceMJPEG, actionPause, config.SourceUVC, actionPause}
 
@@ -149,8 +148,8 @@ func TestPauseAndSourceClicksShareOneOrder(t *testing.T) {
 	}
 }
 
-// The pause key shares a namespace with the source type names, so it has to
-// stay distinct from all of them.
+// 一時停止のキーはソース種別の名前と名前空間を共有するので、そのすべてと区別され
+// 続けなければならない。
 func TestPauseActionDoesNotCollideWithASourceType(t *testing.T) {
 	for _, choice := range sourceChoices {
 		if choice.kind == actionPause {
@@ -159,12 +158,12 @@ func TestPauseActionDoesNotCollideWithASourceType(t *testing.T) {
 	}
 }
 
-// A full queue drops the action, and has to say so. A caller tracking what it
-// has asked for -- the pause toggle does -- must not count a request that was
-// never made, or its next click asks for the state the bridge is already in
-// and the button looks broken.
+// キューが一杯なら操作は捨てられ、そのことを伝えなければならない。自分が何を
+// 要求したかを追っている呼び出し側 — 一時停止の切り替えがそう — が、実際には行われ
+// なかった要求を数えてはいけない。さもないと次のクリックがブリッジの既にある状態を
+// 要求し、ボタンが壊れているように見える。
 func TestCommandQueueReportsWhetherAnActionWasTaken(t *testing.T) {
-	// Nothing runs until the worker is released, so the queue fills up.
+	// ワーカーを解放するまで何も走らないので、キューが埋まる。
 	const depth = 2
 	running := make(chan struct{})
 	release := make(chan struct{})
@@ -174,9 +173,9 @@ func TestCommandQueueReportsWhetherAnActionWasTaken(t *testing.T) {
 	if !q.submit("first", func() { close(running); <-release }) {
 		t.Fatal("the first action was refused by an empty queue")
 	}
-	// Waiting for the worker to be inside the first action is what makes the
-	// count below exact: until then it may or may not have taken it off the
-	// queue, and a slot freed in between would leave room for one more.
+	// 下の数え上げが正確になるのは、ワーカーが最初の操作の中に入るのを待つから。
+	// それまではキューから取り出しているかどうか分からず、その間に空いた枠が
+	// もう 1 つ分の余地を残してしまう。
 	<-running
 
 	for i := 0; i < depth; i++ {
@@ -189,7 +188,7 @@ func TestCommandQueueReportsWhetherAnActionWasTaken(t *testing.T) {
 	}
 }
 
-// The queue exists to put the actions in one order and keep them there.
+// キューは、操作を 1 つの順序に並べ、そのまま保つために存在する。
 func TestCommandQueueRunsActionsInOrder(t *testing.T) {
 	done := make(chan string, 3)
 	q := newCommandQueue(discardLogger(), commandQueueDepth)
@@ -213,8 +212,8 @@ func TestCommandQueueRunsActionsInOrder(t *testing.T) {
 	}
 }
 
-// The prompt is what stands between a click and a third party's binary landing
-// on the user's machine, so it has to say who, how big and under what licence.
+// この確認は、クリックと「第三者のバイナリがユーザーの機械に落ちてくること」の間に
+// 立つものなので、誰が、どれくらいの大きさで、どのライセンスかを述べなければならない。
 func TestFFmpegPromptNamesWhatIsBeingDownloaded(t *testing.T) {
 	build := ffmpegfetch.Build{
 		URL:       "https://example.invalid/ffmpeg-lgpl.zip",
@@ -242,8 +241,8 @@ func TestFFmpegStatusLineFollowsTheDownload(t *testing.T) {
 		{"in flight, size unknown", ffmpegfetch.State{Downloading: true}, "Downloading ffmpeg..."},
 		{"done", ffmpegfetch.State{Installed: true}, "ffmpeg is installed"},
 		{"failed", ffmpegfetch.State{LastError: "digest mismatch"}, "Get ffmpeg (last attempt failed)"},
-		// A download that is running says so even if an earlier one failed:
-		// the entry describes what is happening now.
+		// 実行中のダウンロードは、以前のものが失敗していてもそう述べる。この項目が
+		// 描写するのは今起きていることだから。
 		{"retrying", ffmpegfetch.State{Downloading: true, LastError: "digest mismatch"}, "Downloading ffmpeg..."},
 	}
 	for _, tc := range cases {
@@ -255,9 +254,8 @@ func TestFFmpegStatusLineFollowsTheDownload(t *testing.T) {
 	}
 }
 
-// The status line is the one piece of text a user reads all day, so it is
-// rendered in their language -- including the words around the source name,
-// which is itself a protocol identifier and stays as it is.
+// 状態表示は、ユーザーが一日中読む唯一のテキストなので、その言語で組み立てる。
+// ソース名を囲む語も含めて。ソース名自体はプロトコルの識別子なので、そのまま残る。
 func TestStatusLineIsTranslated(t *testing.T) {
 	jp := i18n.NewPrinter(i18n.Japanese)
 	en := i18n.NewPrinter(i18n.English)
@@ -277,9 +275,9 @@ func TestStatusLineIsTranslated(t *testing.T) {
 	}
 }
 
-// A failure the tracker recognised is shown in the user's language. One it did
-// not is shown as the driver wrote it: those messages carry the detail that
-// makes them useful, and the log has the same words.
+// tracker が認識した失敗はユーザーの言語で見せる。認識しなかったものはドライバが
+// 書いたまま見せる。それらのメッセージは、それを有用にしている詳細を運んでいるし、
+// ログにも同じ言葉がある。
 func TestStatusLineTranslatesOnlyTheRecognisedFailures(t *testing.T) {
 	jp := i18n.NewPrinter(i18n.Japanese)
 
@@ -303,8 +301,7 @@ func TestStatusLineTranslatesOnlyTheRecognisedFailures(t *testing.T) {
 	}
 }
 
-// The reconnecting line has to stay short enough to be a menu entry, whichever
-// language it is in.
+// 再接続中の行は、どの言語であってもメニュー項目に収まる短さでなければならない。
 func TestStatusLineTruncatesTheReason(t *testing.T) {
 	long := status.Snapshot{Source: "serial", LastError: strings.Repeat("x", 200)}
 	got := statusLine(i18n.NewPrinter(i18n.Japanese), long, false, 0, 0)
@@ -313,9 +310,8 @@ func TestStatusLineTruncatesTheReason(t *testing.T) {
 	}
 }
 
-// Japanese reasons run well past sixty bytes, and cutting there lands inside a
-// character: what reaches the tray is invalid UTF-8, which draws as a
-// replacement glyph rather than a shortened sentence.
+// 日本語の理由は 60 バイトを大きく超え、そこで切ると文字の内側に落ちる。トレイに
+// 届くのは不正な UTF-8 であり、短くなった文ではなく置換文字として描かれる。
 func TestTruncateCutsOnCharacterBoundaries(t *testing.T) {
 	long := strings.Repeat("あ", 100)
 	got := truncate(long, 60)
@@ -329,7 +325,7 @@ func TestTruncateCutsOnCharacterBoundaries(t *testing.T) {
 	if !strings.HasSuffix(got, "...") {
 		t.Errorf("truncate = %q, want it to end in an ellipsis", got)
 	}
-	// Short enough already: returned untouched, in either script.
+	// 既に十分短いので、どちらの文字体系でもそのまま返る。
 	for _, s := range []string{"短い", "short"} {
 		if got := truncate(s, 60); got != s {
 			t.Errorf("truncate(%q) = %q, want it unchanged", s, got)
@@ -337,8 +333,7 @@ func TestTruncateCutsOnCharacterBoundaries(t *testing.T) {
 	}
 }
 
-// The whole status line has to survive it, since that is what the tray is
-// handed.
+// トレイに渡されるのは状態表示の全体なので、それ全体が無事でなければならない。
 func TestStatusLineStaysValidUTF8(t *testing.T) {
 	snapshot := status.Snapshot{
 		Source:       "uvc",

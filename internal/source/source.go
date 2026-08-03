@@ -1,10 +1,10 @@
-// Package source holds the imperative shell drivers that pull frames from a
-// camera: a UVC device through an ffmpeg child process, a wired Babble board
-// over a serial port, or an existing MJPEG-over-HTTP stream.
+// Package source は、カメラからフレームを引いてくる命令的な外殻のドライバ群を
+// 収めます。ffmpeg の子プロセス越しの UVC デバイス、シリアルポート越しの有線
+// Babble ボード、あるいは既存の MJPEG-over-HTTP ストリームです。
 //
-// Every driver reconnects on its own. A driver's Run only returns when the
-// context is cancelled or the configuration is unusable, so a camera that is
-// unplugged and plugged back in recovers without restarting the bridge.
+// どのドライバも自力で再接続します。ドライバの Run が返るのは、コンテキストが
+// キャンセルされたときか、設定が使い物にならないときだけです。そのため、抜き差し
+// されたカメラはブリッジを再起動せずに復帰します。
 package source
 
 import (
@@ -16,45 +16,44 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// Reconnect backoff, per FR-5.
+// 再接続のバックオフ。FR-5 に従う。
 const (
 	backoffInitial = 1 * time.Second
 	backoffMax     = 15 * time.Second
-	// backoffStable is how long an attempt must survive before the delay is
-	// considered recovered and reset to the initial value.
+	// backoffStable は、待ち時間を「回復した」とみなして初期値に戻すために、
+	// 試行が生き延びていなければならない時間です。
 	backoffStable = 30 * time.Second
 )
 
-// Source produces frames until its context is cancelled.
+// Source は、コンテキストがキャンセルされるまでフレームを生み出します。
 type Source interface {
-	// Run streams frames into out. It handles its own reconnection and only
-	// returns on cancellation or on a configuration error that retrying
-	// cannot fix.
+	// Run は out へフレームを流します。再接続は自身で面倒を見ます。返るのは
+	// キャンセルされたときか、再試行では直らない設定の誤りのときだけです。
 	Run(ctx context.Context, out chan<- core.Frame) error
-	// Name is the driver name shown in logs and on the status endpoints.
+	// Name は、ログと状態エンドポイントに出るドライバ名です。
 	Name() string
 }
 
-// Reporter receives connection state transitions from a driver. The bridge
-// implements it to back /healthz and /stats; drivers stay unaware of both.
+// Reporter は、ドライバから接続状態の遷移を受け取ります。ブリッジがこれを実装して
+// /healthz と /stats を支えており、ドライバはそのどちらも知りません。
 type Reporter interface {
 	Connected(source string)
 	Disconnected(source string, err error)
 }
 
-// NopReporter discards state transitions.
+// NopReporter は状態の遷移を捨てます。
 type NopReporter struct{}
 
 func (NopReporter) Connected(string)           {}
 func (NopReporter) Disconnected(string, error) {}
 
-// splitFunc carves whole frames out of an accumulated byte buffer, returning
-// the bytes it could not consume yet.
+// splitFunc は、溜まったバイトバッファから完結したフレームを切り出し、まだ消費
+// できなかったバイト列を返します。
 type splitFunc func(buf []byte, maxSize int) (frames [][]byte, rest []byte)
 
-// frameAssembler accumulates reads and hands back the complete frames in them.
-// Drivers read into a scratch buffer of their own and feed it here; the
-// assembler owns the partial-frame carry-over across reads.
+// frameAssembler は読み取りを溜め込み、その中で完結したフレームを返します。
+// ドライバは自分の作業バッファに読み込んでここへ渡します。読み取りをまたいだ
+// 未完成フレームの持ち越しは assembler が受け持ちます。
 type frameAssembler struct {
 	buf     []byte
 	maxSize int
@@ -68,9 +67,9 @@ func newFrameAssembler(split splitFunc, maxSize int) *frameAssembler {
 	return &frameAssembler{maxSize: maxSize, split: split}
 }
 
-// feed appends chunk and returns any frames that are now complete. The
-// returned frames are owned by the caller; the internal buffer is compacted in
-// place, which is safe because rest aliases a later offset of the same array.
+// feed は chunk を追加し、それによって完結したフレームを返します。返したフレームの
+// 所有権は呼び出し側にあります。内部バッファはその場で詰め直しますが、rest が同じ
+// 配列の後方を指しているだけなので安全です。
 func (a *frameAssembler) feed(chunk []byte) [][]byte {
 	a.buf = append(a.buf, chunk...)
 	frames, rest := a.split(a.buf, a.maxSize)
@@ -78,12 +77,12 @@ func (a *frameAssembler) feed(chunk []byte) [][]byte {
 	return frames
 }
 
-// reset drops any partial frame, for use after a reconnect.
+// reset は作りかけのフレームを捨てます。再接続の後に使います。
 func (a *frameAssembler) reset() { a.buf = a.buf[:0] }
 
-// send hands a frame to the pipeline, honouring cancellation. The receiving
-// channel is shallow and the hub past it never blocks, so this waits only for
-// the transform step.
+// send は、キャンセルを尊重しつつフレームをパイプラインへ渡します。受け側の
+// チャネルは浅く、その先の hub は決してブロックしないので、ここで待つのは変換の
+// 段階だけです。
 func send(ctx context.Context, out chan<- core.Frame, data []byte) error {
 	select {
 	case out <- core.Frame{Data: data, RecvedAt: time.Now()}:
@@ -93,10 +92,10 @@ func send(ctx context.Context, out chan<- core.Frame, data []byte) error {
 	}
 }
 
-// runWithBackoff repeatedly runs attempt until ctx is cancelled, waiting
-// 1s, 2s, 4s ... up to 15s between failures. An attempt that stayed up for
-// backoffStable resets the delay, so an occasional dropout does not leave a
-// long-running source stuck at the maximum wait.
+// runWithBackoff は、ctx がキャンセルされるまで attempt を繰り返し実行します。
+// 失敗の間隔は 1 秒、2 秒、4 秒…と延び、上限は 15 秒です。backoffStable の間
+// 持ちこたえた試行は待ち時間を初期値に戻すので、たまの切断のせいで長時間動いて
+// いるソースが最大の待ち時間に張り付いたままになることはありません。
 func runWithBackoff(ctx context.Context, log *slog.Logger, name string, reporter Reporter, attempt func(context.Context) error) error {
 	if reporter == nil {
 		reporter = NopReporter{}
@@ -137,8 +136,8 @@ func runWithBackoff(ctx context.Context, log *slog.Logger, name string, reporter
 	}
 }
 
-// FatalError marks a failure that retrying cannot fix, such as an
-// unparsable configuration value. Drivers return it to stop the retry loop.
+// FatalError は、解釈できない設定値のように、再試行では直らない失敗を表します。
+// ドライバは再試行ループを止めるためにこれを返します。
 type FatalError struct{ Err error }
 
 func (e *FatalError) Error() string { return e.Err.Error() }

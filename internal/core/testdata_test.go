@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// encodeJPEG builds a small real JPEG so tests exercise the same marker
-// structure a camera would produce.
+// encodeJPEG は小さな本物の JPEG を作ります。テストが、カメラの出すものと同じ
+// マーカー構造を通るようにするためです。
 func encodeJPEG(t *testing.T, w, h int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -25,8 +25,8 @@ func encodeJPEG(t *testing.T, w, h int) []byte {
 	return buf.Bytes()
 }
 
-// injectAPP1 splices an APP1 segment carrying payload in right after the SOI,
-// which is how an EXIF thumbnail smuggles a second SOI/EOI pair into a file.
+// injectAPP1 は、payload を載せた APP1 セグメントを SOI の直後に差し込みます。
+// EXIF のサムネイルが 2 つ目の SOI/EOI 対をファイルに紛れ込ませる手口そのものです。
 func injectAPP1(t *testing.T, jpg, payload []byte) []byte {
 	t.Helper()
 	if len(jpg) < 2 {

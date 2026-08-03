@@ -1,18 +1,17 @@
-// Package ffmpegfetch downloads the ffmpeg binary the UVC source needs, from
-// the people who built it, onto the machine that will run it.
+// Package ffmpegfetch は、UVC ソースが必要とする ffmpeg のバイナリを、それを
+// 作った人たちのところから、それを動かす機械へダウンロードします。
 //
-// PTCamBridge does not ship ffmpeg. It starts ffmpeg as a child process, so the
-// two are separate programs and PTCamBridge's own licence is unaffected either
-// way -- but putting a copy in the release would make this project a
-// redistributor of an LGPL binary, with the source-availability duties that
-// carries, and would put a hundred-odd megabytes in front of every user
-// including the ones bridging a serial board who never need it. Fetching on
-// request keeps both away: the bytes go from the publisher to the user, and
-// only when the user asks for them.
+// PTCamBridge は ffmpeg を同梱していません。ffmpeg は子プロセスとして起動するので
+// 両者は別のプログラムであり、PTCamBridge 自身のライセンスはどちらにせよ影響を
+// 受けません。ただしリリースにコピーを入れれば、このプロジェクトは LGPL のバイナリの
+// 再配布者になり、それに伴うソース提供の義務を負いますし、100 メガバイト強を、
+// シリアルボードを中継するだけで一度も必要としないユーザーも含めた全員の前に
+// 置くことになります。要求されたときに取ってくれば、そのどちらも避けられます。
+// バイトは公開元からユーザーへ、ユーザーが求めたときにだけ流れます。
 //
-// Nothing here starts on its own. Every download begins with an explicit user
-// action, which is also why the archive is described -- publisher, size,
-// licence -- in terms a person can be shown before agreeing to it.
+// ここで何かが自発的に始まることはありません。すべてのダウンロードは明示的な
+// ユーザー操作から始まります。アーカイブを — 公開元、大きさ、ライセンス — 人に
+// 提示できる言葉で記述しているのも、同意する前に見せるためです。
 package ffmpegfetch
 
 import (
@@ -37,42 +36,40 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/config"
 )
 
-// Build describes one published archive precisely enough to verify it.
+// Build は、公開されたアーカイブ 1 つを、検証できる程度に正確に記述します。
 type Build struct {
-	// URL is the archive, at the publisher's own download location. It is
-	// never mirrored: a copy served from somewhere of ours would make this
-	// project the distributor, which is the thing fetching exists to avoid.
+	// URL は、公開元自身のダウンロード場所にあるアーカイブです。ミラーは決して
+	// しません。こちらのどこかから配るコピーは、このプロジェクトを配布者にして
+	// しまいます。取得という仕組みは、まさにそれを避けるために存在します。
 	URL string `json:"url"`
-	// SHA256 is the hex digest of the whole archive.
+	// SHA256 は、アーカイブ全体の 16 進ダイジェストです。
 	SHA256 string `json:"sha256"`
-	// Size is the archive length in bytes, so the user can be told what the
-	// download costs before it starts and a wrong body can be cut off early.
+	// Size はアーカイブの長さ (バイト) です。開始前にダウンロードの負担をユーザーに
+	// 伝えられますし、誤った本体を早い段階で打ち切れます。
 	Size int64 `json:"size"`
-	// Publisher names who produced the build, for the same reason.
+	// Publisher は、そのビルドを作ったのが誰かを示します。理由は同じです。
 	Publisher string `json:"publisher"`
-	// License is what the fetched binary is covered by.
+	// License は、取得したバイナリが従うライセンスです。
 	License string `json:"license"`
-	// Binary is the archive member holding the executable, matched by suffix
-	// because the archive's top folder carries the version in its name.
+	// Binary は、実行ファイルを収めたアーカイブ内の要素です。接尾辞で照合します。
+	// アーカイブの最上位フォルダの名前にバージョンが入っているためです。
 	Binary string `json:"-"`
-	// Notice is the archive member holding the licence text. It is installed
-	// beside the executable so the copy on disk says what it is.
+	// Notice は、ライセンス本文を収めたアーカイブ内の要素です。実行ファイルの隣に
+	// 設置するので、ディスク上のコピーが自分が何であるかを述べます。
 	Notice string `json:"-"`
 }
 
-// pinned is the build a fetch installs.
+// pinned は、取得が設置するビルドです。
 //
-// A dated tag rather than the publisher's rolling "latest": that one is
-// rebuilt daily under the same URL, so no digest pinned to it stays true for
-// longer than a day, and a download that cannot be checked against a digest
-// fixed in advance is not verified at all -- it only proves the bytes arrived
-// intact from whoever answered.
+// 公開元の転がり続ける "latest" ではなく日付入りのタグにしています。あちらは同じ
+// URL の下で毎日作り直されるので、それに固定したダイジェストは 1 日ともちません。
+// 事前に固定したダイジェストと突き合わせられないダウンロードは、検証されていないのと
+// 同じです。応答してきた相手が何であれ、そこからバイトが無傷で届いたことを示すだけです。
 //
-// The LGPL variant rather than the GPL one, and the static build rather than
-// the shared: the static archive is larger to download but installs as one
-// self-contained file, with no set of DLLs to keep together, and a single file
-// is something the user can move or delete without leaving a half-working
-// installation behind.
+// GPL 版ではなく LGPL 版、共有ビルドではなく静的ビルドを選んでいます。静的
+// アーカイブはダウンロードこそ大きいものの、一揃いの DLL を伴わない自己完結した
+// ファイル 1 つとして設置されます。ファイルが 1 つなら、ユーザーは中途半端に動く
+// インストールを残すことなく、それを移動したり削除したりできます。
 var pinned = Build{
 	URL:       "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-02-13-17/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-8.1.zip",
 	SHA256:    "1c17a2af80ca4f85e3e72a1137eb4645f8a88c2e2d754339e270b1f234f8d49c",
@@ -83,22 +80,22 @@ var pinned = Build{
 	Notice:    "LICENSE.txt",
 }
 
-// Pinned returns the build a fetch installs.
+// Pinned は、取得が設置するビルドを返します。
 func Pinned() Build { return pinned }
 
-// Supported reports whether a build is published for this platform.
+// Supported は、このプラットフォーム向けのビルドが公開されているかを返します。
 //
-// Only Windows: it is the platform the PaperTracker client ships for, and the
-// one where ffmpeg is not a package manager away.
+// Windows だけです。PaperTracker クライアントが配布されているプラットフォームであり、
+// かつ ffmpeg がパッケージマネージャ 1 つで手に入らない環境だからです。
 func Supported() bool { return runtime.GOOS == "windows" }
 
-// noticeName is what the licence text is installed as. It keeps the ffmpeg
-// prefix so a user looking in the folder can tell whose licence it is.
+// noticeName は、ライセンス本文を設置する際のファイル名です。ffmpeg の接頭辞を
+// 残しているので、フォルダを覗いたユーザーが誰のライセンスかを判別できます。
 const noticeName = "ffmpeg-LICENSE.txt"
 
-// Dir is where a fetched ffmpeg is installed: a folder of our own under the
-// settings directory, so a fetch never writes next to the executable (which
-// may sit somewhere the user cannot write) and never touches PATH.
+// Dir は、取得した ffmpeg を設置する場所です。設定ディレクトリの下にある自前の
+// フォルダなので、取得が実行ファイルの隣 (ユーザーが書き込めない場所にあるかも
+// しれません) に書くことも、PATH に触れることもありません。
 func Dir() (string, error) {
 	base, err := config.Dir()
 	if err != nil {
@@ -107,7 +104,7 @@ func Dir() (string, error) {
 	return filepath.Join(base, "bin"), nil
 }
 
-// Path is where a fetched ffmpeg ends up.
+// Path は、取得した ffmpeg が最終的に置かれる場所です。
 func Path() (string, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -116,8 +113,7 @@ func Path() (string, error) {
 	return filepath.Join(dir, binaryName()), nil
 }
 
-// Installed returns the path to a previously fetched ffmpeg, and whether there
-// is one.
+// Installed は、以前に取得した ffmpeg のパスと、それが存在するかどうかを返します。
 func Installed() (string, bool) {
 	path, err := Path()
 	if err != nil {
@@ -136,82 +132,82 @@ func binaryName() string {
 	return "ffmpeg"
 }
 
-// ErrBusy means a download is already running. A second one would fetch the
-// same bytes to the same place.
+// ErrBusy は、ダウンロードが既に走っていることを表します。2 つ目は同じバイトを
+// 同じ場所へ取ってくるだけです。
 var ErrBusy = errors.New("ffmpegfetch: a download is already in progress")
 
-// defaultStallTimeout is how long the transfer may receive nothing at all
-// before it is given up on.
+// defaultStallTimeout は、諦めるまでに転送が何も受け取らずにいられる時間です。
 //
-// Generous, because the thing being watched is not throughput: a download over
-// a bad connection can crawl and still be working, and abandoning it would be
-// wrong. What it catches is the other case -- a server or a middlebox that
-// answers and then stops talking, which produces no bytes and no error and
-// would otherwise hold the download open until the bridge exits.
+// 余裕を持たせています。見ているのはスループットではないからです。悪い回線越しの
+// ダウンロードは這うように遅くても機能していることがあり、それを見捨てるのは誤りです。
+// 捕まえたいのはもう一方 — 応答した後に黙り込むサーバや中間装置 — で、それはバイトも
+// エラーも生まないまま、そうしなければブリッジが終了するまでダウンロードを開いた
+// ままにします。
 const defaultStallTimeout = 60 * time.Second
 
-// State is what the tray and the management API show about the download.
+// State は、トレイと管理 API がダウンロードについて表示する内容です。
 type State struct {
-	// Installed is whether a fetched ffmpeg is on disk right now.
+	// Installed は、取得した ffmpeg が今ディスク上にあるかどうかです。
 	Installed bool `json:"installed"`
-	// Path is where it is, when it is.
+	// Path は、それがある場合の場所です。
 	Path string `json:"path,omitempty"`
-	// Downloading is whether a fetch is running.
+	// Downloading は、取得が走っているかどうかです。
 	Downloading bool `json:"downloading"`
-	// Received and Total track the current download in bytes.
+	// Received と Total は、現在のダウンロードをバイト単位で追います。
 	Received int64 `json:"received_bytes"`
 	Total    int64 `json:"total_bytes"`
-	// LastError is why the last attempt failed, empty if it did not.
+	// LastError は、直前の試行が失敗した理由です。失敗していなければ空です。
 	LastError string `json:"last_error,omitempty"`
-	// Source describes what would be, or was, downloaded.
+	// Source は、ダウンロードされる、あるいはされたものの説明です。
 	Source Build `json:"source"`
-	// Supported is whether a build is published for this platform at all.
+	// Supported は、そもそもこのプラットフォーム向けのビルドが公開されているか
+	// どうかです。
 	Supported bool `json:"supported"`
 }
 
-// Options configures a Manager.
+// Options は Manager を設定します。
 type Options struct {
-	// Lifetime bounds background downloads. It is the application's context,
-	// not a request's: a download runs for minutes and outlives the click or
-	// the HTTP call that asked for it, while stopping the bridge has to stop
-	// it. Nil means downloads are only stopped by finishing.
+	// Lifetime は背後のダウンロードの生存期間を区切ります。これはリクエストの
+	// コンテキストではなくアプリケーションのコンテキストです。ダウンロードは数分
+	// 走り、それを求めたクリックや HTTP 呼び出しより長生きしますが、ブリッジを
+	// 止めればそれも止まらなければなりません。nil の場合、ダウンロードは完了に
+	// よってしか止まりません。
 	Lifetime context.Context
-	// Dir overrides the install location. Empty uses Dir().
+	// Dir は設置場所を上書きします。空なら Dir() を使います。
 	Dir string
-	// Build overrides the archive to fetch. The zero value uses Pinned().
+	// Build は取得するアーカイブを上書きします。ゼロ値なら Pinned() を使います。
 	Build Build
-	// Client overrides the HTTP client. Downloads are large and slow, so the
-	// default has no overall timeout; cancellation comes from the context.
+	// Client は HTTP クライアントを上書きします。ダウンロードは大きく遅いので、
+	// 既定のクライアントには全体のタイムアウトがありません。中断はコンテキストから
+	// 来ます。
 	Client *http.Client
-	// StallTimeout is how long the download may go without receiving anything
-	// before it is abandoned. Zero selects defaultStallTimeout.
+	// StallTimeout は、見捨てるまでにダウンロードが何も受け取らずにいられる時間
+	// です。0 なら defaultStallTimeout を使います。
 	StallTimeout time.Duration
 	Log          *slog.Logger
 }
 
-// Manager owns the one download that may be in flight, and the state the tray
-// and the API read.
+// Manager は、進行し得る唯一のダウンロードと、トレイと API が読む状態を所有します。
 //
-// One at a time, and one place holding the answer: both entry points ask for
-// the same file in the same location, so a second request while the first runs
-// is not another job to do.
+// 一度に 1 つ、そして答えを持つ場所も 1 つです。2 つの入口はどちらも同じ場所の同じ
+// ファイルを求めるので、1 つ目が走っている最中の 2 つ目の要求は、別の仕事ではありません。
 type Manager struct {
 	build Build
-	// isPinned records that the build came from Pinned() rather than from the
-	// caller. Only that one is tied to a platform: a caller naming its own
-	// archive knows what it is asking for.
+	// isPinned は、そのビルドが呼び出し側ではなく Pinned() から来たことを記録
+	// します。プラットフォームに縛られるのはそちらだけです。自分でアーカイブを
+	// 指定する呼び出し側は、自分が何を求めているか分かっています。
 	isPinned     bool
 	dir          string
 	client       *http.Client
 	stallTimeout time.Duration
 	log          *slog.Logger
-	// lifetime is held rather than passed in because the work it bounds is not
-	// a call: Start hands the download to a goroutine and returns, so there is
-	// no call left to carry a context by the time the bytes are moving.
+	// lifetime を引数で受けずに保持しているのは、それが区切る仕事が呼び出しでは
+	// ないからです。Start はダウンロードを goroutine に渡して返るので、バイトが
+	// 動き出す頃には、コンテキストを運ぶ呼び出しはもう残っていません。
 	lifetime context.Context
 
-	// running tracks the background goroutine so shutdown can wait for it to
-	// clean up after itself.
+	// running は背後の goroutine を追います。停止処理が、その後片付けを待てる
+	// ようにするためです。
 	running sync.WaitGroup
 
 	mu          sync.Mutex
@@ -220,7 +216,7 @@ type Manager struct {
 	lastError   string
 }
 
-// New builds a Manager. It does not touch the disk or the network.
+// New は Manager を組み立てます。ディスクにもネットワークにも触れません。
 func New(opts Options) *Manager {
 	m := &Manager{
 		build:        opts.Build,
@@ -241,11 +237,10 @@ func New(opts Options) *Manager {
 		m.isPinned = true
 	}
 	if m.client == nil {
-		// No client timeout: this is a hundred-odd megabytes over whatever
-		// connection the user has, and a deadline that fits a normal request
-		// would abandon a download that is working. The transport timeouts
-		// below still cover a connection that stops talking, and the context
-		// covers the user changing their mind.
+		// クライアント側のタイムアウトは設けない。これはユーザーの回線が何であれ
+		// 100 メガバイト強を運ぶ話で、通常のリクエストに合う期限では、機能して
+		// いるダウンロードを見捨てることになる。黙り込んだ接続は下の transport の
+		// タイムアウトが引き続き覆うし、ユーザーの気変わりはコンテキストが覆う。
 		m.client = &http.Client{Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			TLSHandshakeTimeout:   15 * time.Second,
@@ -258,10 +253,10 @@ func New(opts Options) *Manager {
 	return m
 }
 
-// Build is what this manager would download.
+// Build は、この manager がダウンロードするものです。
 func (m *Manager) Build() Build { return m.build }
 
-// State reports what the UI should show.
+// State は、UI が表示すべき内容を返します。
 func (m *Manager) State() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -283,10 +278,10 @@ func (m *Manager) State() State {
 	return state
 }
 
-// Start runs a fetch in the background and returns once it is under way.
+// Start は取得を背後で走らせ、動き出した時点で返ります。
 //
-// Callers watch State to see how it goes: the download is measured in minutes,
-// which is longer than a menu click or an HTTP request should be held open for.
+// 呼び出し側は State を見て経過を追います。ダウンロードは分単位であり、メニューの
+// クリックや HTTP リクエストを開いたまま待たせてよい長さを超えています。
 func (m *Manager) Start() error {
 	if err := m.begin(); err != nil {
 		return err
@@ -305,13 +300,13 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-// Wait blocks until a background download has finished tidying up, or until
-// ctx is done.
+// Wait は、背後のダウンロードが後片付けを終えるまで、あるいは ctx が終わるまで
+// ブロックします。
 //
-// Cancelling the lifetime stops the transfer but does not make the goroutine
-// instantaneous: it still has to close and remove the part-downloaded archive.
-// Without waiting for that, shutting the bridge down mid-download can leave
-// a hundred-odd megabytes in the settings folder with nothing left to clean it.
+// lifetime をキャンセルすれば転送は止まりますが、goroutine が瞬時に消えるわけでは
+// ありません。途中まで落としたアーカイブを閉じて削除する必要があります。それを
+// 待たずにダウンロードの最中でブリッジを停止すると、設定フォルダに 100 メガバイト強が
+// 残り、それを片付けるものが無くなり得ます。
 func (m *Manager) Wait(ctx context.Context) {
 	done := make(chan struct{})
 	go func() {
@@ -324,8 +319,8 @@ func (m *Manager) Wait(ctx context.Context) {
 	}
 }
 
-// Fetch downloads and installs, returning the path to the binary. It is what
-// Start runs, exposed for callers that want to wait.
+// Fetch はダウンロードして設置し、バイナリのパスを返します。Start が走らせるのは
+// これで、待ちたい呼び出し側のために公開しています。
 func (m *Manager) Fetch(ctx context.Context) (string, error) {
 	if err := m.begin(); err != nil {
 		return "", err
@@ -379,11 +374,11 @@ func (m *Manager) installDir() (string, error) {
 	return Dir()
 }
 
-// download fetches the archive, checks it against the pinned digest and
-// installs what is needed out of it.
+// download はアーカイブを取得し、固定したダイジェストと照合し、必要なものを
+// そこから設置します。
 //
-// The archive is written to a file rather than held in memory: it is larger
-// than this process is meant to occupy, and reading a zip needs to seek.
+// アーカイブはメモリに載せずファイルへ書きます。このプロセスが占めるべき量より
+// 大きいですし、zip を読むには seek が要るからです。
 func (m *Manager) download(ctx context.Context) (string, error) {
 	dir, err := m.installDir()
 	if err != nil {
@@ -405,17 +400,16 @@ func (m *Manager) download(ctx context.Context) (string, error) {
 	return m.install(archive, dir)
 }
 
-// fetchArchive downloads to a temporary file next to the install location and
-// verifies the digest. The returned file is positioned at the start.
+// fetchArchive は、設置場所の隣にある一時ファイルへダウンロードし、ダイジェストを
+// 検証します。返すファイルの位置は先頭に戻してあります。
 func (m *Manager) fetchArchive(ctx context.Context, dir string) (*os.File, error) {
-	// A server that answers, sends part of the body and then goes quiet is not
-	// covered by anything else here: the transport's timeouts stop at the
-	// response header, and there is deliberately no overall client deadline
-	// because a slow connection moving a hundred megabytes is not a fault. So
-	// the read is watched instead of the transfer -- any progress at all resets
-	// it, and only a stretch with none cancels the request. Without this the
-	// download hangs until the bridge exits, with the menu stuck on
-	// "Downloading..." and a retry refused as busy the whole time.
+	// 応答して本体を途中まで送り、その後黙り込むサーバは、ここの他の何にも
+	// 覆われていない。transport のタイムアウトは応答ヘッダーで終わるし、100
+	// メガバイトを運ぶ遅い回線は障害ではないので、クライアント全体の期限は意図的に
+	// 設けていない。そこで転送ではなく読み取りを見る。少しでも進めばリセットされ、
+	// まったく進まない区間だけがリクエストをキャンセルする。これが無いと
+	// ダウンロードはブリッジが終了するまで固まり、その間ずっとメニューは
+	// "Downloading..." のまま、再試行は実行中として拒否される。
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var stalled atomic.Bool
@@ -442,8 +436,8 @@ func (m *Manager) fetchArchive(ctx context.Context, dir string) (*os.File, error
 	if err != nil {
 		return nil, fmt.Errorf("ffmpegfetch: create a temporary file in %s: %w", dir, err)
 	}
-	// Removed on every path but the successful one, where the caller takes
-	// over: a hundred megabytes left behind by a failure is not a small mess.
+	// 成功した経路 (そこでは呼び出し側が引き取る) 以外のすべてで削除する。失敗が
+	// 残す 100 メガバイトは、小さな散らかりではない。
 	keep := false
 	defer func() {
 		if !keep {
@@ -453,9 +447,9 @@ func (m *Manager) fetchArchive(ctx context.Context, dir string) (*os.File, error
 	}()
 
 	digest := sha256.New()
-	// One byte past the expected length, so a body that is too long is caught
-	// rather than silently truncated to a size that then fails the digest with
-	// a less useful message.
+	// 期待する長さより 1 バイト多く読む。長すぎる本体を、黙って切り詰めてから
+	// ダイジェスト検証で役に立たないメッセージとともに失敗させるのではなく、
+	// その場で捕まえるため。
 	body := io.LimitReader(resp.Body, m.build.Size+1)
 	progress := &progressReader{r: body, report: func(received int64) {
 		watchdog.Reset(m.stallTimeout)
@@ -482,11 +476,11 @@ func (m *Manager) fetchArchive(ctx context.Context, dir string) (*os.File, error
 	return tmp, nil
 }
 
-// install extracts the binary and the licence text.
+// install は、バイナリとライセンス本文を取り出します。
 //
-// The licence lands first and the binary last, because the binary is what
-// everything else tests for: finishing in that order means an ffmpeg that is
-// found is an ffmpeg whose licence text is already sitting beside it.
+// ライセンスを先に、バイナリを最後に置きます。他のすべてが存在を確認するのは
+// バイナリだからです。この順で終えれば、見つかった ffmpeg は、既にライセンス本文が
+// 隣に置かれている ffmpeg だということになります。
 func (m *Manager) install(archive *os.File, dir string) (string, error) {
 	info, err := archive.Stat()
 	if err != nil {
@@ -516,9 +510,9 @@ func (m *Manager) install(archive *os.File, dir string) (string, error) {
 	return path, nil
 }
 
-// findEntry locates an archive member by its trailing path. The archive's top
-// folder is named after the build, so the version would otherwise have to be
-// repeated in the member paths and kept in step with the URL.
+// findEntry は、末尾のパスでアーカイブ内の要素を探します。アーカイブの最上位
+// フォルダはビルドにちなんで命名されているので、そうしなければ要素のパスにも
+// バージョンを繰り返し書き、URL と歩調を合わせ続けることになります。
 func findEntry(zr *zip.Reader, suffix string) (*zip.File, error) {
 	if suffix == "" {
 		return nil, errors.New("ffmpegfetch: no archive member named")
@@ -528,7 +522,7 @@ func findEntry(zr *zip.Reader, suffix string) (*zip.File, error) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		// Slash-separated by the zip format itself, whatever the platform.
+		// プラットフォームに関わらず、zip 形式自体がスラッシュ区切り。
 		if name := path.Clean(f.Name); name == path.Clean(suffix) || strings.HasSuffix(name, want) {
 			return f, nil
 		}
@@ -536,11 +530,11 @@ func findEntry(zr *zip.Reader, suffix string) (*zip.File, error) {
 	return nil, fmt.Errorf("ffmpegfetch: the archive has no %s", suffix)
 }
 
-// extract writes one member into place, replacing whatever was there.
+// extract は要素 1 つを所定の場所へ書き、そこにあったものを置き換えます。
 //
-// Through a temporary file and a rename, so a fetch that dies part way cannot
-// leave a truncated ffmpeg.exe behind: that file would be found by the source
-// driver and fail as something other than "not installed".
+// 一時ファイルと rename を経由するので、途中で死んだ取得が切り詰められた
+// ffmpeg.exe を残すことはありません。そのファイルはソースのドライバに見つかり、
+// 「未導入」とは別の何かとして失敗することになります。
 func extract(f *zip.File, dest string, mode os.FileMode) error {
 	src, err := f.Open()
 	if err != nil {
@@ -570,8 +564,8 @@ func extract(f *zip.File, dest string, mode os.FileMode) error {
 	return nil
 }
 
-// progressReader reports how much has arrived so the tray can show something
-// during a download measured in minutes.
+// progressReader は、どれだけ届いたかを報告します。分単位のダウンロードの間、
+// トレイが何かを表示できるようにするためです。
 type progressReader struct {
 	r      io.Reader
 	report func(int64)

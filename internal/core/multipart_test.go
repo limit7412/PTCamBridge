@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// The client finds frame boundaries from the delimiter line and sizes each
-// frame from Content-Length, so this layout is checked byte for byte.
+// クライアントは区切り行からフレームの切れ目を見つけ、Content-Length で各フレームの
+// 大きさを決める。だからこの並びはバイト単位で確認する。
 func TestEncodePartByteLayout(t *testing.T) {
 	enc, err := NewMultipartEncoder("", nil)
 	if err != nil {
@@ -105,8 +105,8 @@ func TestNewMultipartEncoderRejectsBadExtraHeaders(t *testing.T) {
 	}
 }
 
-// Encoding then splitting is the shape of the proxy path: normalise whatever
-// the upstream sent into our own framing.
+// エンコードしてから分割するのは proxy 経路の形そのもの。上流が送ってきたものが
+// 何であれ、こちらの枠組みに揃える。
 func TestEncodeSplitRoundTrip(t *testing.T) {
 	jpg := encodeJPEG(t, 24, 24)
 	enc, err := NewMultipartEncoder("rt", nil)
@@ -122,9 +122,9 @@ func TestEncodeSplitRoundTrip(t *testing.T) {
 	}
 }
 
-// RFC 2046 allows delimiter characters that RFC 2045 does not allow in a bare
-// parameter token. Written unquoted, such a boundary makes the whole media
-// type unparsable and a compliant client cannot find the delimiter at all.
+// RFC 2046 が区切りに許す文字の中には、RFC 2045 が裸のパラメータトークンに許さない
+// ものがある。引用せずに書くと、そうした boundary はメディアタイプ全体を解析不能に
+// し、規格に忠実なクライアントは区切りをまったく見つけられない。
 func TestContentTypeQuotesANonTokenBoundary(t *testing.T) {
 	enc, err := NewMultipartEncoder("a:b/c", nil)
 	if err != nil {
@@ -148,9 +148,9 @@ func TestContentTypeQuotesANonTokenBoundary(t *testing.T) {
 	}
 }
 
-// The encoder writes Content-Type and Content-Length itself. A second copy
-// with a different value would leave the client choosing between them, and the
-// wrong Content-Length costs it the frame boundary for the rest of the stream.
+// Content-Type と Content-Length はエンコーダ自身が書く。値の異なる 2 つ目が並ぶと
+// クライアントはどちらを取るか選ぶことになり、Content-Length を選び違えれば、
+// 以降のストリーム全体でフレームの切れ目を失う。
 func TestExtraHeadersCannotOverrideTheEncodersOwn(t *testing.T) {
 	for _, name := range []string{"Content-Length", "content-length", "Content-Type", " CONTENT-TYPE "} {
 		if err := ValidateStreamHeader(name, "0"); err == nil {
@@ -165,9 +165,9 @@ func TestExtraHeadersCannotOverrideTheEncodersOwn(t *testing.T) {
 	}
 }
 
-// "Contains no line break" is not the same as "is a header field". A name with
-// a space or a value with a stray control byte is written out happily but makes
-// a strict MIME parser reject the whole part.
+// 「改行を含まない」ことと「ヘッダーフィールドである」ことは違う。空白を含む名前や、
+// 制御バイトが紛れ込んだ値は何事もなく書き出せてしまうが、厳格な MIME パーサーは
+// パート全体を拒否する。
 func TestExtraHeadersMustBeValidFieldSyntax(t *testing.T) {
 	bad := []StreamHeader{
 		{Name: "Bad Header", Value: "x"},

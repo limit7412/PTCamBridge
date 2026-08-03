@@ -37,7 +37,7 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// mjpegUpstream stands in for a WiFi camera.
+// mjpegUpstream は WiFi カメラの代役。
 func mjpegUpstream(t *testing.T, jpg []byte) *httptest.Server {
 	t.Helper()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +64,7 @@ func mjpegUpstream(t *testing.T, jpg []byte) *httptest.Server {
 	return ts
 }
 
-// waitForFrame blocks until the hub has a frame, or fails the test.
+// waitForFrame は hub にフレームが届くまで待ち、届かなければテストを失敗させる。
 func waitForFrame(t *testing.T, h *hub.Hub, timeout time.Duration) []byte {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -86,7 +86,7 @@ func mjpegConfig(url string) config.Config {
 	return cfg
 }
 
-// The whole pipeline: upstream camera, driver, transform step, hub.
+// パイプライン全体。上流のカメラ、ドライバ、変換段、hub。
 func TestBridgeDeliversFramesToTheHub(t *testing.T) {
 	jpg := testJPEG(t, 32, 32)
 	upstream := mjpegUpstream(t, jpg)
@@ -111,7 +111,7 @@ func TestBridgeDeliversFramesToTheHub(t *testing.T) {
 	}
 }
 
-// A no-op transform must forward the original bytes, not a re-encode.
+// 何もしない変換は、再エンコードではなく元のバイトをそのまま流さなければならない。
 func TestBridgeForwardsUntransformedFramesUntouched(t *testing.T) {
 	jpg := testJPEG(t, 32, 32)
 	upstream := mjpegUpstream(t, jpg)
@@ -157,8 +157,8 @@ func TestBridgeAppliesTheConfiguredTransform(t *testing.T) {
 	}
 }
 
-// Switching to a source that is not attached now fails and leaves the working
-// one running, instead of reporting success with nothing producing frames.
+// 繋がっていないソースへの切替は失敗し、動いている方をそのまま走らせ続ける。
+// 何もフレームを出していないのに成功を報告したりはしない。
 func TestBridgeSwitchRejectsAnUnavailableSource(t *testing.T) {
 	shortenVerify(t, 1500*time.Millisecond)
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
@@ -192,7 +192,7 @@ func TestBridgeSwitchRejectsAnUnavailableSource(t *testing.T) {
 	t.Fatal("the working source stopped producing frames after a rejected switch")
 }
 
-// Switching to a source that does work is accepted, and the frames keep coming.
+// 実際に動くソースへの切替は受け入れられ、フレームは届き続ける。
 func TestBridgeSwitchToAWorkingSource(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
@@ -222,8 +222,8 @@ func TestBridgeRejectsAnUnknownSourceType(t *testing.T) {
 	}
 }
 
-// Pausing has to release the camera: UVC access is exclusive, so a paused
-// bridge that kept the handle would still lock Baballonia out.
+// 一時停止はカメラを解放しなければならない。UVC のアクセスは排他的なので、
+// ハンドルを握ったままの一時停止したブリッジは、依然として Baballonia を締め出す。
 func TestBridgePauseStopsAndResumeRestarts(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
@@ -265,8 +265,8 @@ func TestBridgePauseStopsAndResumeRestarts(t *testing.T) {
 	t.Fatal("no frames were published after resuming")
 }
 
-// Settings that cannot start a source must not leave the bridge with nothing
-// running: the previous, working source is put back.
+// ソースを起動できない設定が、ブリッジを何も動いていない状態にしてはいけない。
+// 動いていた元のソースを戻す。
 func TestBridgeApplyRevertsWhenTheNewSourceCannotStart(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
@@ -303,9 +303,9 @@ func TestBridgeApplyRevertsWhenTheNewSourceCannotStart(t *testing.T) {
 	t.Fatal("the restored source is not producing frames")
 }
 
-// Building a driver only proves the settings parse. A driver that fails once
-// it is actually running -- no ffmpeg binary on disk, say -- must cost the
-// settings change rather than the source that was working a moment ago.
+// ドライバを組み立てられることが示すのは、設定が解釈できることだけ。実際に動き
+// 出してから失敗するドライバ — ディスクに ffmpeg が無い場合など — が代償を払わせる
+// べきは、少し前まで動いていたソースではなく設定変更の方。
 func TestBridgeApplyRevertsWhenTheNewSourceFailsAsynchronously(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
@@ -320,8 +320,8 @@ func TestBridgeApplyRevertsWhenTheNewSourceFailsAsynchronously(t *testing.T) {
 	defer b.Stop()
 	waitForFrame(t, frames, 5*time.Second)
 
-	// The device name is set, so the driver builds. It is ffmpeg that is
-	// missing, and UVC only finds that out inside Run.
+	// デバイス名は設定されているのでドライバは組み立てられる。無いのは ffmpeg で、
+	// UVC がそれを知るのは Run の中。
 	broken := b.Snapshot()
 	broken.Source.Type = config.SourceUVC
 	broken.Source.UVC.Device = "camera"
@@ -345,13 +345,13 @@ func TestBridgeApplyRevertsWhenTheNewSourceFailsAsynchronously(t *testing.T) {
 	t.Fatal("the restored source is not producing frames")
 }
 
-// Losing the write is not the same as losing the change, but the caller still
-// has to hear about it: what it just set will not survive a restart.
+// 書き込みを失うことと変更を失うことは違うが、それでも呼び出し側には伝えなければ
+// ならない。今設定したものは再起動を越えない。
 func TestBridgeApplyReportsASaveFailure(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
-	// A directory sitting where the settings file belongs fails the rename
-	// without making anything else about the run unusual.
+	// 設定ファイルがあるべき場所にディレクトリを置くと、実行の他の部分は普通の
+	// まま rename だけが失敗する。
 	path := filepath.Join(t.TempDir(), config.FileName)
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -372,14 +372,14 @@ func TestBridgeApplyReportsASaveFailure(t *testing.T) {
 	if !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("Apply error = %v, want one wrapping config.ErrNotSaved", err)
 	}
-	// Only the write failed, so the change itself is still in effect.
+	// 失敗したのは書き込みだけなので、変更自体は有効なまま。
 	if got := b.Snapshot().Transform.Rotate; got != 180 {
 		t.Errorf("rotate = %d, want the change to still be active", got)
 	}
 }
 
-// Settings the running process cannot adopt are refused, rather than accepted
-// and written to a file that then disagrees with what is running.
+// 動作中のプロセスが採用できない設定は拒否する。受け入れてファイルに書き、その
+// ファイルが動いているものと食い違う、という形にはしない。
 func TestBridgeApplyRejectsSettingsThatNeedARestart(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
@@ -403,15 +403,15 @@ func TestBridgeApplyRejectsSettingsThatNeedARestart(t *testing.T) {
 	}
 }
 
-// streamConfiguratorFunc adapts a function to StreamConfigurator.
+// streamConfiguratorFunc は関数を StreamConfigurator に適合させる。
 type streamConfiguratorFunc func(core.MultipartEncoder, bool)
 
 func (f streamConfiguratorFunc) SetStreamOptions(enc core.MultipartEncoder, hold bool) {
 	f(enc, hold)
 }
 
-// The boundary and the extra headers exist to match whatever the PaperTracker
-// client parses today, so a change to them has to reach the server itself.
+// boundary と追加ヘッダーは、今の PaperTracker クライアントが解析するものに合わせる
+// ために存在する。だからその変更はサーバ自身まで届かなければならない。
 func TestBridgeApplyReconfiguresTheStream(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
@@ -478,8 +478,8 @@ func TestBridgeApplyRejectsInvalidSettings(t *testing.T) {
 	}
 }
 
-// Stopping must wait for the driver to exit. For UVC that is what guarantees
-// the exclusive device handle is released before anything reopens it.
+// 停止はドライバの終了を待たなければならない。UVC では、それが「何かが開き直す前に
+// 排他的なデバイスハンドルが解放されている」ことの保証になる。
 func TestBridgeStopWaitsForTheDriver(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
@@ -508,15 +508,15 @@ func TestBridgeStartTwiceIsAnError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// The default source is UVC with no device, so starting fails; that is a
-	// source error, not a lifecycle one.
+	// 既定のソースはデバイス名の無い UVC なので起動は失敗する。それはソースの
+	// エラーであって、生存期間のエラーではない。
 	_ = b.Start(ctx)
 	if err := b.Start(ctx); err == nil {
 		t.Fatal("expected the second Start to be rejected")
 	}
 }
 
-// shortenVerify keeps the start verification from dominating test runtime.
+// shortenVerify は、起動時の検証がテストの実行時間を占領しないようにする。
 func shortenVerify(t *testing.T, d time.Duration) {
 	t.Helper()
 	previous := startVerifyTimeout
@@ -524,15 +524,15 @@ func shortenVerify(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { startVerifyTimeout = previous })
 }
 
-// Only a frame proves a source works. A driver that starts, fails to reach its
-// camera and settles into reconnecting has not started anything the user can
-// use, so Apply must not keep those settings.
+// ソースが機能することを証明するのはフレームだけ。起動し、カメラに届かず、再接続に
+// 落ち着いたドライバは、ユーザーが使えるものを何も始めていない。だから Apply は
+// その設定を残してはいけない。
 func TestBridgeApplyRevertsWhenTheNewSourceNeverDelivers(t *testing.T) {
 	shortenVerify(t, 1500*time.Millisecond)
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
-	// An upstream that accepts the connection and then says nothing: no error
-	// to report, and no frame either.
+	// 接続は受け入れるが、その後何も言わない上流。報告すべきエラーも、フレームも
+	// 出てこない。
 	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 		w.WriteHeader(http.StatusOK)
@@ -572,16 +572,16 @@ func TestBridgeApplyRevertsWhenTheNewSourceNeverDelivers(t *testing.T) {
 	t.Fatal("the restored source is not producing frames")
 }
 
-// The request that asked for the change is what the verification is being run
-// for. Once it has gone -- a client that disconnected, or an HTTP timeout --
-// finishing the change anyway leaves the bridge and the settings file on a
-// source the caller was told nothing about, and was told had failed.
+// 検証はそもそも、変更を求めたリクエストのために走っている。それが居なくなった後 —
+// 切断したクライアントや HTTP のタイムアウト — にそれでも変更を完了させると、
+// ブリッジと設定ファイルは、呼び出し側が何も知らされず、しかも失敗したと告げられた
+// ソースの上に残る。
 func TestBridgeApplyStopsWhenTheRequestIsCancelled(t *testing.T) {
-	// Long enough that the test would hang on it rather than pass by accident.
+	// たまたま通ってしまうのではなく、テストがそこで止まる程度には長く。
 	shortenVerify(t, time.Minute)
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
-	// Accepts the connection, then says nothing: verification would wait.
+	// 接続は受け入れ、その後何も言わない。検証は待つことになる。
 	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 		w.WriteHeader(http.StatusOK)
@@ -627,16 +627,14 @@ func TestBridgeApplyStopsWhenTheRequestIsCancelled(t *testing.T) {
 	}
 }
 
-// The frame and the request's deadline can become ready together, and then the
-// select takes either one -- so a verification that reads the frame case is not
-// evidence that anyone is still waiting for the answer. Keeping the change on
-// that basis writes it to the settings file behind a client that was told it
-// failed, and which of the two happens is a coin toss.
+// フレームとリクエストの期限は同時に準備完了になり得て、その場合 select はどちらを
+// 取ってもおかしくない。つまりフレームの case を読んだ検証は、まだ誰かが答えを
+// 待っている証拠にはならない。それを根拠に変更を残すと、失敗を告げられたクライアントの
+// 背後で設定ファイルに書くことになり、どちらが起きるかはコイン投げになる。
 //
-// The race itself cannot be staged from a test: the two events have to become
-// ready within the same instant, and anything that makes them so from the
-// outside also decides which the select sees first. What can be tested is the
-// decision the select feeds, which is why it is a function.
+// 競合そのものはテストから作れない。2 つの事象が同じ瞬間に準備完了になる必要が
+// あり、外からそれを起こそうとすれば、select がどちらを先に見るかまで決めてしまう。
+// テストできるのは select が渡す先の判断であり、それを関数にしてあるのはそのため。
 func TestVerifyOutcomeRejectsAFrameNobodyIsWaitingFor(t *testing.T) {
 	cancelled := context.Canceled
 	deadline := context.DeadlineExceeded
@@ -657,20 +655,20 @@ func TestVerifyOutcomeRejectsAFrameNobodyIsWaitingFor(t *testing.T) {
 		t.Errorf("a frame that arrived after the deadline = %v, want it rejected", err)
 	}
 
-	// Shutting down is not proof either: nothing would run on the settings, but
-	// the next start would come up on them.
+	// 停止中であることも証拠にはならない。その設定の上では何も動かないが、次の
+	// 起動はその上で立ち上がる。
 	if err := verifyOutcome("mjpeg", nil, nil, context.Canceled); err == nil {
 		t.Error("a frame delivered as the bridge stopped was accepted")
 	}
 
-	// An unusable frame still loses to nothing, and says why.
+	// 使えないフレームはやはり何も無いのに等しく、その理由を述べる。
 	if err := verifyOutcome("mjpeg", errors.New("not a JPEG"), nil, nil); err == nil {
 		t.Error("an undecodable frame was accepted")
 	}
 }
 
-// The same thing end to end: the source comes up only after the client has
-// given up, and the bridge has to be left on the source that was working.
+// 同じことを端から端まで。クライアントが諦めた後になってソースが立ち上がる。
+// ブリッジは動いていた方のソースの上に残らなければならない。
 func TestBridgeApplyRollsBackASourceThatCameUpTooLate(t *testing.T) {
 	shortenVerify(t, time.Minute)
 	jpg := testJPEG(t, 16, 16)
@@ -683,8 +681,8 @@ func TestBridgeApplyRollsBackASourceThatCameUpTooLate(t *testing.T) {
 		case connected <- struct{}{}:
 		default:
 		}
-		// Nothing is sent until the test says so, which it does only after the
-		// request asking for this source has been cancelled.
+		// テストが指示するまで何も送らない。指示するのは、このソースを求めた
+		// リクエストがキャンセルされた後だけ。
 		select {
 		case <-release:
 		case <-r.Context().Done():
@@ -745,10 +743,9 @@ func TestBridgeApplyRollsBackASourceThatCameUpTooLate(t *testing.T) {
 	}
 }
 
-// A change that only touches the server settings never reaches the
-// verification, so the request context has to be checked on the way in too.
-// Waiting for the lock can take as long as another caller's whole
-// verification, which is exactly when a PUT gives up.
+// サーバ設定だけを触る変更は検証に到達しないので、リクエストのコンテキストは入口でも
+// 確認しなければならない。ロック待ちは別の呼び出し側の検証まるごと分の長さになり得て、
+// PUT が諦めるのはまさにそのとき。
 func TestBridgeApplyRejectsAnAlreadyCancelledRequest(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	frames := hub.New()
@@ -762,7 +759,7 @@ func TestBridgeApplyRejectsAnAlreadyCancelledRequest(t *testing.T) {
 	defer b.Stop()
 	waitForFrame(t, frames, 5*time.Second)
 
-	// Server-only, so captureUnchanged holds and no source is restarted.
+	// サーバ設定だけなので captureUnchanged が成り立ち、ソースは再起動されない。
 	next := b.Snapshot()
 	next.Server.HoldOnSourceLoss = true
 
@@ -777,13 +774,13 @@ func TestBridgeApplyRejectsAnAlreadyCancelledRequest(t *testing.T) {
 	}
 }
 
-// The parsers upstream check structure because that is all they can afford per
-// frame. Structure is not an image, so a source that only ever emits SOI/EOI
-// would otherwise be saved as working while the tracker gets nothing.
+// 上流のパーサーが構造を見るのは、フレームごとに許されるのがそこまでだから。構造は
+// 画像ではないので、SOI/EOI しか出さないソースが、そうしなければ「動いている」として
+// 保存され、その間トラッカーは何も受け取らない。
 func TestBridgeApplyRejectsASourceSendingUndecodableFrames(t *testing.T) {
 	shortenVerify(t, 3*time.Second)
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
-	// Structurally a JPEG, and no image in it.
+	// 構造上は JPEG で、中身は空。
 	hollow := mjpegUpstream(t, []byte{0xFF, 0xD8, 0xFF, 0xD9})
 
 	frames := hub.New()
@@ -804,9 +801,8 @@ func TestBridgeApplyRejectsASourceSendingUndecodableFrames(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a source with no decodable image to be refused")
 	}
-	// Not the timeout: the frame did arrive, it was the decode that rejected
-	// it. Accepting a timeout here would let the test pass on a source that
-	// simply never delivered.
+	// タイムアウトではない。フレームは届いており、拒んだのはデコード。ここで
+	// タイムアウトを許すと、単に何も届けなかったソースでもテストが通ってしまう。
 	if !strings.Contains(err.Error(), "usable JPEG") {
 		t.Errorf("error = %v, want the frame rejected as undecodable rather than missing", err)
 	}
@@ -815,12 +811,12 @@ func TestBridgeApplyRejectsASourceSendingUndecodableFrames(t *testing.T) {
 	}
 }
 
-// Startup is the opposite case: a camera that is not there yet must be left to
-// reconnect, because nothing will start it a second time.
+// 起動時は逆の場合。まだ存在しないカメラは再接続に任せなければならない。それを
+// 二度目に起動してくれるものは無いから。
 func TestBridgeStartLeavesAnUnreachableSourceRetrying(t *testing.T) {
 	shortenVerify(t, 500*time.Millisecond)
 
-	// Nothing is listening here, so every attempt fails and retries.
+	// ここでは何も listen していないので、すべての試行が失敗して再試行になる。
 	cfg := mjpegConfig("http://127.0.0.1:1/")
 	frames := hub.New()
 	b := New(cfg, "", frames, status.New(), discardLogger())
@@ -833,8 +829,8 @@ func TestBridgeStartLeavesAnUnreachableSourceRetrying(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// The driver has to still be alive: stopping it is what would stop a
-	// camera plugged in later from ever being picked up.
+	// ドライバは生きていなければならない。これを止めることが、後から挿された
+	// カメラが一度も拾われない原因になる。
 	time.Sleep(750 * time.Millisecond)
 	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
 		t.Errorf("source type = %q, want the configured mjpeg source", got)
@@ -844,9 +840,8 @@ func TestBridgeStartLeavesAnUnreachableSourceRetrying(t *testing.T) {
 	}
 }
 
-// While paused nothing runs, but Apply still has to reject settings that could
-// not start: resuming later would otherwise fail with the previous, working
-// configuration already gone.
+// 一時停止中は何も動かないが、それでも Apply は起動できない設定を拒否しなければ
+// ならない。さもないと後の再開が失敗し、そのとき動いていた元の設定は既に失われている。
 func TestBridgeApplyValidatesTheDriverWhilePaused(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
@@ -872,16 +867,15 @@ func TestBridgeApplyValidatesTheDriverWhilePaused(t *testing.T) {
 		t.Errorf("source type = %q, want the previous settings kept", got)
 	}
 
-	// Resuming must therefore still work.
+	// したがって再開は依然として成功しなければならない。
 	if err := b.SetPaused(false); err != nil {
 		t.Errorf("resume after a rejected change: %v", err)
 	}
 }
 
-// Changing only the settings the HTTP server owns must not interrupt the
-// camera. Restarting it would drop the stream for nothing, and the start
-// verification would reject the change outright while the camera happened to
-// be reconnecting -- which is exactly when hold_on_source_loss gets touched.
+// HTTP サーバが受け持つ設定だけを変えることが、カメラを中断させてはいけない。再起動
+// すれば何の得も無くストリームが切れるし、カメラがたまたま再接続中であれば起動時の
+// 検証が変更を丸ごと拒否する。hold_on_source_loss を触るのは、まさにそのときだ。
 func TestBridgeApplyDoesNotRestartCaptureForServerOnlySettings(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 
@@ -902,8 +896,8 @@ func TestBridgeApplyDoesNotRestartCaptureForServerOnlySettings(t *testing.T) {
 	defer b.Stop()
 	waitForFrame(t, frames, 5*time.Second)
 
-	// The driver instance in place before the change has to be the same one
-	// afterwards; a restart would replace it.
+	// 変更前にあったドライバの実体が、変更後も同じでなければならない。再起動すれば
+	// 置き換わる。
 	before := b.stopped
 
 	updated := b.Snapshot()
@@ -923,15 +917,15 @@ func TestBridgeApplyDoesNotRestartCaptureForServerOnlySettings(t *testing.T) {
 	}
 }
 
-// The driver announces a frame as soon as it has parsed one, but the transform
-// sits between there and the hub. A frame it drops means no client sees
-// anything, so it must not count as a working source.
+// ドライバは 1 枚解析した時点でフレームを告げるが、そこと hub の間には変換段がある。
+// そこで落とされたフレームは、どのクライアントにも何も見えないということなので、
+// 動いているソースとして数えてはいけない。
 func TestBridgeApplyRevertsWhenTheTransformDropsEveryFrame(t *testing.T) {
 	shortenVerify(t, 1500*time.Millisecond)
 	good := mjpegUpstream(t, testJPEG(t, 16, 16))
 
-	// Structurally a valid JPEG -- the driver parses and forwards it -- but
-	// its header claims 65535x65535, so the transform refuses to decode it.
+	// 構造上は妥当な JPEG — ドライバは解析して流す — だが、ヘッダーが
+	// 65535x65535 を主張しているので、変換段はデコードを拒む。
 	oversized := bytes.Clone(testJPEG(t, 16, 16))
 	sof := bytes.Index(oversized, []byte{0xFF, 0xC0})
 	if sof < 0 {
@@ -964,8 +958,8 @@ func TestBridgeApplyRevertsWhenTheTransformDropsEveryFrame(t *testing.T) {
 	}
 }
 
-// A shutdown that lands mid-verification is not proof of anything, and must
-// not persist a configuration nothing ever confirmed.
+// 検証の最中に落ちた停止は何の証拠にもならないし、誰も確認していない設定を保存しては
+// いけない。
 func TestBridgeApplyFailsWhenShutdownInterruptsVerification(t *testing.T) {
 	shortenVerify(t, 10*time.Second)
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
@@ -989,7 +983,7 @@ func TestBridgeApplyFailsWhenShutdownInterruptsVerification(t *testing.T) {
 	defer b.Stop()
 	waitForFrame(t, frames, 5*time.Second)
 
-	// Shut down while Apply is still waiting for the silent source.
+	// Apply がまだ無言のソースを待っている間に停止する。
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		cancel()
@@ -1007,17 +1001,17 @@ func TestBridgeApplyFailsWhenShutdownInterruptsVerification(t *testing.T) {
 	}
 }
 
-// An override meant for one run must not become permanent the first time
-// something unrelated is changed.
+// 一度きりの実行のための上書きが、無関係なものを変えた最初の瞬間に恒久化しては
+// いけない。
 func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
 
-	// What the file says.
+	// ファイルが述べている内容。
 	fileCfg := mjpegConfig(upstream.URL)
 	fileCfg.Source.UVC.Device = "the camera the user configured"
 
-	// What this run is actually using, after a -device override.
+	// -device による上書きの後、この実行が実際に使っている内容。
 	effective := fileCfg
 	effective.Source.UVC.Device = "just for this run"
 
@@ -1035,7 +1029,7 @@ func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// Change something else entirely.
+	// まったく別のものを変更する。
 	updated := b.Snapshot()
 	updated.Server.HoldOnSourceLoss = true
 	if err := b.Apply(ctx, updated); err != nil {
@@ -1054,7 +1048,7 @@ func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
 	}
 }
 
-// The override does have to be saved when it is what the caller changed.
+// 上書きが呼び出し側の変更したものそのものである場合は、当然保存されなければならない。
 func TestBridgeApplySavesADeliberateChangeToAnOverriddenField(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
@@ -1089,8 +1083,8 @@ func TestBridgeApplySavesADeliberateChangeToAnOverriddenField(t *testing.T) {
 	}
 }
 
-// Settings for a source that is not running describe nothing the camera is
-// doing, so filling them in ahead of a switch must not interrupt it.
+// 動いていないソースの設定は、カメラがしていることを何も表していない。切替に備えて
+// それを埋めることが、カメラを中断させてはいけない。
 func TestCaptureUnchangedIgnoresTheInactiveSources(t *testing.T) {
 	base := mjpegConfig("http://camera.invalid/")
 
@@ -1120,19 +1114,19 @@ func TestCaptureUnchangedIgnoresTheInactiveSources(t *testing.T) {
 	}
 }
 
-// A save that failed is reported as "this will be lost on restart". Advancing
-// the base anyway would fold the change into the next successful save and
-// write out the very thing that error promised was temporary.
-// startWithAnUnwritableConfig runs a bridge whose settings file cannot be
-// written, and returns it along with the path once the obstruction has been
-// cleared, so the caller can watch what the next save does.
+// 失敗した保存は「これは再起動で失われる」と報告される。それでも基点を進めると、
+// その変更が次の成功した保存に畳み込まれ、あのエラーが一時的だと約束したものが
+// そのまま書き出される。
+// startWithAnUnwritableConfig は、設定ファイルを書けないブリッジを走らせ、障害物を
+// 取り除いたうえでパスと一緒に返す。呼び出し側が、次の保存が何をするかを観察できる
+// ようにするため。
 func startWithAnUnwritableConfig(t *testing.T, ctx context.Context) (*Bridge, string) {
 	t.Helper()
 
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
 
-	// A directory where the file belongs fails the rename.
+	// ファイルがあるべき場所のディレクトリが rename を失敗させる。
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1155,10 +1149,10 @@ func startWithAnUnwritableConfig(t *testing.T, ctx context.Context) (*Bridge, st
 	return b, path
 }
 
-// Retrying is the obvious thing to do with a change that was applied but not
-// saved, and it has to actually write it. The retry sends settings the running
-// bridge already has, so there is nothing to diff against it -- the pending
-// write is the only record that the file is behind.
+// 適用されたが保存されなかった変更に対して、再試行するのは当然の手であり、それは
+// 実際に書けなければならない。再試行が送るのは動作中のブリッジが既に持っている設定
+// なので、それとの差分は無い。ファイルが遅れていることを示す唯一の記録が、保留中の
+// 書き込みだ。
 func TestBridgeApplyRetryPersistsAChangeThatFailedToSave(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1177,9 +1171,9 @@ func TestBridgeApplyRetryPersistsAChangeThatFailedToSave(t *testing.T) {
 	}
 }
 
-// The same pending write also rides along with the next unrelated change. The
-// running bridge has been using the value all along, so leaving it out would
-// keep the file describing a configuration that is not the one in effect.
+// 同じ保留中の書き込みは、次の無関係な変更にも相乗りする。動作中のブリッジはずっと
+// その値を使ってきたので、置き去りにすればファイルは、有効ではない設定を記述し
+// 続けることになる。
 func TestBridgeApplyCarriesAnUnsavedChangeIntoTheNextSave(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1203,10 +1197,9 @@ func TestBridgeApplyCarriesAnUnsavedChangeIntoTheNextSave(t *testing.T) {
 	}
 }
 
-// The settings file is not written only from here: the tray offers "Edit
-// settings", and the values that need a restart can only be changed that way.
-// A save built on the file as it was at startup would write those edits back
-// over the moment anything else was changed.
+// 設定ファイルを書くのはここだけではない。トレイには「設定を編集」があり、再起動を
+// 要する値はその方法でしか変えられない。起動時のファイルを土台にした保存は、他の
+// 何かが変わった瞬間にその編集を上書きしてしまう。
 func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
@@ -1226,8 +1219,8 @@ func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// The user edits the file by hand. server.listen is one of the settings
-	// that can only be changed this way, which is what makes losing it likely.
+	// ユーザーが手でファイルを編集する。server.listen はこの方法でしか変えられない
+	// 設定の 1 つであり、だからこそ失われやすい。
 	edited := fileCfg
 	edited.Server.Listen = "127.0.0.1:19999"
 	edited.Source.UVC.Device = "picked while running"
@@ -1235,7 +1228,7 @@ func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 		t.Fatalf("Save the edit: %v", err)
 	}
 
-	// Then changes something unrelated through the tray before restarting.
+	// そして再起動する前に、トレイから無関係なものを変更する。
 	updated := b.Snapshot()
 	updated.Server.HoldOnSourceLoss = true
 	if err := b.Apply(ctx, updated); err != nil {
@@ -1257,10 +1250,9 @@ func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 	}
 }
 
-// extra_headers is a set of independent settings that happens to be written as
-// one table. Treating it as a single value means changing one header through
-// the API takes out a header the user added to the file, which is the very
-// thing merging by leaf exists to prevent.
+// extra_headers は、独立した設定の集まりがたまたま 1 つのテーブルとして書かれている
+// もの。これを 1 つの値として扱うと、API 越しにヘッダーを 1 つ変えたことで、ユーザーが
+// ファイルに足したヘッダーが消える。葉ごとの併合は、まさにそれを防ぐために存在する。
 func TestBridgeApplyKeepsHeadersAddedToTheFileByHand(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
@@ -1281,15 +1273,15 @@ func TestBridgeApplyKeepsHeadersAddedToTheFileByHand(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// The user adds a header to the file by hand while the bridge runs.
+	// ブリッジが動いている間に、ユーザーが手でファイルにヘッダーを足す。
 	edited := fileCfg
 	edited.Server.ExtraHeaders = map[string]string{"X-Original": "kept", "X-Added-By-Hand": "also kept"}
 	if err := config.Save(path, edited); err != nil {
 		t.Fatalf("Save the edit: %v", err)
 	}
 
-	// Then changes a different header through the API, whose snapshot of the
-	// table predates the edit.
+	// そして API 越しに別のヘッダーを変更する。API 側が持つテーブルの写しは、その
+	// 編集より前のもの。
 	updated := b.Snapshot()
 	updated.Server.ExtraHeaders = map[string]string{"X-Original": "changed"}
 	if err := b.Apply(ctx, updated); err != nil {
@@ -1308,8 +1300,8 @@ func TestBridgeApplyKeepsHeadersAddedToTheFileByHand(t *testing.T) {
 	}
 }
 
-// Removing a header is a change to that key like any other, and has to reach
-// the file.
+// ヘッダーの削除も、他と同じくそのキーに対する変更であり、ファイルまで届かなければ
+// ならない。
 func TestBridgeApplyRemovesAHeaderTheCallerDropped(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
@@ -1348,9 +1340,8 @@ func TestBridgeApplyRemovesAHeaderTheCallerDropped(t *testing.T) {
 	}
 }
 
-// Nothing can be started while paused, so nothing can be proven. Taking the
-// change anyway would swap a working configuration for an unproven one and
-// write it out, and resume does not verify either.
+// 一時停止中は何も起動できないので、何も証明できない。それでも変更を受け取ると、
+// 動いている設定を未検証のものと取り換えて書き出すことになるし、再開もまた検証しない。
 func TestBridgeApplyRejectsASourceChangeWhilePaused(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	other := mjpegUpstream(t, testJPEG(t, 16, 16))
@@ -1394,9 +1385,8 @@ func TestBridgeApplyRejectsASourceChangeWhilePaused(t *testing.T) {
 	}
 }
 
-// Pausing is for releasing the camera, so the settings that do not touch it
-// still have to be changeable while paused -- including the one about what to
-// do when there is no source.
+// 一時停止はカメラを解放するためのものなので、カメラに触れない設定は一時停止中でも
+// 変更できなければならない。ソースが無いときにどうするか、という設定も含めて。
 func TestBridgeApplyAllowsAServerChangeWhilePaused(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
@@ -1422,10 +1412,9 @@ func TestBridgeApplyAllowsAServerChangeWhilePaused(t *testing.T) {
 	}
 }
 
-// A settings file that will not parse is most likely one the user is part way
-// through editing. Writing over it to persist a change that is already in
-// effect trades their edit for something that could just as well be written a
-// moment later.
+// 解析できない設定ファイルは、ユーザーが編集の途中である可能性が最も高い。既に
+// 有効になっている変更を保存するためにそれを上書きすることは、少し後でも書ける
+// ものと引き換えに、その編集を捨てることになる。
 func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
@@ -1445,7 +1434,7 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// Mid-edit: a half-typed table header.
+	// 編集の途中。打ちかけのテーブルヘッダー。
 	halfEdited := "[server\nlisten = '127.0.0.1:18080'\n"
 	if err := os.WriteFile(path, []byte(halfEdited), 0o644); err != nil {
 		t.Fatalf("write the half-edited file: %v", err)
@@ -1458,7 +1447,7 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 		t.Fatalf("Apply error = %v, want config.ErrNotSaved", err)
 	}
 
-	// The change is in effect even though it could not be written.
+	// 書けなかったにもかかわらず、変更は有効になっている。
 	if !b.Snapshot().Server.HoldOnSourceLoss {
 		t.Error("the change was not applied to the running settings")
 	}
@@ -1470,7 +1459,7 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 		t.Errorf("the file was rewritten:\n%s", onDisk)
 	}
 
-	// Once the file parses again, the held change is written.
+	// ファイルが再び解析できるようになれば、保持していた変更が書かれる。
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("Save the finished edit: %v", err)
 	}
@@ -1486,16 +1475,15 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 	}
 }
 
-// A driver can stop on its own, on an error retrying cannot fix. Nothing
-// restarts it, and the settings that produced it are still the current ones,
-// so re-selecting that same source is how a user recovers once the cause is
-// dealt with. Skipping the restart because the settings match would answer
-// that with success and leave the bridge producing nothing.
+// ドライバは、再試行では直らないエラーで自力で止まることがある。それを再起動する
+// ものは無く、それを生んだ設定は今も現在の設定のままなので、原因に対処した後で同じ
+// ソースを選び直すのがユーザーの復帰手段になる。設定が同じだからと再起動を省けば、
+// それに成功で応えたうえで、ブリッジは何も出さないまま残る。
 func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
 	shortenVerify(t, 5*time.Second)
 	jpg := testJPEG(t, 16, 16)
 
-	// 404 is fatal to the MJPEG driver: it stops rather than reconnecting.
+	// 404 は MJPEG ドライバにとって致命的。再接続せず停止する。
 	var serving atomic.Bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !serving.Load() {
@@ -1533,7 +1521,7 @@ func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// Wait for the driver to give up.
+	// ドライバが諦めるのを待つ。
 	deadline := time.Now().Add(5 * time.Second)
 	for b.captureRunningForTest() {
 		if time.Now().After(deadline) {
@@ -1545,7 +1533,7 @@ func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
 		t.Fatal("a frame arrived from an upstream that was answering 404")
 	}
 
-	// The cause is dealt with, and the user picks the same source again.
+	// 原因に対処し、ユーザーが同じソースをもう一度選ぶ。
 	serving.Store(true)
 	if err := b.Apply(ctx, b.Snapshot()); err != nil {
 		t.Fatalf("re-applying the same settings after a fatal stop: %v", err)
@@ -1553,11 +1541,10 @@ func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
 	waitForFrame(t, frames, 5*time.Second)
 }
 
-// Settings that cannot produce a driver at all are a dead end, not a retry:
-// there is nothing running to reconnect. Left unrecorded, the tray says
-// "connecting..." and /healthz says only that the source is not connected --
-// both describing something that is trying. The default settings name no UVC
-// device, so this is what a new user meets first.
+// そもそもドライバを生み出せない設定は、再試行ではなく行き止まり。再接続すべき
+// ものが動いていない。記録しなければトレイは "connecting..." と表示し、/healthz は
+// ソースが未接続だとしか言わない。どちらも「試している何か」を描写している。既定の
+// 設定は UVC のデバイスを指定していないので、新しいユーザーが最初に出会うのがこれ。
 func TestBridgeRecordsSettingsThatCannotBuildADriver(t *testing.T) {
 	cfg := config.Default() // uvc, with no device name
 	tracker := status.New()
@@ -1585,12 +1572,13 @@ func TestBridgeRecordsSettingsThatCannotBuildADriver(t *testing.T) {
 	}
 }
 
-// Two changes made while the settings file is unparsable both have to survive.
+// 設定ファイルが解析できない間に行われた 2 つの変更は、どちらも生き延びなければ
+// ならない。
 //
-// The second one diffs to nothing against the first: by then the running
-// configuration already carries it. So the pending write is the only record
-// that the first change exists, and rebuilding it without carrying the earlier
-// one forward loses it the moment the file becomes readable again.
+// 2 つ目は 1 つ目との差分が無い。その時点で動作中の設定が既にそれを持っているから。
+// つまり 1 つ目の変更が存在することを示す唯一の記録が保留中の書き込みであり、先の
+// 分を持ち越さずにそれを組み立て直せば、ファイルが再び読めるようになった瞬間に
+// 失われる。
 func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
 	path := filepath.Join(t.TempDir(), config.FileName)
@@ -1626,7 +1614,7 @@ func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 		t.Fatalf("second Apply = %v, want config.ErrNotSaved", err)
 	}
 
-	// The user finishes the edit, and the next change writes everything.
+	// ユーザーが編集を終え、次の変更がすべてを書き出す。
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("repair the file: %v", err)
 	}
@@ -1646,23 +1634,23 @@ func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 	}
 }
 
-// A pending write carries the whole configuration, most of which is just a
-// copy of the file from when the save failed. Only the leaves the bridge
-// itself changed may be laid back over the file: the rest has to give way to
-// whatever the user has edited since, or the retry silently reverts them.
+// 保留中の書き込みは設定全体を運んでおり、その大半は保存が失敗した時点のファイルの
+// 写しでしかない。ファイルの上に敷き直してよいのは、ブリッジ自身が変えた葉だけ。
+// 残りはその後ユーザーが編集したものに道を譲らなければならない。さもないと再試行が
+// 黙ってそれらを元に戻す。
 func TestBridgeUnsavedChangesDoNotRevertLaterFileEdits(t *testing.T) {
 	path := filepath.Join(t.TempDir(), config.FileName)
 
-	// What the file held when the save failed.
+	// 保存が失敗した時点でファイルが持っていた内容。
 	whenItFailed := config.Default()
 	whenItFailed.Server.Listen = "127.0.0.1:11111"
 
-	// What that save wanted to write: the same file, plus the boundary the
-	// bridge was asked to change.
+	// その保存が書こうとしていた内容。同じファイルに、ブリッジが変更を求められた
+	// boundary を加えたもの。
 	wanted := whenItFailed
 	wanted.Server.Boundary = "from-the-bridge"
 
-	// The user has edited the file again since.
+	// その後ユーザーがファイルをまた編集している。
 	editedSince := config.Default()
 	editedSince.Server.Listen = "127.0.0.1:22222"
 	editedSince.Source.UVC.Device = "picked by hand"
@@ -1690,13 +1678,13 @@ func TestBridgeUnsavedChangesDoNotRevertLaterFileEdits(t *testing.T) {
 	}
 }
 
-// A settings file deleted while a write is pending has to be recreated from
-// the newest thing known about it, which is what the pending write recorded --
-// not the snapshot taken at startup. Otherwise an edit made before the file
-// went missing comes back undone.
+// 書き込みが保留されている間に削除された設定ファイルは、それについて分かっている
+// 最も新しいもの — 起動時の写しではなく、保留中の書き込みが記録した内容 — から
+// 作り直さなければならない。さもないと、ファイルが消える前に行われた編集が、
+// 取り消された形で戻ってくる。
 func TestBridgeRecreatesADeletedFileFromTheNewestKnownContents(t *testing.T) {
 	path := filepath.Join(t.TempDir(), config.FileName)
-	// Deliberately not written: the file is gone.
+	// 意図的に書かない。ファイルは消えている。
 
 	whenItFailed := config.Default()
 	whenItFailed.Server.Listen = "127.0.0.1:11111"
@@ -1732,10 +1720,10 @@ func shortenRecheck(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { undecodableRecheckInterval = previous })
 }
 
-// Structure is not an image. A source sending SOI/EOI passes every per-frame
-// check there is, so without a decode the hub would carry it, /healthz would
-// say 200 and the tray would show an fps -- all describing a stream the tracker
-// cannot use. Nothing is published until one frame has decoded.
+// 構造は画像ではない。SOI/EOI を送るソースはフレームごとの検査をすべて通るので、
+// デコードが無ければ hub はそれを運び、/healthz は 200 を返し、トレイには fps が
+// 出る。どれもトラッカーが使えないストリームを描写している。1 枚デコードできるまで
+// 何も配信しない。
 func TestPumpPublishesNothingUntilAFrameDecodes(t *testing.T) {
 	shortenRecheck(t, 0)
 
@@ -1758,7 +1746,7 @@ func TestPumpPublishesNothingUntilAFrameDecodes(t *testing.T) {
 		t.Errorf("first frame reported as %v, want the decode failure exactly once", reported)
 	}
 
-	// And once something real arrives, it flows.
+	// そして本物が届けば、流れ出す。
 	frames = make(chan core.Frame, 4)
 	frames <- core.Frame{Data: hollow}
 	frames <- core.Frame{Data: jpg}
@@ -1780,10 +1768,9 @@ func TestPumpPublishesNothingUntilAFrameDecodes(t *testing.T) {
 	}
 }
 
-// A frame forwarded untouched is never decoded here, so the pixel ceiling has
-// to be applied to its header instead: the client is the one that decodes it,
-// and a few hundred bytes declaring an enormous image asks it for the
-// allocation this limit exists to refuse.
+// そのまま流すフレームはここでデコードされないので、ピクセルの上限は代わりに
+// ヘッダーへ適用する。デコードするのはクライアントであり、巨大な画像を宣言する
+// 数百バイトは、この上限が拒むために存在するその確保を、クライアントに要求する。
 func TestPumpDropsAnOversizedFrameEvenWithNoTransform(t *testing.T) {
 	shortenRecheck(t, 0)
 
@@ -1791,8 +1778,8 @@ func TestPumpDropsAnOversizedFrameEvenWithNoTransform(t *testing.T) {
 	huge := hugeDimensions(t, testJPEG(t, 16, 16))
 
 	frames := make(chan core.Frame, 4)
-	// A real frame first, so the run is past the decode gate and into the
-	// per-frame path this is about.
+	// まず本物のフレームを 1 枚。デコードの関門を抜けて、ここで問題にしている
+	// フレームごとの経路に入るため。
 	frames <- core.Frame{Data: jpg}
 	frames <- core.Frame{Data: huge}
 	close(frames)
@@ -1809,15 +1796,14 @@ func TestPumpDropsAnOversizedFrameEvenWithNoTransform(t *testing.T) {
 	}
 }
 
-// hugeDimensions rewrites the frame header to declare an image far past the
-// pixel limit, leaving the compressed data as small as it was. That is the
-// shape of the problem: nothing about the byte count says what decoding it
-// will ask for.
+// hugeDimensions は、フレームのヘッダーを書き換えてピクセル上限をはるかに超える
+// 画像を宣言させる。圧縮データの大きさは元のまま。それがこの問題の形そのもの。
+// バイト数は、デコードが何を要求するかについて何も語らない。
 func hugeDimensions(t *testing.T, jpg []byte) []byte {
 	t.Helper()
 	out := bytes.Clone(jpg)
 	for i := 0; i+9 < len(out); i++ {
-		// SOF0: FF C0, length, precision, then height and width.
+		// SOF0。FF C0、長さ、精度、そして高さと幅。
 		if out[i] == 0xFF && out[i+1] == 0xC0 {
 			out[i+5], out[i+6] = 0xFF, 0xFF
 			out[i+7], out[i+8] = 0xFF, 0xFF
@@ -1835,20 +1821,20 @@ func hugeDimensions(t *testing.T, jpg []byte) []byte {
 	return nil
 }
 
-// A transform slower than the camera would otherwise leave the driver blocked
-// on a full slot, and a blocked driver stops reading its socket: the images
-// queue up there instead and the stream falls further behind live with every
-// one. Only the newest frame is worth keeping for mouth tracking.
+// カメラより遅い変換は、そうしなければドライバを満杯の枠の上でブロックさせる。
+// ブロックしたドライバはソケットを読むのをやめるので、画像は代わりにそちらへ並び、
+// その 1 枚ごとにストリームは実時間からさらに遅れる。口の動きを追う用途で保つ価値が
+// あるのは最新のフレームだけ。
 func TestLatestOnlyKeepsOnlyTheNewestFrameWaiting(t *testing.T) {
 	in := make(chan core.Frame)
 	out := latestOnly(in, discardLogger())
 
-	// Three frames with nothing reading yet: the first fills the slot, the
-	// next two replace what is waiting.
+	// まだ誰も読んでいない状態でフレームを 3 枚。1 枚目が枠を埋め、残りの 2 枚は
+	// 待っているものを置き換える。
 	for i := 1; i <= 3; i++ {
 		in <- core.Frame{Seq: uint64(i)}
 	}
-	// The forwarder may still be moving the last one across.
+	// 転送側がまだ最後の 1 枚を運んでいる最中かもしれない。
 	deadline := time.Now().Add(2 * time.Second)
 	var got core.Frame
 	for time.Now().Before(deadline) {
@@ -1862,15 +1848,15 @@ func TestLatestOnlyKeepsOnlyTheNewestFrameWaiting(t *testing.T) {
 		t.Fatalf("read frame %d, want the newest one", got.Seq)
 	}
 
-	// Nothing else is queued behind it.
+	// その後ろに並んでいるものは無い。
 	select {
 	case extra := <-out:
 		t.Errorf("frame %d was still waiting, want the older ones dropped", extra.Seq)
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	// Closing the driver's channel closes this one, which is what lets the
-	// pump finish and the capture goroutines exit.
+	// ドライバのチャネルを閉じるとこちらも閉じ、それが pump を終わらせ、キャプチャの
+	// goroutine を終了させる。
 	close(in)
 	select {
 	case _, open := <-out:
@@ -1882,8 +1868,8 @@ func TestLatestOnlyKeepsOnlyTheNewestFrameWaiting(t *testing.T) {
 	}
 }
 
-// The driver must not be left waiting for the transform. This is the property
-// the queue exists for: a send goes through even while nothing downstream is
+// ドライバを変換待ちにしてはいけない。この性質のためにこの枠が存在する。下流が
+// 何も読んでいない間でも送信は通る
 // reading.
 func TestLatestOnlyNeverBlocksTheDriver(t *testing.T) {
 	in := make(chan core.Frame)
@@ -1909,9 +1895,8 @@ func TestLatestOnlyNeverBlocksTheDriver(t *testing.T) {
 	}
 }
 
-// The tray builds its menu once, with the labels the language gave it, so
-// accepting a change here would save it and report success while every word on
-// screen stayed as it was.
+// トレイはメニューを一度だけ、その言語が与えたラベルで組み立てる。だからここで
+// 変更を受け入れると、保存して成功を報告する一方、画面上の言葉は一つも変わらない。
 func TestApplyRefusesALanguageChangeWhileRunning(t *testing.T) {
 	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
 	frames := hub.New()
@@ -1936,8 +1921,8 @@ func TestApplyRefusesALanguageChangeWhileRunning(t *testing.T) {
 	}
 }
 
-// waitFor polls until want holds, so a test does not have to guess how long a
-// driver takes to notice something.
+// waitFor は want が成り立つまで polling する。ドライバが何かに気づくまでの時間を
+// テストが当てずっぽうで決めずに済むようにするため。
 func waitFor(t *testing.T, timeout time.Duration, what string, want func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -1950,8 +1935,8 @@ func waitFor(t *testing.T, timeout time.Duration, what string, want func() bool)
 	t.Fatalf("timed out after %s waiting for %s", timeout, what)
 }
 
-// silentUpstream answers and then says nothing, so a driver connects and waits
-// where a verification cannot.
+// silentUpstream は応答した後に何も言わない。ドライバは接続して待ち続け、検証は
+// そこで待てない。
 func silentUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	done := make(chan struct{})
@@ -1970,16 +1955,15 @@ func silentUpstream(t *testing.T) *httptest.Server {
 	return ts
 }
 
-// The corner from the field: a bridge that came up on settings it could never
-// start, then a change that fails verification. Going back to settings that
-// were not running either fails for a second, unrelated reason, and reporting
-// both buries the one the caller asked about. What matters more is what comes
-// after -- the user has to be able to pick a source that works.
+// 実機で起きた袋小路。そもそも起動できない設定で立ち上がったブリッジに、検証で
+// 失敗する変更が来る。動いていなかった設定へ戻ろうとすると、2 つ目の無関係な理由で
+// また失敗し、両方を報告すれば、呼び出し側が尋ねた方が埋もれる。より重要なのは
+// その後に何ができるか。ユーザーが動くソースを選べなければならない。
 func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T) {
 	shortenVerify(t, 200*time.Millisecond)
 
 	frames := hub.New()
-	// uvc with no device name: a driver that cannot even be built.
+	// デバイス名の無い uvc。そもそも組み立てられないドライバ。
 	b := New(config.Default(), "", frames, status.New(), discardLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1989,7 +1973,7 @@ func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T
 	}
 	defer b.Stop()
 
-	// A change that connects but never delivers, so verification rejects it.
+	// 接続はするが何も届けない変更。検証はこれを拒否する。
 	silent := mjpegConfig(silentUpstream(t).URL)
 	err := b.Apply(ctx, silent)
 	if err == nil {
@@ -1999,7 +1983,7 @@ func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T
 		t.Errorf("error = %v, want only the failure the caller asked about", err)
 	}
 
-	// The point of all of it: another source can still be chosen.
+	// すべての目的はここ。別のソースを選べること。
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
 	if err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
 		t.Fatalf("could not switch to a working source afterwards: %v", err)
@@ -2007,12 +1991,12 @@ func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T
 	waitForFrame(t, frames, 5*time.Second)
 }
 
-// Resuming is not a claim that the source works, any more than starting up is.
-// Failing it left the bridge paused, and a paused bridge would not take a
-// different source: the two together had no way out but the settings file.
+// 再開は、起動と同じくソースが機能するという主張ではない。これを失敗させると
+// ブリッジは一時停止のまま残り、一時停止したブリッジは別のソースを受け付けない。
+// この 2 つが揃うと、設定ファイル以外に出口が無くなる。
 //
-// The pause and the resume are the ones in the reported log, on a bridge that
-// came up on a camera it could not build.
+// ここでの一時停止と再開は、報告されたログにあるものと同じ。組み立てられない
+// カメラで立ち上がったブリッジの上での話。
 func TestBridgeResumesEvenWhenTheSourceCannotStart(t *testing.T) {
 	shortenVerify(t, 200*time.Millisecond)
 
@@ -2044,16 +2028,15 @@ func TestBridgeResumesEvenWhenTheSourceCannotStart(t *testing.T) {
 		t.Error("the status has no reason, so nothing tells the user why there is no picture")
 	}
 
-	// And the way out is open: a source that works can be chosen.
+	// そして出口は開いている。動くソースを選べる。
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
 	if err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
 		t.Fatalf("could not switch to a working source after resuming: %v", err)
 	}
 }
 
-// Refusing a change while paused protects a working source from being traded
-// for an unproven one. With no working source it protects nothing, and takes
-// away the only move left.
+// 一時停止中の変更の拒否は、動いているソースが未検証のものと引き換えにされるのを
+// 守っている。動いているソースが無ければ何も守らず、残された唯一の手を奪うだけ。
 func TestBridgeAcceptsASourceChangeWhilePausedWithNothingRunning(t *testing.T) {
 	shortenVerify(t, 200*time.Millisecond)
 
@@ -2079,7 +2062,7 @@ func TestBridgeAcceptsASourceChangeWhilePausedWithNothingRunning(t *testing.T) {
 		t.Errorf("source = %q, want the change to have been kept", got)
 	}
 
-	// Still paused, so the change is held rather than started.
+	// 依然として一時停止中なので、変更は起動されず保持される。
 	if !b.Paused() {
 		t.Error("the change unpaused the bridge")
 	}
@@ -2089,8 +2072,8 @@ func TestBridgeAcceptsASourceChangeWhilePausedWithNothingRunning(t *testing.T) {
 	waitForFrame(t, frames, 5*time.Second)
 }
 
-// The protection itself has to survive: a source that works is not traded for
-// an unproven one just because the bridge is paused.
+// 保護そのものは生き延びなければならない。ブリッジが一時停止しているというだけで、
+// 動いているソースが未検証のものと引き換えにされてはいけない。
 func TestBridgeStillRefusesASourceChangeWhilePausedWithAWorkingSource(t *testing.T) {
 	frames := hub.New()
 	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
@@ -2118,15 +2101,15 @@ func TestBridgeStillRefusesASourceChangeWhilePausedWithAWorkingSource(t *testing
 	}
 }
 
-// Startup and resume launch without waiting for a frame, so all they can
-// record is that a driver began. A driver that stops on its own a moment later
-// -- a 404, ffmpeg gone from disk -- leaves settings that look proven and are
-// not, and the refusal that protects a working source from being traded away
-// while paused then protects nothing while blocking the only way out.
+// 起動と再開はフレームを待たずに立ち上げるので、記録できるのは「ドライバが動き
+// 始めた」ことだけ。その直後に自力で止まるドライバ — 404、ディスクから消えた
+// ffmpeg — は、proven に見えて実はそうでない設定を残す。すると、動いているソースが
+// 一時停止中に引き換えにされるのを守るはずの拒否が、何も守らないまま唯一の出口を
+// 塞ぐことになる。
 func TestBridgeAcceptsAChangeWhilePausedAfterTheSourceDiedOnItsOwn(t *testing.T) {
 	shortenVerify(t, 200*time.Millisecond)
 
-	// 404 is fatal to the MJPEG driver: it stops rather than reconnecting.
+	// 404 は MJPEG ドライバにとって致命的。再接続せず停止する。
 	dead := httptest.NewServer(http.HandlerFunc(http.NotFound))
 	defer dead.Close()
 
@@ -2135,7 +2118,7 @@ func TestBridgeAcceptsAChangeWhilePausedAfterTheSourceDiedOnItsOwn(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Startup does not verify, so this succeeds: a driver was launched.
+	// 起動時は検証しないので、これは成功する。ドライバは立ち上がった。
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -2161,14 +2144,14 @@ func TestBridgeAcceptsAChangeWhilePausedAfterTheSourceDiedOnItsOwn(t *testing.T)
 	waitForFrame(t, frames, 5*time.Second)
 }
 
-// Tearing the failed source down clears the status. Going back to settings
-// that were not running is still worth doing for that reason alone: without
-// it a failed camera change answers a precise complaint with "no source".
+// 失敗したソースを畳むとステータスが消える。動いていなかった設定へ戻ることには、
+// その理由だけでもやる価値がある。さもないと、失敗したカメラ変更が、具体的な訴えに
+// 「ソース無し」で応えることになる。
 func TestBridgeKeepsTheDiagnosisWhenTheRevertCannotStartEither(t *testing.T) {
 	shortenVerify(t, 200*time.Millisecond)
 
 	tracker := status.New()
-	// uvc with no device name: a driver that cannot even be built.
+	// デバイス名の無い uvc。そもそも組み立てられないドライバ。
 	b := New(config.Default(), "", hub.New(), tracker, discardLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2196,9 +2179,9 @@ func TestBridgeKeepsTheDiagnosisWhenTheRevertCannotStartEither(t *testing.T) {
 	}
 }
 
-// A source changed while paused is the source the status has to name. Left
-// alone it keeps naming the one that was replaced, with the error that one
-// had, so a camera swapped while paused reads as the old camera still failing.
+// 一時停止中に変更されたソースは、ステータスが名乗るべきソース。放っておくと
+// 置き換えられた側を、そのソースが抱えていたエラーごと名乗り続けるので、一時停止中に
+// 交換したカメラが「古いカメラがまだ失敗している」ように見える。
 func TestBridgeNamesTheNewSourceWhenItIsChangedWhilePaused(t *testing.T) {
 	shortenVerify(t, 200*time.Millisecond)
 

@@ -1,18 +1,20 @@
-// Package i18n holds the text PTCamBridge shows to the person using it, in
-// every language it is offered in.
+// Package i18n は、PTCamBridge が使う人に見せるテキストを、提供する全言語分
+// 保持します。
 //
-// What is in here and what is not is a deliberate line. The tray, the console
-// output and the handful of errors a user is expected to act on are written
-// for a reader, so they are translated. The log is not: it is a diagnostic
-// record, it gets pasted into bug reports and searched for by its wording, and
-// a log that changes language with the machine it ran on is worth less to
-// everyone who has to read it afterwards. Neither are the /stats and
-// /api/v1/* responses, which are read by programs.
+// ここに入れるものと入れないものの線引きは意図的です。トレイ、-list-devices と
+// -restore-cache の出力、そしてユーザーが対処すると想定される少数のエラーは
+// 読み手に向けて書かれたものなので、翻訳します。ログは違います。ログは診断の
+// 記録であり、不具合報告に貼られ、その文言で検索されます。実行した機械によって
+// 言語が変わるログは、後から読む全員にとって価値が下がります。/stats と
+// /api/v1/* の応答も同様で、これらはプログラムが読みます。
 //
-// The catalogue is a map rather than a generated bundle because there are a
-// few dozen strings and two languages. Bringing in golang.org/x/text for that
-// would add a dependency and a build step to a project whose distribution
-// story is one cgo-free executable.
+// コンソールへ出るもの全部ではありません。main が最後に ptcambridge: <err> として
+// 出す起動時のエラーは英語のままです。ログと同じ性格のものですし、そもそもログが
+// まだ立ち上がっていない時点の出力でもあります。
+//
+// カタログを生成物ではなく map にしているのは、文字列が数十で言語が 2 つだから
+// です。そのために golang.org/x/text を持ち込むのは、cgo 無しの実行ファイル 1 つを
+// 配るというこのプロジェクトに対して、依存とビルド手順を余計に増やすことになります。
 package i18n
 
 import (
@@ -21,25 +23,25 @@ import (
 	"strings"
 )
 
-// Lang is a language the interface is offered in.
+// Lang は、画面を提供する言語です。
 type Lang string
 
 const (
-	// English is the language the source text is written in, and the one
-	// anything missing falls back to.
+	// English は原文が書かれている言語であり、何かが欠けているときの
+	// 落とし先でもあります。
 	English  Lang = "en"
 	Japanese Lang = "ja"
-	// Auto asks for the language the operating system is set to.
+	// Auto は、OS に設定されている言語に従うという指定です。
 	Auto Lang = "auto"
 )
 
-// Supported lists the languages that can be chosen, Auto included.
+// Supported は、選択できる言語の一覧です。Auto を含みます。
 func Supported() []Lang { return []Lang{Auto, English, Japanese} }
 
-// ParseLang reads a configured language, resolving Auto against the system.
-// An empty value means Auto. An unknown one is an error rather than a silent
-// fall back to English: a user who wrote "jp" should be told, not left
-// wondering why nothing changed.
+// ParseLang は設定された言語を読み、Auto はシステムに問い合わせて解決します。
+// 空は Auto を意味します。未知の値は、黙って英語に落とすのではなくエラーにします。
+// "jp" と書いたユーザーには、何も変わらない理由を悩ませるのではなく、そう伝える
+// べきだからです。
 func ParseLang(s string) (Lang, error) {
 	switch Lang(strings.ToLower(strings.TrimSpace(s))) {
 	case "", Auto:
@@ -52,13 +54,13 @@ func ParseLang(s string) (Lang, error) {
 	return English, fmt.Errorf("i18n: unknown language %q; use auto, en or ja", s)
 }
 
-// Detect returns the language the operating system is set to, or English when
-// it is anything this program does not have text for.
+// Detect は OS に設定されている言語を返します。このプログラムがテキストを持たない
+// 言語だった場合は英語を返します。
 func Detect() Lang { return fromTag(systemLanguage()) }
 
-// fromTag maps a BCP 47 or POSIX locale onto a supported language. Only the
-// primary subtag is considered: ja-JP and ja_JP.UTF-8 are both Japanese, and
-// there is nothing here that varies by region.
+// fromTag は、BCP 47 または POSIX のロケールを対応言語に写します。見るのは主
+// サブタグだけです。ja-JP も ja_JP.UTF-8 もどちらも日本語であり、ここには地域に
+// よって変わるものはありません。
 func fromTag(tag string) Lang {
 	tag = strings.ToLower(strings.TrimSpace(tag))
 	for _, cut := range []string{"-", "_", "."} {
@@ -72,8 +74,8 @@ func fromTag(tag string) Lang {
 	return English
 }
 
-// envLanguage reads the POSIX locale variables in the order the C library
-// does. It is the whole of detection off Windows, and the override on it.
+// envLanguage は、C ライブラリと同じ順序で POSIX のロケール変数を読みます。
+// Windows 以外ではこれが判定のすべてであり、Windows ではこれが上書き手段です。
 func envLanguage() string {
 	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
@@ -83,19 +85,19 @@ func envLanguage() string {
 	return ""
 }
 
-// Key identifies one message. Keys rather than English strings as the lookup,
-// so that editing the English wording cannot silently orphan a translation.
+// Key はメッセージ 1 件を識別します。英語の文字列ではなくキーで引くのは、英語の
+// 文言を直したときに翻訳が黙って孤立しないようにするためです。
 type Key string
 
-// Printer renders messages in one language.
+// Printer は、1 つの言語でメッセージを組み立てます。
 //
-// A value rather than a package-level language, because the tray and the
-// console are handed one at startup and never change it, and a global would
-// make the tests order-dependent for no gain.
+// パッケージレベルの言語設定ではなく値にしているのは、トレイとコンソールが起動時に
+// 受け取ってそれきり変えないからです。グローバルにすると、得るものが無いままテストが
+// 順序に依存するようになります。
 type Printer struct{ lang Lang }
 
-// NewPrinter returns a printer for lang. An unsupported language prints
-// English, which is what every message is guaranteed to have.
+// NewPrinter は lang 用の printer を返します。対応していない言語では英語を出します。
+// 英語はすべてのメッセージが持つことを保証されているからです。
 func NewPrinter(lang Lang) Printer {
 	if lang != Japanese {
 		lang = English
@@ -103,14 +105,13 @@ func NewPrinter(lang Lang) Printer {
 	return Printer{lang: lang}
 }
 
-// Lang is the language this printer renders in.
+// Lang は、この printer が使う言語です。
 func (p Printer) Lang() Lang { return p.lang }
 
-// S returns the message for k.
+// S は k に対応するメッセージを返します。
 //
-// A key with no entry returns the key itself. That is deliberately ugly: it
-// shows up immediately in the interface instead of rendering as an empty menu
-// item, and a test already refuses to let one reach a release.
+// 登録の無いキーはキー自身を返します。これは意図的に不格好です。空のメニュー項目に
+// なる代わりに画面上ですぐ目に付きますし、そもそもテストがリリースまで到達させません。
 func (p Printer) S(k Key) string {
 	forms, ok := messages[k]
 	if !ok {
@@ -122,7 +123,7 @@ func (p Printer) S(k Key) string {
 	return forms[English]
 }
 
-// F formats the message for k with args.
+// F は k に対応するメッセージを args で整形します。
 func (p Printer) F(k Key, args ...any) string {
 	return fmt.Sprintf(p.S(k), args...)
 }

@@ -10,8 +10,8 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// The assembler owns the partial frame carried between reads, which is where
-// a driver would otherwise lose data at chunk boundaries.
+// 読み取りをまたいで持ち越される未完成のフレームは assembler が受け持つ。そうで
+// なければドライバは chunk の境目でデータを失う。
 func TestFrameAssemblerCarriesPartialFramesAcrossReads(t *testing.T) {
 	a := newFrameAssembler(core.SplitJPEGStream, 0)
 	jpg := testJPEG(t)
@@ -33,8 +33,8 @@ func TestFrameAssemblerCarriesPartialFramesAcrossReads(t *testing.T) {
 	}
 }
 
-// The driver reuses one read buffer, so the assembler must not hand back
-// slices that alias it.
+// ドライバは読み取りバッファを 1 つ使い回すので、assembler がそれを指すスライスを
+// 返してはいけない。
 func TestFrameAssemblerFramesSurviveBufferReuse(t *testing.T) {
 	a := newFrameAssembler(core.SplitJPEGStream, 0)
 	jpg := testJPEG(t)
@@ -87,8 +87,8 @@ func TestRunWithBackoffStopsOnCancellation(t *testing.T) {
 	}
 }
 
-// A configuration error repeats identically forever, so retrying it only
-// spins; the loop must give up and report it.
+// 設定の誤りは永遠にまったく同じ形で繰り返されるので、再試行しても空回りするだけ。
+// ループは諦めてそれを報告しなければならない。
 func TestRunWithBackoffGivesUpOnAFatalError(t *testing.T) {
 	sentinel := errors.New("bad device name")
 	attempts := 0
@@ -128,8 +128,8 @@ func TestSendHonoursCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// An unbuffered channel with no reader would block forever without the
-	// cancellation case.
+	// 読み手のいない非バッファチャネルは、キャンセルの分岐が無ければ永遠に
+	// ブロックする。
 	if err := send(ctx, make(chan core.Frame), []byte{0xFF, 0xD8, 0xFF, 0xD9}); err == nil {
 		t.Fatal("send should fail once the context is cancelled")
 	}

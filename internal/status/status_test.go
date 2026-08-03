@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// The tray needs to know which failures it may translate, and the tracker is
-// where the error value is last seen.
+// トレイはどの失敗を翻訳してよいかを知る必要があり、error の値が最後に渡るのは
+// tracker である。
 func TestTrackerNamesRecognisedFailures(t *testing.T) {
 	known := errors.New("no camera")
 	tracker := New(WithErrorKeys(func(err error) string {
@@ -27,8 +27,8 @@ func TestTrackerNamesRecognisedFailures(t *testing.T) {
 	}
 }
 
-// Connecting clears the reason along with the error, or the tray keeps
-// explaining a failure that is over.
+// 接続したらエラーと一緒に理由も消す。さもないとトレイは、既に終わった失敗を
+// 説明し続ける。
 func TestTrackerClearsTheKeyOnConnect(t *testing.T) {
 	tracker := New(WithErrorKeys(func(error) string { return "err.no_camera" }))
 	tracker.Disconnected("uvc", errors.New("no camera"))
@@ -39,8 +39,8 @@ func TestTrackerClearsTheKeyOnConnect(t *testing.T) {
 	}
 }
 
-// A tracker with no classifier still works; it just never asks for a
-// translation, which is what every existing caller expects.
+// 分類器の無い tracker も動く。ただ翻訳を求めないだけで、それが既存の呼び出し側
+// すべてが期待している挙動。
 func TestTrackerWithoutAClassifier(t *testing.T) {
 	tracker := New()
 	tracker.Disconnected("uvc", errors.New("no camera"))
