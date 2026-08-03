@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -273,9 +274,9 @@ func TestSerialStallLogsTheUnparsableStream(t *testing.T) {
 	}
 }
 
-// The reconnect loop comes back every few seconds. A board that is wrong the
-// same way every time must not fill the log with the same warning.
-func TestSerialStallWarnsOncePerDistinctStream(t *testing.T) {
+// The reconnect loop comes back every few seconds. Repeating the warning on
+// every pass would bury the log without adding anything.
+func TestSerialStallWarnsOncePerPort(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -284,27 +285,84 @@ func TestSerialStallWarnsOncePerDistinctStream(t *testing.T) {
 	if err := runUntilStall(t, s); err == nil {
 		t.Fatal("session returned nil, want a stall")
 	}
-	// Same stream again, as a reconnect would see.
-	s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: [][]byte{junk}}, nil }
+	// Reconnecting to the same port, which is what the retry loop does. The
+	// bytes differ because a live stream is joined wherever it happens to be,
+	// so keying on them rather than the port would warn all over again.
+	s.openPort = func(string, int) (serialPort, error) {
+		return &fakePort{chunks: [][]byte{bytes.Repeat([]byte{0x6B}, 64)}}, nil
+	}
 	if err := runUntilStall(t, s); err == nil {
 		t.Fatal("second session returned nil, want a stall")
 	}
 
 	if warns := strings.Count(logged.String(), "level=WARN"); warns != 1 {
-		t.Errorf("logged %d warnings for the same stream, want 1:\n%s", warns, logged.String())
+		t.Errorf("logged %d warnings for one port, want 1:\n%s", warns, logged.String())
+	}
+	// The bytes are still there for anyone who turns the level up.
+	if !strings.Contains(logged.String(), "level=DEBUG") {
+		t.Errorf("the repeat was not reported at debug:\n%s", logged.String())
+	}
+}
+
+// "auto" rotates between candidates, so remembering only the last stream would
+// warn again every time the rotation came back round to a port already
+// reported.
+func TestSerialStallWarnsOncePerPortAcrossTheRotation(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s, err := NewSerial(SerialConfig{Port: AutoPort}, log, nil)
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	s.listPorts = func() ([]SerialPort, error) {
+		return []SerialPort{{Name: "COM3", Vendor: "Espressif"}, {Name: "COM4", Vendor: "Espressif"}}, nil
+	}
+	// Each port carries its own unparsable stream.
+	streams := map[string][]byte{
+		"COM3": bytes.Repeat([]byte{0xAA}, 64),
+		"COM4": bytes.Repeat([]byte{0xBB}, 64),
+	}
+	s.openPort = func(name string, _ int) (serialPort, error) {
+		return &fakePort{chunks: [][]byte{streams[name]}}, nil
 	}
 
-	// A stream that changed is news again: the board may have been reflashed
-	// or a different device may now be on that port.
-	logged.Reset()
-	s.openPort = func(string, int) (serialPort, error) {
-		return &fakePort{chunks: [][]byte{bytes.Repeat([]byte{0x77}, 64)}}, nil
+	// A, B, then round to A again.
+	for i := 0; i < 3; i++ {
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatalf("session %d returned nil, want a stall", i+1)
+		}
 	}
-	if err := runUntilStall(t, s); err == nil {
-		t.Fatal("third session returned nil, want a stall")
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != 2 {
+		t.Errorf("logged %d warnings for two ports, want 2:\n%s", warns, logged.String())
 	}
-	if warns := strings.Count(logged.String(), "level=WARN"); warns != 1 {
-		t.Errorf("logged %d warnings for a changed stream, want 1:\n%s", warns, logged.String())
+}
+
+// A read can carry a frame and the beginning of the next packet together. If
+// the frame zeroed the count outright, a board that then went quiet mid-packet
+// would be reported as having sent nothing -- which points at the wrong fix.
+func TestSerialStallKeepsBytesThatFollowedTheLastFrame(t *testing.T) {
+	parser, err := core.NewETVRParser(nil, 0)
+	if err != nil {
+		t.Fatalf("NewETVRParser: %v", err)
+	}
+	packet, err := parser.EncodePacket(testJPEG(t))
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	// The head of a second packet, with its payload never arriving: header and
+	// length field only.
+	partial := packet[:parser.HeaderLen()+2]
+
+	s := wiredSerial(t, discardLogger(), SerialConfig{}, append(append([]byte{}, packet...), partial...))
+	stallErr := runUntilStall(t, s)
+	if stallErr == nil {
+		t.Fatal("session returned nil, want a stall")
+	}
+	want := fmt.Sprintf("%d bytes received", len(partial))
+	if !strings.Contains(stallErr.Error(), want) {
+		t.Errorf("error = %v, want it to report the %s that followed the frame", stallErr, want)
 	}
 }
 

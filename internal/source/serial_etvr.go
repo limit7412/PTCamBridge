@@ -77,10 +77,17 @@ type Serial struct {
 	tried  map[string]struct{}
 	proven string
 
-	// loggedPreview is the last unparsable stream this driver complained
-	// about, so a board that is wrong the same way on every reconnect says so
-	// once rather than every few seconds.
-	loggedPreview string
+	// warnedPorts is the set of ports already reported as carrying something
+	// unparsable, so the warning is said once per port rather than on every
+	// reconnect. Per port rather than per stream: "auto" rotates between
+	// candidates, so remembering only the last stream would warn again every
+	// time the rotation came back round -- and a port carrying a live stream
+	// gives different first bytes on each open anyway, depending on where the
+	// reader joined it. An entry is dropped when that port produces a frame,
+	// so a port that works and later breaks is news again.
+	//
+	// Bounded by the number of serial ports on the machine.
+	warnedPorts map[string]struct{}
 
 	// listPorts is ListSerialPorts, replaced in tests: the rotation is the
 	// part worth checking and it cannot be reached without control over what
@@ -116,12 +123,13 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 		reporter = NopReporter{}
 	}
 	return &Serial{
-		cfg:       cfg,
-		parser:    parser,
-		log:       log,
-		reporter:  reporter,
-		tried:     map[string]struct{}{},
-		listPorts: ListSerialPorts,
+		cfg:         cfg,
+		parser:      parser,
+		log:         log,
+		reporter:    reporter,
+		tried:       map[string]struct{}{},
+		warnedPorts: map[string]struct{}{},
+		listPorts:   ListSerialPorts,
 		openPort: func(name string, baud int) (serialPort, error) {
 			return serial.Open(name, &serial.Mode{BaudRate: baud})
 		},
@@ -194,19 +202,29 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 			preview = append(preview, buf[:take]...)
 		}
 
-		for _, f := range assembler.feed(buf[:n]) {
+		frames := assembler.feed(buf[:n])
+		for _, f := range frames {
 			lastFrame = time.Now()
-			sinceFrame = 0
 			if count == 0 {
 				// This port has proved itself, so the auto search should come
 				// back to it first rather than rotating past it.
 				s.proven = name
+				// It works now. If it stops parsing later that is news again,
+				// whatever was said about it before.
+				delete(s.warnedPorts, name)
 				s.reporter.Connected(s.Name())
 			}
 			count++
 			if err := send(ctx, out, f); err != nil {
 				return nil
 			}
+		}
+		if len(frames) > 0 {
+			// Not zero: a read can carry a frame and the start of the next one
+			// together, and those trailing bytes arrived after the frame the
+			// stall is now measured from. Dropping them would report a silent
+			// port for a board that is in fact part way through a packet.
+			sinceFrame = int64(assembler.pending())
 		}
 	}
 }
@@ -231,14 +249,14 @@ func (s *Serial) stalled(name string, frames uint64, sinceFrame int64, preview [
 	}
 
 	head := hexPreview(preview)
-	// Said once per distinct stream. The reconnect loop comes back every few
-	// seconds and a board that is wrong is wrong the same way every time, so
-	// repeating this would fill the log without adding anything.
-	if head == s.loggedPreview {
+	// Said once per port. The reconnect loop comes back every few seconds, and
+	// the second telling adds nothing the first did not; the bytes are still
+	// in the debug line for anyone watching a port that keeps changing.
+	if _, warned := s.warnedPorts[name]; warned {
 		s.log.Debug("still nothing that parses on the serial port", "port", name, "first_bytes", head)
 		return err
 	}
-	s.loggedPreview = head
+	s.warnedPorts[name] = struct{}{}
 	s.log.Warn("bytes are arriving on the serial port but no packet matched; check the firmware's preamble against source.serial.header, and the baud rate",
 		"port", name,
 		"baud", s.cfg.Baud,
