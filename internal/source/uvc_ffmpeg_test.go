@@ -377,3 +377,19 @@ func writeExecutable(t *testing.T, dir, name string) string {
 	}
 	return path
 }
+
+// The first thing a new user sees from this program, most likely. Naming the
+// symptom is not enough: the remedy has to be in the line, because there is
+// nothing in the settings file for them to copy and no camera name that could
+// have been guessed for them.
+func TestUVCSaysHowToNameACameraWhenNoneIsConfigured(t *testing.T) {
+	_, err := NewUVC(UVCConfig{}, discardLogger(), nil)
+	if !errors.Is(err, ErrNoDevice) {
+		t.Fatalf("NewUVC error = %v, want ErrNoDevice", err)
+	}
+	for _, want := range []string{"-list-devices", "source.uvc", "device", "PTCAMBRIDGE_UVC_DEVICE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

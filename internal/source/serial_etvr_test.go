@@ -108,14 +108,18 @@ func TestSerialAutoPortSkipsAProvenPortThatIsGone(t *testing.T) {
 // making.
 func TestSerialAutoPortCandidates(t *testing.T) {
 	tests := []struct {
-		name  string
-		ports []SerialPort
-		want  []string
+		name        string
+		ports       []SerialPort
+		want        []string
+		wantGuessed bool
 	}{
 		{
 			name:  "the lone port is the fallback",
 			ports: []SerialPort{{Name: "COM1"}},
 			want:  []string{"COM1"},
+			// Nothing about it says camera, so the caller has to be told the
+			// pick is a guess.
+			wantGuessed: true,
 		},
 		{
 			name:  "several unrecognised ports are not candidates",
@@ -130,7 +134,7 @@ func TestSerialAutoPortCandidates(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := autoCandidates(tc.ports)
+			got, guessed := autoCandidates(tc.ports)
 			if len(got) != len(tc.want) {
 				t.Fatalf("autoCandidates = %v, want %v", got, tc.want)
 			}
@@ -138,6 +142,9 @@ func TestSerialAutoPortCandidates(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Fatalf("autoCandidates = %v, want %v", got, tc.want)
 				}
+			}
+			if guessed != tc.wantGuessed {
+				t.Errorf("guessed = %v, want %v", guessed, tc.wantGuessed)
 			}
 		})
 	}
@@ -471,5 +478,55 @@ func TestSerialStallAfterWorkingSaysNothingAboutTheStream(t *testing.T) {
 	}
 	if strings.Contains(logged.String(), "no packet matched") {
 		t.Errorf("a board that worked was reported as unparsable:\n%s", logged.String())
+	}
+}
+
+// The fallback opens whatever single port exists, which may be anything at
+// all -- a VR headset, a printer. If the log does not say so, the failure that
+// follows looks like a broken camera board and sends the reader after the
+// wrong thing.
+func TestSerialAutoFallbackSaysThePickIsAGuess(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, nil))
+
+	s, err := NewSerial(SerialConfig{Port: AutoPort}, log, nil)
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	s.listPorts = func() ([]SerialPort, error) {
+		return []SerialPort{{Name: "COM4", VID: "28DE", PID: "2102", Product: "Valve Controller"}}, nil
+	}
+
+	if got := resolve(t, s); got != "COM4" {
+		t.Fatalf("resolvePort = %q, want COM4", got)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("the guess was not reported as a warning:\n%s", out)
+	}
+	for _, want := range []string{"28DE:2102", "Valve Controller", "may not be a camera"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not mention %q:\n%s", want, out)
+		}
+	}
+}
+
+// A recognised board is not a guess, so it must not be shouted about.
+func TestSerialAutoRecognisedPortIsNotWarnedAbout(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, nil))
+
+	s, err := NewSerial(SerialConfig{Port: AutoPort}, log, nil)
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	s.listPorts = func() ([]SerialPort, error) {
+		return []SerialPort{{Name: "COM4", Vendor: "Espressif", VID: "303A"}}, nil
+	}
+
+	resolve(t, s)
+	if strings.Contains(logged.String(), "level=WARN") {
+		t.Errorf("a recognised board was reported as a guess:\n%s", logged.String())
 	}
 }

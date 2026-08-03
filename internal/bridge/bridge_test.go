@@ -1580,7 +1580,7 @@ func TestBridgeRecordsSettingsThatCannotBuildADriver(t *testing.T) {
 	if snapshot.LastError == "" {
 		t.Fatal("nothing was recorded, so the tray and /healthz show a source that is merely connecting")
 	}
-	if !strings.Contains(snapshot.LastError, "capture device") {
+	if !strings.Contains(snapshot.LastError, "no camera configured") {
 		t.Errorf("last error = %q, want it to name what is missing", snapshot.LastError)
 	}
 }
