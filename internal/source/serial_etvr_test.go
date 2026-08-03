@@ -1,8 +1,16 @@
 package source
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
 // autoSerial builds an AutoPort driver whose enumeration is fixed, so the
@@ -154,5 +162,314 @@ func TestSerialExplicitPortIsUsedVerbatim(t *testing.T) {
 		if got := resolve(t, s); got != "COM9" {
 			t.Fatalf("attempt %d = %q, want COM9", i+1, got)
 		}
+	}
+}
+
+// fakePort feeds a session a fixed stream and then goes quiet, which is what a
+// board that talks nonsense and one that says nothing both look like from here.
+type fakePort struct {
+	chunks [][]byte
+	closed bool
+}
+
+func (p *fakePort) Read(b []byte) (int, error) {
+	if len(p.chunks) == 0 {
+		// A read timeout, the way the real driver reports one.
+		time.Sleep(time.Millisecond)
+		return 0, nil
+	}
+	n := copy(b, p.chunks[0])
+	p.chunks = p.chunks[1:]
+	return n, nil
+}
+
+func (p *fakePort) SetReadTimeout(time.Duration) error { return nil }
+
+func (p *fakePort) Close() error {
+	p.closed = true
+	return nil
+}
+
+// wiredSerial builds a driver whose port hands back the given chunks.
+func wiredSerial(t *testing.T, log *slog.Logger, cfg SerialConfig, chunks ...[]byte) *Serial {
+	t.Helper()
+	if cfg.Port == "" {
+		cfg.Port = "COM4"
+	}
+	s, err := NewSerial(cfg, log, nil)
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: chunks}, nil }
+	return s
+}
+
+// runUntilStall runs one session and returns why it ended.
+func runUntilStall(t *testing.T, s *Serial) error {
+	t.Helper()
+	restore := serialStallTimeout
+	serialStallTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { serialStallTimeout = restore })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.session(ctx, make(chan core.Frame, 8))
+}
+
+// A silent port and a port full of bytes nobody can parse need opposite fixes,
+// and the stall alone does not tell them apart. The byte count does.
+func TestSerialStallSaysHowMuchArrived(t *testing.T) {
+	t.Run("nothing on the wire", func(t *testing.T) {
+		s := wiredSerial(t, discardLogger(), SerialConfig{})
+		err := runUntilStall(t, s)
+		if err == nil {
+			t.Fatal("session returned nil, want a stall")
+		}
+		if !strings.Contains(err.Error(), "0 bytes received") {
+			t.Errorf("error = %v, want it to report that nothing arrived", err)
+		}
+	})
+
+	t.Run("bytes but no packet", func(t *testing.T) {
+		s := wiredSerial(t, discardLogger(), SerialConfig{}, bytes.Repeat([]byte{0x5A}, 64))
+		err := runUntilStall(t, s)
+		if err == nil {
+			t.Fatal("session returned nil, want a stall")
+		}
+		if !strings.Contains(err.Error(), "64 bytes received") {
+			t.Errorf("error = %v, want it to report the 64 bytes that arrived", err)
+		}
+	})
+}
+
+// The bytes themselves are what settles a header mismatch, so they have to
+// reach the log along with the header that was being looked for.
+func TestSerialStallLogsTheUnparsableStream(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// A preamble one byte different from the configured one: the case the
+	// setting exists for, and the one a byte count alone cannot diagnose.
+	stream := append([]byte{0xFF, 0xA0, 0xFF, 0xB1, 0x10, 0x00}, bytes.Repeat([]byte{0x42}, 32)...)
+	s := wiredSerial(t, log, SerialConfig{}, stream)
+
+	if err := runUntilStall(t, s); err == nil {
+		t.Fatal("session returned nil, want a stall")
+	}
+
+	out := logged.String()
+	for _, want := range []string{
+		"ff a0 ff b1",     // what actually arrived
+		"expected_header", // and what was being looked for
+		"ff a0 ff a1",
+		"baud",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log does not mention %q:\n%s", want, out)
+		}
+	}
+	// Only the head of the stream, not a dump of everything that arrived.
+	if strings.Contains(out, strings.Repeat("42 ", 20)) {
+		t.Errorf("log carries more of the stream than the preview:\n%s", out)
+	}
+}
+
+// The reconnect loop comes back every few seconds. Repeating the same warning
+// on every pass would bury the log without adding anything.
+func TestSerialStallWarnsOncePerStream(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	junk := bytes.Repeat([]byte{0x5A}, 64)
+	s := wiredSerial(t, log, SerialConfig{}, junk)
+	for i := 0; i < 3; i++ {
+		s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: [][]byte{junk}}, nil }
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatalf("session %d returned nil, want a stall", i+1)
+		}
+	}
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != 1 {
+		t.Errorf("logged %d warnings for one unchanged stream, want 1:\n%s", warns, logged.String())
+	}
+	// The repeats are still there for anyone who turns the level up.
+	if debugs := strings.Count(logged.String(), "level=DEBUG"); debugs != 2 {
+		t.Errorf("logged %d debug lines for the repeats, want 2:\n%s", debugs, logged.String())
+	}
+}
+
+// A stream that changed is worth saying again -- a reflashed board or a
+// different device on the same COM number is a different diagnosis. But not
+// without end: a port carrying a live stream is joined at a different point
+// every time, so the bytes differ on every open and warning on each would be
+// the flooding this memory exists to prevent.
+func TestSerialStallWarnsAboutAChangedStreamButNotForever(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s := wiredSerial(t, log, SerialConfig{})
+	for i := 0; i < maxWarnedStreams+2; i++ {
+		filler := byte(0x40 + i)
+		s.openPort = func(string, int) (serialPort, error) {
+			return &fakePort{chunks: [][]byte{bytes.Repeat([]byte{filler}, 64)}}, nil
+		}
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatalf("session %d returned nil, want a stall", i+1)
+		}
+	}
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != maxWarnedStreams {
+		t.Errorf("logged %d warnings for %d different streams, want the cap of %d:\n%s",
+			warns, maxWarnedStreams+2, maxWarnedStreams, logged.String())
+	}
+}
+
+// A port that starts working has settled whatever was wrong with it. If it
+// breaks again later that is a new complaint, not a repeat of the old one.
+func TestSerialStallWarnsAgainAfterThePortHasWorked(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	parser, err := core.NewETVRParser(nil, 0)
+	if err != nil {
+		t.Fatalf("NewETVRParser: %v", err)
+	}
+	packet, err := parser.EncodePacket(testJPEG(t))
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	junk := bytes.Repeat([]byte{0x5A}, 64)
+
+	s := wiredSerial(t, log, SerialConfig{}, junk)
+	// Unparsable, then a session that works, then unparsable again in exactly
+	// the same way as the first time.
+	for _, chunks := range [][][]byte{{junk}, {packet}, {junk}} {
+		s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: chunks}, nil }
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatal("session returned nil, want a stall")
+		}
+	}
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != 2 {
+		t.Errorf("logged %d warnings, want 2 (the port worked in between):\n%s", warns, logged.String())
+	}
+}
+
+// "auto" rotates between candidates, so remembering only the last stream would
+// warn again every time the rotation came back round to a port already
+// reported.
+func TestSerialStallWarnsOncePerPortAcrossTheRotation(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s, err := NewSerial(SerialConfig{Port: AutoPort}, log, nil)
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	s.listPorts = func() ([]SerialPort, error) {
+		return []SerialPort{{Name: "COM3", Vendor: "Espressif"}, {Name: "COM4", Vendor: "Espressif"}}, nil
+	}
+	// Each port carries its own unparsable stream.
+	streams := map[string][]byte{
+		"COM3": bytes.Repeat([]byte{0xAA}, 64),
+		"COM4": bytes.Repeat([]byte{0xBB}, 64),
+	}
+	s.openPort = func(name string, _ int) (serialPort, error) {
+		return &fakePort{chunks: [][]byte{streams[name]}}, nil
+	}
+
+	// A, B, then round to A again.
+	for i := 0; i < 3; i++ {
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatalf("session %d returned nil, want a stall", i+1)
+		}
+	}
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != 2 {
+		t.Errorf("logged %d warnings for two ports, want 2:\n%s", warns, logged.String())
+	}
+}
+
+// A read can carry a frame and the beginning of the next packet together. If
+// the frame zeroed the count outright, a board that then went quiet mid-packet
+// would be reported as having sent nothing -- which points at the wrong fix.
+func TestSerialStallKeepsBytesThatFollowedTheLastFrame(t *testing.T) {
+	parser, err := core.NewETVRParser(nil, 0)
+	if err != nil {
+		t.Fatalf("NewETVRParser: %v", err)
+	}
+	packet, err := parser.EncodePacket(testJPEG(t))
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	// The head of a second packet, with its payload never arriving: header and
+	// length field only.
+	partial := packet[:parser.HeaderLen()+2]
+
+	s := wiredSerial(t, discardLogger(), SerialConfig{}, append(append([]byte{}, packet...), partial...))
+	stallErr := runUntilStall(t, s)
+	if stallErr == nil {
+		t.Fatal("session returned nil, want a stall")
+	}
+	want := fmt.Sprintf("%d bytes received", len(partial))
+	if !strings.Contains(stallErr.Error(), want) {
+		t.Errorf("error = %v, want it to report the %s that followed the frame", stallErr, want)
+	}
+}
+
+// The bytes after a frame are counted from what the parser skipped past, not
+// from what it kept: it keeps only what could still begin a packet, which for
+// pure rubbish is at most the header length minus one -- nothing at all when
+// the configured header is a single byte, which the settings allow.
+func TestSerialStallCountsUnparsableBytesAfterAFrame(t *testing.T) {
+	for _, header := range [][]byte{{0xFF, 0xA0, 0xFF, 0xA1}, {0xFF}} {
+		t.Run(hexPreview(header), func(t *testing.T) {
+			parser, err := core.NewETVRParser(header, 0)
+			if err != nil {
+				t.Fatalf("NewETVRParser: %v", err)
+			}
+			packet, err := parser.EncodePacket(testJPEG(t))
+			if err != nil {
+				t.Fatalf("EncodePacket: %v", err)
+			}
+			// Rubbish the parser cannot make anything of, and which contains
+			// no byte of the header, so none of it is kept as a candidate.
+			junk := bytes.Repeat([]byte{0x5A}, 64)
+
+			s := wiredSerial(t, discardLogger(), SerialConfig{Header: header},
+				append(append([]byte{}, packet...), junk...))
+			stallErr := runUntilStall(t, s)
+			if stallErr == nil {
+				t.Fatal("session returned nil, want a stall")
+			}
+			want := fmt.Sprintf("%d bytes received", len(junk))
+			if !strings.Contains(stallErr.Error(), want) {
+				t.Errorf("error = %v, want it to report the %s that followed the frame", stallErr, want)
+			}
+		})
+	}
+}
+
+// A board that worked and then went quiet is a different situation: there is
+// no unparsable stream to show, so showing one would be misleading.
+func TestSerialStallAfterWorkingSaysNothingAboutTheStream(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	parser, err := core.NewETVRParser(nil, 0)
+	if err != nil {
+		t.Fatalf("NewETVRParser: %v", err)
+	}
+	packet, err := parser.EncodePacket(testJPEG(t))
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+
+	s := wiredSerial(t, log, SerialConfig{}, packet)
+	if err := runUntilStall(t, s); err == nil {
+		t.Fatal("session returned nil, want a stall once the board went quiet")
+	}
+	if strings.Contains(logged.String(), "no packet matched") {
+		t.Errorf("a board that worked was reported as unparsable:\n%s", logged.String())
 	}
 }

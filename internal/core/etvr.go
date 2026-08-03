@@ -55,6 +55,11 @@ func NewETVRParser(header []byte, maxPayload int) (ETVRParser, error) {
 // HeaderLen reports the length of the preamble this parser searches for.
 func (p ETVRParser) HeaderLen() int { return len(p.header) }
 
+// Header returns a copy of the preamble this parser searches for. A driver
+// that finds nothing on the wire has to be able to say what it was looking
+// for, since the answer may be that the firmware uses something else.
+func (p ETVRParser) Header() []byte { return bytes.Clone(p.header) }
+
 // Parse consumes whole packets from buf and returns the JPEG payloads found,
 // along with the bytes that could not be consumed yet.
 //
@@ -67,8 +72,19 @@ func (p ETVRParser) HeaderLen() int { return len(p.header) }
 // or whose payload is not a valid JPEG is dropped, and the scan restarts one
 // byte past that header so a false positive inside image data cannot wedge the
 // parser.
-func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte) {
+//
+// tail is how much of buf lies past the end of the last packet returned, or
+// the whole of it when there was none. It is not derivable from rest: rest
+// holds only what could still become a packet, and everything else back there
+// has been discarded by the time this returns. A caller reporting what arrived
+// on the wire needs the discarded bytes counted too, since they are exactly
+// the evidence that something is arriving and not parsing.
+func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte, tail int) {
 	pos := 0
+	// Where the last returned packet ended. Zero while there has been none,
+	// which makes the whole buffer the tail -- correct, since none of it is
+	// behind a frame.
+	lastEnd := 0
 	for {
 		idx := bytes.Index(buf[pos:], p.header)
 		if idx < 0 {
@@ -78,13 +94,13 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte) {
 			if keep > len(buf)-pos {
 				keep = len(buf) - pos
 			}
-			return frames, buf[len(buf)-keep:]
+			return frames, buf[len(buf)-keep:], len(buf) - lastEnd
 		}
 		start := pos + idx
 		lenAt := start + len(p.header)
 		if lenAt+etvrLengthBytes > len(buf) {
 			// Header seen but the length field has not arrived yet.
-			return frames, buf[start:]
+			return frames, buf[start:], len(buf) - lastEnd
 		}
 		payloadLen := int(binary.LittleEndian.Uint16(buf[lenAt : lenAt+etvrLengthBytes]))
 		if payloadLen < MinJPEGSize || payloadLen > p.maxPayload {
@@ -95,7 +111,7 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte) {
 		end := payloadAt + payloadLen
 		if end > len(buf) {
 			// Payload still in flight; wait for the rest of it.
-			return frames, buf[start:]
+			return frames, buf[start:], len(buf) - lastEnd
 		}
 		payload := buf[payloadAt:end]
 		if ValidateJPEG(payload, p.maxPayload) != nil {
@@ -104,6 +120,7 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte) {
 		}
 		frames = append(frames, bytes.Clone(payload))
 		pos = end
+		lastEnd = end
 	}
 }
 
