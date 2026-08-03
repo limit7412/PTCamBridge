@@ -20,6 +20,7 @@ import (
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
@@ -1058,5 +1059,146 @@ func TestHubQueuesTheFrameThatIsAlsoTheLatest(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the frame never reached the subscriber")
+	}
+}
+
+// fakeFetcher stands in for the ffmpeg download.
+type fakeFetcher struct {
+	state  ffmpegfetch.State
+	starts int
+	err    error
+}
+
+func (f *fakeFetcher) State() ffmpegfetch.State { return f.state }
+
+func (f *fakeFetcher) Start() error {
+	f.starts++
+	if f.err != nil {
+		return f.err
+	}
+	f.state.Downloading = true
+	return nil
+}
+
+func TestFFmpegEndpointIsAbsentWithoutAFetcher(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/v1/ffmpeg")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 with no fetcher wired in", resp.StatusCode)
+	}
+}
+
+func TestFFmpegEndpointReportsAndStarts(t *testing.T) {
+	fetcher := &fakeFetcher{state: ffmpegfetch.State{
+		Total:     145349145,
+		Supported: true,
+		Source:    ffmpegfetch.Build{URL: "https://example.invalid/ffmpeg.zip", Publisher: "test"},
+	}}
+	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	t.Run("GET reports the state", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v1/ffmpeg")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var state ffmpegfetch.State
+		if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if state.Source.URL != "https://example.invalid/ffmpeg.zip" {
+			t.Errorf("source URL = %q, want the pinned archive", state.Source.URL)
+		}
+		if fetcher.starts != 0 {
+			t.Errorf("a GET started %d downloads, want none", fetcher.starts)
+		}
+	})
+
+	t.Run("POST starts one", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/api/v1/ffmpeg", "application/json", nil)
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		// Accepted, not OK: the download outlives the request by minutes.
+		if resp.StatusCode != http.StatusAccepted {
+			t.Errorf("status = %d, want 202", resp.StatusCode)
+		}
+		if fetcher.starts != 1 {
+			t.Errorf("starts = %d, want 1", fetcher.starts)
+		}
+	})
+}
+
+// Asking again while it runs is the same request, not a second download.
+func TestFFmpegEndpointAcceptsARepeatedRequestWhileBusy(t *testing.T) {
+	fetcher := &fakeFetcher{err: ffmpegfetch.ErrBusy}
+	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/v1/ffmpeg", "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status = %d, want 202 when a download is already running", resp.StatusCode)
+	}
+}
+
+// A hundred megabytes is not fetched again over an ffmpeg that already works.
+func TestFFmpegEndpointDoesNotRefetchAnInstalledCopy(t *testing.T) {
+	fetcher := &fakeFetcher{state: ffmpegfetch.State{Installed: true, Path: `C:\ffmpeg.exe`}}
+	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/v1/ffmpeg", "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 for an install that is already there", resp.StatusCode)
+	}
+	if fetcher.starts != 0 {
+		t.Errorf("starts = %d, want none over an installed copy", fetcher.starts)
+	}
+}
+
+// The download endpoint is behind the same guard as the rest: a page must not
+// be able to make the machine pull a hundred megabytes.
+func TestFFmpegEndpointRefusesACrossSiteRequest(t *testing.T) {
+	fetcher := &fakeFetcher{}
+	s, _, _ := newTestServer(t, Options{Controller: &fakeController{}, EnableAdmin: true, FFmpeg: fetcher})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/ffmpeg", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+	if fetcher.starts != 0 {
+		t.Errorf("a cross-site request started %d downloads", fetcher.starts)
 	}
 }

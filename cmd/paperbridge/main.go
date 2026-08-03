@@ -25,6 +25,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/console"
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/logging"
 	"github.com/limit7412/PTCamBridge/internal/papertracker"
@@ -178,6 +179,14 @@ func run() error {
 		// it has no authentication. Off the loopback it is not offered.
 		log.Warn("listening off loopback, the management API is disabled", "address", address)
 	}
+	// PaperBridge does not ship ffmpeg -- see internal/ffmpegfetch for why --
+	// so on the platform where a build is published it can fetch one when the
+	// user asks. Nowhere else: elsewhere ffmpeg is a package manager away, and
+	// offering a Windows binary would be worse than saying nothing.
+	var fetcher *ffmpegfetch.Manager
+	if ffmpegfetch.Supported() {
+		fetcher = ffmpegfetch.New(ffmpegfetch.Options{Lifetime: ctx, Log: log})
+	}
 	srv, err := server.New(server.Options{
 		Hub:              frames,
 		Status:           tracker,
@@ -185,6 +194,7 @@ func run() error {
 		Logger:           log,
 		Controller:       app,
 		EnableAdmin:      admin,
+		FFmpeg:           ffmpegOption(fetcher),
 		HoldOnSourceLoss: cfg.Server.HoldOnSourceLoss,
 		Version:          Version,
 	})
@@ -259,6 +269,7 @@ func run() error {
 			LogDir:     logDir,
 			ConfigPath: cfgPath,
 			ConfigFlag: opts.configPath,
+			FFmpeg:     trayFFmpeg(fetcher),
 			OnQuit:     stop,
 		})
 	}
@@ -273,8 +284,38 @@ func run() error {
 		log.Warn("the HTTP server did not shut down in time")
 	}
 
+	// Quitting during a download cancels the transfer, but the goroutine still
+	// has to delete the part-downloaded archive. Returning without waiting for
+	// that leaves a hundred-odd megabytes in the settings folder, and nothing
+	// left running to clean it up.
+	if fetcher != nil {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+		fetcher.Wait(waitCtx)
+		cancelWait()
+	}
+
 	log.Info("paperbridge stopped")
 	return nil
+}
+
+// ffmpegOption and trayFFmpeg hand the fetcher over, or nothing at all.
+//
+// Assigning an absent one straight into the interface field would not be
+// nothing: an interface holding a nil pointer is itself non-nil, so the
+// endpoint would be routed and the menu entry shown, both of them calling
+// through a pointer that is not there.
+func ffmpegOption(m *ffmpegfetch.Manager) server.FFmpegFetcher {
+	if m == nil {
+		return nil
+	}
+	return m
+}
+
+func trayFFmpeg(m *ffmpegfetch.Manager) tray.FFmpegFetcher {
+	if m == nil {
+		return nil
+	}
+	return m
 }
 
 // resolveConfigPath falls back to the per-user location when no path is given.

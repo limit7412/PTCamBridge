@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 )
 
 // UVC capture runs through an ffmpeg child process rather than a native
@@ -182,6 +183,15 @@ func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, string, error) {
 	path, err := u.ffmpegPath()
 	if err != nil {
+		// Only a configured path that does not work is fatal: the settings name
+		// a specific file and it is not there, which no amount of retrying
+		// fixes. Finding none at all is not the same thing -- the tray can
+		// fetch one while the bridge is running, and the retry loop is what
+		// picks it up. Giving up here would mean the fetch finishes and the
+		// camera stays dead until the user restarts.
+		if errors.Is(err, ErrNoFFmpeg) {
+			return 0, "", err
+		}
 		return 0, "", fatalf(err)
 	}
 	args := u.args(copyCodec)
@@ -339,7 +349,13 @@ func platformInput(device string) (format, input string) {
 }
 
 // ffmpegPath resolves the binary: the configured override, then a copy sitting
-// next to the executable, then PATH.
+// next to the executable, then PATH, then one fetched by the bridge itself.
+//
+// The fetched copy comes last on purpose. It is the one PaperBridge manages, so
+// it is also the one the user cannot easily choose against -- putting it ahead
+// of PATH would mean an installation that has deliberately been pointed at a
+// particular ffmpeg silently stops using it the first time somebody clicks the
+// tray item.
 func (u *UVC) ffmpegPath() (string, error) {
 	if u.cfg.FFmpegPath != "" {
 		if _, err := os.Stat(u.cfg.FFmpegPath); err != nil {
@@ -348,17 +364,27 @@ func (u *UVC) ffmpegPath() (string, error) {
 		return u.cfg.FFmpegPath, nil
 	}
 	if exe, err := os.Executable(); err == nil {
-		bundled := filepath.Join(filepath.Dir(exe), ffmpegBinaryName())
-		if _, statErr := os.Stat(bundled); statErr == nil {
-			return bundled, nil
+		alongside := filepath.Join(filepath.Dir(exe), ffmpegBinaryName())
+		if _, statErr := os.Stat(alongside); statErr == nil {
+			return alongside, nil
 		}
 	}
-	path, err := exec.LookPath(ffmpegBinaryName())
-	if err != nil {
-		return "", fmt.Errorf("uvc: ffmpeg not found next to the executable or on PATH: %w", err)
+	if path, err := exec.LookPath(ffmpegBinaryName()); err == nil {
+		return path, nil
 	}
-	return path, nil
+	if path, ok := ffmpegfetch.Installed(); ok {
+		return path, nil
+	}
+	return "", ErrNoFFmpeg
 }
+
+// ErrNoFFmpeg means there is no ffmpeg anywhere the driver looks.
+//
+// Deliberately not fatal: unlike a mistyped ffmpeg_path, this is a state the
+// machine can leave without the bridge being restarted -- the user fetches
+// ffmpeg from the tray, or installs one on PATH -- and the retry loop is what
+// notices. It is the same reasoning as a camera that is not plugged in yet.
+var ErrNoFFmpeg = errors.New("uvc: ffmpeg not found next to the executable, on PATH, or in the settings folder; fetch it from the tray menu or set source.uvc.ffmpeg_path")
 
 func ffmpegBinaryName() string {
 	if runtime.GOOS == "windows" {

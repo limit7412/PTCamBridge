@@ -71,9 +71,15 @@ jobs:
           `@EXE@` をダウンロードして任意のフォルダに置き、実行してください。
           インストーラーは不要です。タスクトレイに常駐します。
 
-          UVC カメラ (USB ウェブカメラ) を使う場合は、同じフォルダに `ffmpeg.exe` を
-          置いてください (`[source.uvc] ffmpeg_path` の指定、または PATH 上でも構いません)。
+          UVC カメラ (USB ウェブカメラ) を使う場合は ffmpeg が必要です。トレイメニューの
+          「Get ffmpeg」から、配布元・サイズ・ライセンスを確認したうえで発行元から
+          ダウンロードできます (自分で `ffmpeg.exe` を同じフォルダに置く、PATH に通す、
+          `[source.uvc] ffmpeg_path` で指定する、のいずれでも構いません)。
           有線 Babble ボードと WiFi MJPEG カメラだけを使う場合は不要です。
+
+          このリリースに ffmpeg は含まれていません。PaperBridge は ffmpeg を別プロセスとして
+          起動するだけなので同梱の必要がなく、ffmpeg を使わない構成のユーザーに 100 MB 超の
+          ダウンロードを負わせないためです。
 
           初回起動時に `%APPDATA%\PaperBridge\paperbridge.toml` が既定値で生成されます。
           設定項目は README を参照してください。

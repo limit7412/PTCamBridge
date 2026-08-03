@@ -45,7 +45,9 @@ device = "USB Camera"
 size = "240x240"
 # 0 でデバイス既定値。負数は設定ミスとして起動時に拒否します。
 framerate = 30
-# 空なら実行ファイルと同じフォルダの ffmpeg.exe、次に PATH を探します。
+# 空なら実行ファイルと同じフォルダの ffmpeg.exe、次に PATH、最後にトレイの
+# 「Get ffmpeg」で取得した %APPDATA%\PaperBridge\bin\ffmpeg.exe を探します。
+# ここで指定したものが常に優先されます。
 ffmpeg_path = ""
 
 [source.serial]

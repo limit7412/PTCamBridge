@@ -9,9 +9,11 @@ package tray
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"reflect"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/status"
 
@@ -41,6 +43,47 @@ type Controller interface {
 	SetPaused(paused bool) error
 }
 
+// FFmpegFetcher is the slice of the ffmpeg download the menu drives.
+type FFmpegFetcher interface {
+	State() ffmpegfetch.State
+	Start() error
+}
+
+// ffmpegPrompt is what the user is shown before anything is downloaded.
+//
+// PaperBridge does not ship ffmpeg, so clicking the menu item makes the user's
+// machine fetch a third party's binary. Who built it, how big it is and what
+// licence it carries are the three things somebody needs to agree to that, so
+// they are on the screen before the first byte moves rather than in the README.
+func ffmpegPrompt(build ffmpegfetch.Build) string {
+	return fmt.Sprintf(
+		"PaperBridge does not include ffmpeg. UVC cameras need it.\n\n"+
+			"Download it now?\n\n"+
+			"From: %s\n%s\n\n"+
+			"Size: %d MB\n"+
+			"Licence: FFmpeg, %s\n\n"+
+			"It is downloaded from its publisher, not from PaperBridge, and is\n"+
+			"installed under your PaperBridge settings folder.",
+		build.Publisher, build.URL, build.Size/(1000*1000), build.License,
+	)
+}
+
+// ffmpegStatusLine describes the download for the menu entry itself.
+func ffmpegStatusLine(state ffmpegfetch.State) string {
+	switch {
+	case state.Downloading && state.Total > 0:
+		return fmt.Sprintf("Downloading ffmpeg... %d%%", state.Received*100/state.Total)
+	case state.Downloading:
+		return "Downloading ffmpeg..."
+	case state.Installed:
+		return "ffmpeg is installed"
+	case state.LastError != "":
+		return "Get ffmpeg (last attempt failed)"
+	default:
+		return "Get ffmpeg (for UVC cameras)"
+	}
+}
+
 // Options configures the tray.
 type Options struct {
 	Controller Controller
@@ -54,6 +97,8 @@ type Options struct {
 	LogDir string
 	// ConfigPath is opened by the "edit settings" item; empty hides it.
 	ConfigPath string
+	// FFmpeg backs the "get ffmpeg" item; nil hides it.
+	FFmpeg FFmpegFetcher
 	// ConfigFlag is the settings path the user named on the command line, if
 	// any. The autostart toggle registers it so a sign-in launch uses the same
 	// file; empty means the default location.

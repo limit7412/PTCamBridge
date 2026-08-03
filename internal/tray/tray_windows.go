@@ -54,6 +54,11 @@ func onReady(ctx context.Context, opts Options) {
 		configItem.Hide()
 	}
 
+	ffmpegItem := systray.AddMenuItem("Get ffmpeg (for UVC cameras)", "Download ffmpeg from its publisher")
+	if opts.FFmpeg == nil {
+		ffmpegItem.Hide()
+	}
+
 	autostartItem := systray.AddMenuItemCheckbox("Start with Windows", "Launch PaperBridge at sign-in", false)
 	if !autostart.Supported() {
 		autostartItem.Hide()
@@ -73,6 +78,7 @@ func onReady(ctx context.Context, opts Options) {
 		pause:     pauseItem,
 		logDir:    logItem,
 		configure: configItem,
+		ffmpeg:    ffmpegItem,
 		autostart: autostartItem,
 		quit:      quitItem,
 	})
@@ -86,6 +92,7 @@ type menu struct {
 	pause     *systray.MenuItem
 	logDir    *systray.MenuItem
 	configure *systray.MenuItem
+	ffmpeg    *systray.MenuItem
 	autostart *systray.MenuItem
 	quit      *systray.MenuItem
 }
@@ -166,6 +173,13 @@ func run(ctx context.Context, opts Options, m menu) {
 		case <-m.configure.ClickedCh:
 			openTarget(opts.ConfigPath, opts)
 
+		case <-m.ffmpeg.ClickedCh:
+			// Not on the command queue: this neither touches the bridge's
+			// settings nor competes with a source switch, and it blocks on a
+			// person reading a dialog. Queueing it would hold every later
+			// click behind however long that takes.
+			go startFFmpegFetch(opts)
+
 		case <-m.autostart.ClickedCh:
 			toggleAutostart(opts, m)
 
@@ -197,6 +211,10 @@ func refresh(opts Options, m menu) {
 		m.pause.Uncheck()
 	}
 
+	if opts.FFmpeg != nil {
+		m.ffmpeg.SetTitle(ffmpegStatusLine(opts.FFmpeg.State()))
+	}
+
 	m.status.SetTitle(statusLine(snapshot.Source, paused, snapshot.Connected, stats.InputFPS, stats.Subscribers, snapshot.LastError))
 	systray.SetTooltip("PaperBridge - " + m.status.String())
 }
@@ -223,6 +241,29 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+// startFFmpegFetch asks first, then downloads.
+func startFFmpegFetch(opts Options) {
+	if opts.FFmpeg == nil {
+		return
+	}
+	state := opts.FFmpeg.State()
+	switch {
+	case state.Downloading:
+		return
+	case state.Installed:
+		// Already there. Saying so beats a click that looks like it did
+		// nothing, and re-downloading a working ffmpeg is not what it means.
+		confirm("PaperBridge", "ffmpeg is already installed:\n\n"+state.Path)
+		return
+	}
+	if !confirm("PaperBridge - download ffmpeg", ffmpegPrompt(state.Source)) {
+		return
+	}
+	if err := opts.FFmpeg.Start(); err != nil {
+		opts.Log.Error("could not start the ffmpeg download", "error", err)
+	}
 }
 
 func toggleAutostart(opts Options, m menu) {
