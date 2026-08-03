@@ -478,6 +478,28 @@ func (c *Config) Normalise() {
 	}
 }
 
+// maxExactJSONInt は、JSON の数値として往復できる最大の整数です。JSON の数値は
+// 倍精度浮動小数点なので、これを超える整数は読んだ時点で別の値になります。
+const maxExactJSONInt int64 = 1<<53 - 1
+
+// fitsInJSON は、整数の設定が設定画面を通っても値を保つかどうかを確かめます。
+//
+// 拒むのは、丸めが黙っているからです。設定画面は設定を JSON で読み書きするので、
+// 2^53 を超える max_frame_size は読んだ時点で近い値に化け、無関係な項目を保存した
+// だけでファイルへ書き戻されます。しかも動作中の設定と差が出るので、ログの行を
+// 直しただけのつもりでキャプチャが止まって立ち上げ直されます。
+//
+// 上限を「意味のある大きさ」ではなくここに置いたのは、これが我々の見立てではなく
+// 表現できるかどうかの境目だからです。ユーザーが必要とする速度やフレーム長を、
+// こちらの想像で狭めることにはなりません。
+func fitsInJSON(name string, value int) error {
+	if int64(value) > maxExactJSONInt {
+		return fmt.Errorf("%s must be at most %d; larger whole numbers change value when the settings page reads them as JSON, got %d",
+			name, maxExactJSONInt, value)
+	}
+	return nil
+}
+
 // Validate は、実行時に失敗する設定を報告します。
 func (c Config) Validate() error {
 	_, port, err := net.SplitHostPort(c.Server.Listen)
@@ -543,6 +565,18 @@ func (c Config) Validate() error {
 	for i, b := range c.Source.Serial.Header {
 		if b < 0 || b > 0xFF {
 			return fmt.Errorf("source.serial.header[%d] = %d is not a byte value", i, b)
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value int
+	}{
+		{"source.max_frame_size", c.Source.MaxFrameSize},
+		{"source.uvc.framerate", c.Source.UVC.Framerate},
+		{"source.serial.baud", c.Source.Serial.Baud},
+	} {
+		if err := fitsInJSON(field.name, field.value); err != nil {
+			return err
 		}
 	}
 	if err := c.CoreTransform().Validate(); err != nil {

@@ -2721,6 +2721,29 @@ func TestOverriddenLeavesDoNotHideTheirNeighbours(t *testing.T) {
 	}
 }
 
+// Overridden は画面が毎秒読むものなので、ソースの検証を待ってはいけません。
+// Apply は最初のフレームを待つあいだ最長 30 秒 mu を握るので、その下に置くと
+// 診断画面も設定画面もその間ずっと止まります。
+func TestOverriddenDoesNotWaitForTheLock(t *testing.T) {
+	b := New(config.Default(), "", hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(config.Default(), []string{"ui.language"})
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	got := make(chan []string, 1)
+	go func() { got <- b.Overridden() }()
+
+	select {
+	case names := <-got:
+		if !slices.Contains(names, "ui.language") {
+			t.Errorf("Overridden = %v, want it to name ui.language", names)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Overridden blocked while something else held the lock")
+	}
+}
+
 // restartOnlyLeaves と restartDeferred は同じ集合を指していなければなりません。
 // 片方だけに名前が増えると、上書きの差し引きが静かに効かなくなります。
 func TestRestartOnlyLeavesMatchWhatCanBeDeferred(t *testing.T) {

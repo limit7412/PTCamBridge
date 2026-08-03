@@ -155,6 +155,46 @@ func TestApplyEnvNamesOverridesThatMatchTheFile(t *testing.T) {
 	}
 }
 
+// 設定画面は設定を JSON で読み書きするので、2^53 を超える整数は読んだ時点で
+// 別の値になります。黙って丸めた値がファイルへ書き戻されるより、受け取らない方が
+// ユーザーに分かります。
+func TestValidateRejectsWholeNumbersJSONCannotHold(t *testing.T) {
+	const tooBig = 1<<53 + 1
+
+	for _, tc := range []struct {
+		name   string
+		change func(*Config)
+	}{
+		{"source.max_frame_size", func(c *Config) { c.Source.MaxFrameSize = tooBig }},
+		{"source.uvc.framerate", func(c *Config) { c.Source.UVC.Framerate = tooBig }},
+		{"source.serial.baud", func(c *Config) { c.Source.Serial.Baud = tooBig }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Normalise()
+			tc.change(&cfg)
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want %s = %d rejected", tc.name, tooBig)
+			}
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Errorf("error = %v, want it to name %s", err, tc.name)
+			}
+
+			// 境目のちょうど内側は通る。狭めているのは表現できない範囲だけで、
+			// 意味のある大きさをこちらの見立てで決めてはいない。
+			tc.change(&cfg)
+			cfg.Source.MaxFrameSize = int(maxExactJSONInt)
+			cfg.Source.UVC.Framerate = int(maxExactJSONInt)
+			cfg.Source.Serial.Baud = int(maxExactJSONInt)
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want the largest exactly representable value accepted", err)
+			}
+		})
+	}
+}
+
 // 解釈できなかった変数は上書きとして数えません。値が設定に入っていない以上、
 // 数えると効いていない指定を「効いている」と言うことになります。
 func TestApplyEnvDoesNotNameValuesItCouldNotRead(t *testing.T) {

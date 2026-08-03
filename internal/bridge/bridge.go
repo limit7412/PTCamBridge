@@ -76,11 +76,16 @@ type Bridge struct {
 	// 無くなります。restartDeferred を参照。
 	startup config.Config
 
-	// overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
-	// 読まれない設定の葉の名前です。SetPersistBase が一度だけ決めます。名前は
-	// 上書きを重ねた側から受け取ります。設定値の差から数えると、ファイルと同じ値を
-	// 指定した上書きが見えません。
-	overridden []string
+	// overridden は、起動時に環境変数で上書きされた、起動時にしか読まれない設定の
+	// 葉の名前です。SetPersistBase が一度だけ決めます。名前は上書きを重ねた側から
+	// 受け取ります。設定値の差から数えると、ファイルと同じ値を指定した上書きが
+	// 見えません。
+	//
+	// mu の外に置いてあります。決まった後は変わらないのに、Apply はソースを検証する
+	// 最長 30 秒のあいだ mu を握るので、ロックの下に置くと /ui/state の polling が
+	// その間ずっと止まります。しかも handleUIState は状態と統計をロック待ちより先に
+	// 読むので、解けた瞬間に 30 秒古い応答がまとめて返り、新しい表示を上書きします。
+	overridden atomic.Pointer[[]string]
 
 	// unsaved は、ファイルまで届かなかった書き込みです。ファイルが最新である間は
 	// nil です。これを保持していれば、再試行は失われた設定を書けます。そうしないと、
@@ -173,33 +178,43 @@ func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log 
 // SetPersistBase は、ファイルが持っているとおりの設定を記録します。保存はこれを
 // 土台にします。これが無いと、実効設定がそのまま保存され、一度きりの上書きが、
 // 何かが Apply を呼んだ最初の瞬間に恒久的なものになります。
-// overridden には、環境変数やコマンドラインが実際に指定した葉の名前を渡します
-// (config.Config.ApplyEnv と applyFlags が返すもの)。値の差から推測してはいけません。
-// ファイルと同じ値を指定した上書きは差を作りませんが、上書きとしては存在します。
+// overridden には、環境変数が実際に指定した葉の名前を渡します
+// (config.Config.ApplyEnv が返すもの)。値の差から推測してはいけません。ファイルと
+// 同じ値を指定した上書きは差を作りませんが、上書きとしては存在します。
+//
+// コマンドラインのフラグは渡しません。次の起動には残らないからです。自動起動は
+// 実行ファイルと -config しか登録しないので、-log-level debug で一度だけ起動した
+// 人が info を保存したら、それは次のサインインで実際に効きます。
 func (b *Bridge) SetPersistBase(cfg config.Config, overridden []string) {
+	// 控えるのは、起動時にしか読まれない葉だけです。動作中に読み直せる葉の上書きは
+	// 保留とは関係がありません。設定画面から変えればその場で効きます。
+	var restartOnly []string
+	for _, name := range overridden {
+		if slices.Contains(restartOnlyLeaves, name) && !slices.Contains(restartOnly, name) {
+			restartOnly = append(restartOnly, name)
+		}
+	}
+	b.overridden.Store(&restartOnly)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.persistBase = cfg
-	// 控えるのは、起動時にしか読まれない葉だけです。動作中に読み直せる葉の上書きは
-	// 保留とは関係がありません。設定画面から変えればその場で効きます。
-	b.overridden = nil
-	for _, name := range overridden {
-		if slices.Contains(restartOnlyLeaves, name) && !slices.Contains(b.overridden, name) {
-			b.overridden = append(b.overridden, name)
-		}
-	}
 }
 
-// Overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
-// 読まれない設定の名前を返します。
+// Overridden は、起動時に環境変数で上書きされた、起動時にしか読まれない設定の
+// 名前を返します。
 //
 // これらは「次の起動を待っている」ものとは違います。ファイルに何を書いても、
 // 次の起動でも同じ上書きが勝つからです。保留として数えると、画面は永遠に起きない
 // 変更を毎回知らせることになります。かといって黙るのも違うので、別の名前で返します。
+//
+// ロックを取りません。画面が毎秒読むものが、ソースの検証を待つ理由はありません。
 func (b *Bridge) Overridden() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return slices.Clone(b.overridden)
+	names := b.overridden.Load()
+	if names == nil {
+		return nil
+	}
+	return slices.Clone(*names)
 }
 
 // SetStreamConfigurator は HTTP サーバを登録し、Apply がそちらの受け持つストリーム
@@ -407,8 +422,9 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 	// 起動時に上書きされた葉は、次の起動を待っているのではありません。ファイルに
 	// 何を書いても同じ上書きが勝つので、保留として数えると、起きない変更を毎回
 	// 知らせることになります。Overridden がそちらを別に伝えます。
+	overridden := b.Overridden()
 	deferred = slices.DeleteFunc(deferred, func(name string) bool {
-		return slices.Contains(b.overridden, name)
+		return slices.Contains(overridden, name)
 	})
 	if len(deferred) > 0 {
 		b.log.Info("these settings differ from the ones this process started with, they are only read at startup", "settings", deferred)
