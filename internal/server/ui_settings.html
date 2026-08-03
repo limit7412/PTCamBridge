@@ -239,7 +239,7 @@ function fill(cfg) {
   baseline = readForm();
 }
 
-// rebase は、画面の値はそのままに、基準だけを cfg のものへ取り直します。
+// rebase は、基準を cfg のものへ取り直し、ユーザーが触った項目だけを画面に残します。
 //
 // 保存が失敗しても、ブリッジが要求した値を動作中の設定へ入れていることがあります
 // (適用はできたが、ファイルに書けなかった場合)。そのとき基準を失敗前のままにすると、
@@ -247,16 +247,23 @@ function fill(cfg) {
 // 取り直した設定なので、取り消したはずの値がそのまま書かれ、しかも応答で画面まで
 // そちらへ戻ります。
 //
+// 残すのは keep に入っている項目だけです。触っていない項目まで戻すと、こちらが
+// 見ていない間にトレイや別のクライアントが変えたものまで「ユーザーが変えた」ことに
+// なり、次の保存がそれを古い値で押し戻します。ログの保存に失敗した直後にソースが
+// 切り替わっていれば、そのまま再送しただけで切り替えを取り消すことになります。
+//
 // いったん cfg を書いてから読み直すのは、fill と同じ変換を通すためです。設定の値を
 // そのまま基準にすると、フォームが返す形 (trim した文字列、数値、真偽値) と食い違って、
 // 触っていない項目が変更として送られます。
-function rebase(cfg) {
+function rebase(cfg, keep) {
   const mine = readForm();
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
-  FIELDS.forEach((field, i) => field.write(mine[i]));
+  FIELDS.forEach((field, i) => {
+    if (keep.has(i)) field.write(mine[i]);
+  });
 }
 
 // 保存中はフォームを触らせない。ソースの変更は最初のフレームを待つので最大 30 秒
@@ -315,8 +322,12 @@ el("settings").addEventListener("submit", async (event) => {
     // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
     const cfg = await getConfig();
     const now = readForm();
+    const dirty = new Set();
     FIELDS.forEach((field, i) => {
-      if (now[i] !== baseline[i]) put(cfg, field.path, now[i]);
+      if (now[i] !== baseline[i]) {
+        dirty.add(i);
+        put(cfg, field.path, now[i]);
+      }
     });
 
     const response = await fetch("/api/v1/config", {
@@ -332,7 +343,7 @@ el("settings").addEventListener("submit", async (event) => {
       // 失敗しても値が動作中の設定に入っていることはある。基準を取り直さないと、
       // 元へ戻す操作が変更として見えなくなる。rebase を参照。
       try {
-        rebase(await getConfig());
+        rebase(await getConfig(), dirty);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }
