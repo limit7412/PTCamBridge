@@ -22,13 +22,13 @@ const CacheFileName = "wifi_cache.txt"
 // BackupSuffix is appended to preserve the address the client had before the
 // bridge took over.
 //
-// The name says PaperBridge in it on purpose. Restoring runs on every start
+// The name says PTCamBridge in it on purpose. Restoring runs on every start
 // once write_cache is off, and the folder is searched for when the settings do
 // not name one, so a plain ".bak" would be read back on a machine where the
 // bridge had never been enabled -- overwriting whatever the client had with a
 // file somebody else left there, and deleting that file afterwards. Only a
 // name nothing else would choose can stand for "the bridge put this here".
-const BackupSuffix = ".paperbridge-backup"
+const BackupSuffix = ".ptcambridge-backup"
 
 // NoOriginalSuffix marks that the client had no cached address at all when the
 // bridge first wrote one.
@@ -37,7 +37,7 @@ const BackupSuffix = ".paperbridge-backup"
 // bridge's own address sitting there and preserves that as "the original".
 // Restoring would then hand the user back the bridge instead of the state they
 // started from, and there would be no way to get to "no cache" again.
-const NoOriginalSuffix = ".paperbridge-backup.none"
+const NoOriginalSuffix = ".ptcambridge-backup.none"
 
 // RestoringSuffix is appended to whichever of the two records is being put
 // back, for as long as that is going on.
@@ -248,7 +248,7 @@ var ErrNoBackup = errors.New("papertracker: no backup to restore")
 var ErrRestoreInterrupted = errors.New("papertracker: a restore was interrupted")
 
 // RestoreCache puts the pre-bridge address back and removes the record of it,
-// so a user who stops using PaperBridge can return the client to its own
+// so a user who stops using PTCamBridge can return the client to its own
 // camera.
 func RestoreCache(installDir string) error {
 	path := CachePath(installDir)
@@ -405,7 +405,7 @@ func tidyClaimed(path, claimed string, record struct {
 		return err
 	}
 	if !done {
-		return fmt.Errorf("%w: %s holds what the client had before PaperBridge; rename it to %s to have it put back",
+		return fmt.Errorf("%w: %s holds what the client had before PTCamBridge; rename it to %s to have it put back",
 			ErrRestoreInterrupted, claimed, record.name)
 	}
 	if err := os.Remove(claimed); err != nil {

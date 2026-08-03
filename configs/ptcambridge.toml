@@ -1,10 +1,10 @@
-## PaperBridge の既定設定
+## PTCamBridge の既定設定
 ##
 ## 実行時の設定ファイルは初回起動時に
-## %APPDATA%\PaperBridge\paperbridge.toml へ自動生成されます。
+## %APPDATA%\PTCamBridge\ptcambridge.toml へ自動生成されます。
 ## このファイルは参照用のサンプルであり、そのままコピーして使えます。
 ##
-## 優先順位: コマンドライン引数 > 環境変数 (PAPERBRIDGE_*) > このファイル > 既定値
+## 優先順位: コマンドライン引数 > 環境変数 (PTCAMBRIDGE_*) > このファイル > 既定値
 
 [server]
 # 待受アドレス。既定はループバックのみで、LAN 公開はオプトインです。
@@ -20,7 +20,7 @@ listen = "127.0.0.1:18080"
 # multipart の boundary 文字列。
 # PaperTracker クライアントはクローズドソースでバージョンにより
 # パーサーの挙動が異なるため、再ビルドなしで調整できるようにしています。
-boundary = "paperbridge"
+boundary = "ptcambridge"
 
 # 各パートに追加するヘッダ。上と同じ理由で用意しています。
 # [server.extra_headers]
@@ -40,13 +40,13 @@ max_frame_size = 0
 
 [source.uvc]
 # Windows は DirectShow のフレンドリ名、Linux は /dev/video* のパス。
-# 一覧は `paperbridge -list-devices` で確認できます。
+# 一覧は `ptcambridge -list-devices` で確認できます。
 device = "USB Camera"
 size = "240x240"
 # 0 でデバイス既定値。負数は設定ミスとして起動時に拒否します。
 framerate = 30
 # 空なら実行ファイルと同じフォルダの ffmpeg.exe、次に PATH、最後にトレイの
-# 「Get ffmpeg」で取得した %APPDATA%\PaperBridge\bin\ffmpeg.exe を探します。
+# 「Get ffmpeg」で取得した %APPDATA%\PTCamBridge\bin\ffmpeg.exe を探します。
 # ここで指定したものが常に優先されます。
 ffmpeg_path = ""
 
@@ -81,4 +81,4 @@ write_cache = false
 
 [log]
 level = "info"      # debug / info / warn / error
-dir = ""            # 空なら %APPDATA%\PaperBridge\logs
+dir = ""            # 空なら %APPDATA%\PTCamBridge\logs

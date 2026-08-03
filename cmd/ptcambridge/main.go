@@ -1,4 +1,4 @@
-// Command paperbridge bridges a Baballonia-compatible mouth tracking camera to
+// Command ptcambridge bridges a Baballonia-compatible mouth tracking camera to
 // the PaperTracker client, re-serving it as the MJPEG-over-HTTP stream that
 // client expects on loopback.
 package main
@@ -44,7 +44,7 @@ func main() {
 	console.Attach()
 
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "paperbridge:", err)
+		fmt.Fprintln(os.Stderr, "ptcambridge:", err)
 		os.Exit(1)
 	}
 }
@@ -70,7 +70,7 @@ type options struct {
 
 func parseFlags() options {
 	var o options
-	flag.StringVar(&o.configPath, "config", "", "settings file (default: the per-user paperbridge.toml)")
+	flag.StringVar(&o.configPath, "config", "", "settings file (default: the per-user ptcambridge.toml)")
 	flag.StringVar(&o.listen, "listen", "", "override server.listen, for example 127.0.0.1:18080")
 	flag.StringVar(&o.sourceType, "source", "", "override source.type: uvc, serial or mjpeg")
 	flag.StringVar(&o.device, "device", "", "override source.uvc.device")
@@ -92,7 +92,7 @@ func run() error {
 	opts := parseFlags()
 
 	if opts.showVersion {
-		fmt.Println("paperbridge", Version)
+		fmt.Println("ptcambridge", Version)
 		return nil
 	}
 	switch {
@@ -152,7 +152,7 @@ func run() error {
 	defer listener.Close()
 	address := listener.Addr().String()
 
-	log.Info("paperbridge starting",
+	log.Info("ptcambridge starting",
 		"version", Version,
 		"address", address,
 		"source", cfg.Source.Type,
@@ -168,7 +168,7 @@ func run() error {
 	tracker := status.New()
 	app := bridge.New(cfg, cfgPath, frames, tracker, log)
 	// Saving starts from what the file said, not from the effective settings:
-	// a -device or a PAPERBRIDGE_* is for this run, and must not be written
+	// a -device or a PTCAMBRIDGE_* is for this run, and must not be written
 	// back the first time the tray changes something unrelated. fileCfg has
 	// had neither layer applied.
 	app.SetPersistBase(fileCfg)
@@ -179,7 +179,7 @@ func run() error {
 		// it has no authentication. Off the loopback it is not offered.
 		log.Warn("listening off loopback, the management API is disabled", "address", address)
 	}
-	// PaperBridge does not ship ffmpeg -- see internal/ffmpegfetch for why --
+	// PTCamBridge does not ship ffmpeg -- see internal/ffmpegfetch for why --
 	// so on the platform where a build is published it can fetch one when the
 	// user asks. Nowhere else: elsewhere ffmpeg is a package manager away, and
 	// offering a Windows binary would be worse than saying nothing.
@@ -294,7 +294,7 @@ func run() error {
 		cancelWait()
 	}
 
-	log.Info("paperbridge stopped")
+	log.Info("ptcambridge stopped")
 	return nil
 }
 
@@ -354,7 +354,7 @@ func setupLogging(cfg config.Config, console bool) (*slog.Logger, io.Closer, err
 		// Console-only logging beats none, but it only counts as logging if
 		// the console is actually switched on: a tray launch does not pass
 		// -console, and without this every later error goes to io.Discard.
-		fmt.Fprintln(os.Stderr, "paperbridge: logging to the console only:", err)
+		fmt.Fprintln(os.Stderr, "ptcambridge: logging to the console only:", err)
 		dir, console = "", true
 	}
 	return logging.Setup(logging.Options{Dir: dir, Level: cfg.Log.Level, Console: console})
@@ -377,13 +377,13 @@ func connectAddress(addr string) string {
 }
 
 // describeBindFailure turns "address already in use" into an answer to the
-// question the user actually has: is PaperBridge already running?
+// question the user actually has: is PTCamBridge already running?
 func describeBindFailure(addr string, err error) error {
 	if !errors.Is(err, syscall.EADDRINUSE) && !isAddrInUse(err) {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	if running, version := probeExistingInstance(addr); running {
-		return fmt.Errorf("paperbridge %s is already running on %s", version, addr)
+		return fmt.Errorf("ptcambridge %s is already running on %s", version, addr)
 	}
 	return fmt.Errorf("%s is already in use by another program; set server.listen to a free port", addr)
 }
@@ -579,7 +579,7 @@ func rememberedWrittenDirs() ([]string, error) {
 // the bridge first wrote to its cache.
 //
 // This exists for uninstalling. Turning write_cache off restores it on the
-// next start, but someone removing PaperBridge deletes the settings file and
+// next start, but someone removing PTCamBridge deletes the settings file and
 // the executable together, and there is no next start to notice.
 func restoreCache(opts options) error {
 	restored, err := restoreEverywhereItWas(configuredInstallDir(opts))
@@ -592,7 +592,7 @@ func restoreCache(opts options) error {
 	if len(restored) == 0 {
 		// The search covers every usual folder, so this says the bridge has not
 		// written to any of them.
-		fmt.Println("Nothing to restore: PaperBridge has not changed the PaperTracker address cache.")
+		fmt.Println("Nothing to restore: PTCamBridge has not changed the PaperTracker address cache.")
 		fmt.Println("If the client is installed somewhere unusual, set papertracker.install_dir or pass -config.")
 	}
 	return nil
@@ -603,18 +603,18 @@ func restoreCache(opts options) error {
 // once the settings file has been deleted, which is the situation it is for.
 //
 // The file is only read if it is already there. config.Load writes a default
-// one when it is not, and creates %APPDATA%\PaperBridge to hold it -- so the
+// one when it is not, and creates %APPDATA%\PTCamBridge to hold it -- so the
 // command meant to be run while uninstalling would put back the folder the
 // user was in the middle of removing.
 // Only that one setting is read, and it is read without validating anything
 // else. A file the bridge would refuse to start on -- a misspelled key, a
 // baud rate out of range, an environment variable that does not parse -- still
 // names the folder perfectly well, and refusing to look would send someone
-// uninstalling PaperBridge away with "nothing was changed" while their client
+// uninstalling PTCamBridge away with "nothing was changed" while their client
 // still points at it.
 func configuredInstallDir(opts options) string {
 	// The environment outranks the file here as it does everywhere else. A
-	// folder named only by PAPERBRIDGE_PAPERTRACKER_DIR is one the bridge has
+	// folder named only by PTCAMBRIDGE_PAPERTRACKER_DIR is one the bridge has
 	// been writing to, and it is very likely not among the usual places the
 	// search covers -- so ignoring the variable would mean saying "nothing was
 	// changed" about the one client that was.
@@ -633,7 +633,7 @@ func configuredInstallDir(opts options) string {
 		// Said out loud rather than swallowed: the search below still runs, and
 		// it covers the usual folders, but not one named only in a file that
 		// cannot be read.
-		fmt.Fprintln(os.Stderr, "paperbridge:", err)
+		fmt.Fprintln(os.Stderr, "ptcambridge:", err)
 		return ""
 	}
 	return dir

@@ -1,4 +1,4 @@
-// Package autostart registers PaperBridge to launch when the user signs in.
+// Package autostart registers PTCamBridge to launch when the user signs in.
 //
 // On Windows that means an entry under the per-user Run key, which needs no
 // elevation. Everything else reports that it is unsupported rather than
@@ -11,7 +11,7 @@ import "errors"
 var ErrUnsupported = errors.New("autostart: not supported on this platform")
 
 // EntryName is the value name written under the Run key.
-const EntryName = "PaperBridge"
+const EntryName = "PTCamBridge"
 
 // Enabled reports whether the autostart entry exists and matches what Enable
 // would write for the same configPath.

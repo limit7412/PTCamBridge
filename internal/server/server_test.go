@@ -128,16 +128,16 @@ func TestStreamIsNotChunkedOnTheWire(t *testing.T) {
 	if strings.Contains(strings.ToLower(joined), "transfer-encoding: chunked") {
 		t.Errorf("the response is chunked, which the client cannot parse:\n%s", joined)
 	}
-	if !strings.Contains(joined, "Content-Type: multipart/x-mixed-replace; boundary=paperbridge") {
+	if !strings.Contains(joined, "Content-Type: multipart/x-mixed-replace; boundary=ptcambridge") {
 		t.Errorf("Content-Type missing or wrong:\n%s", joined)
 	}
 
 	// The body must begin with the delimiter, not a chunk size line.
-	body := make([]byte, len("--paperbridge\r\n"))
+	body := make([]byte, len("--ptcambridge\r\n"))
 	if _, err := io.ReadFull(reader, body); err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	if string(body) != "--paperbridge\r\n" {
+	if string(body) != "--ptcambridge\r\n" {
 		t.Errorf("body starts with %q, want the boundary delimiter", body)
 	}
 }
@@ -170,7 +170,7 @@ func TestStreamPartLayout(t *testing.T) {
 		}
 	}
 
-	want := fmt.Sprintf("--paperbridge\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
+	want := fmt.Sprintf("--ptcambridge\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpg))
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(reader, got); err != nil {
 		t.Fatalf("read part header: %v", err)
@@ -219,7 +219,7 @@ func TestStreamSendsTheLatestFrameImmediately(t *testing.T) {
 	if err != nil && err != io.EOF {
 		t.Fatalf("read: %v", err)
 	}
-	if !bytes.HasPrefix(buf[:n], []byte("--paperbridge\r\n")) {
+	if !bytes.HasPrefix(buf[:n], []byte("--ptcambridge\r\n")) {
 		t.Errorf("first bytes = %q, want a part delimiter", buf[:n])
 	}
 }

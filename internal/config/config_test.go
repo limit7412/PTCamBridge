@@ -82,12 +82,12 @@ func TestLoadReportsAParseError(t *testing.T) {
 
 func TestApplyEnvOverridesTheFile(t *testing.T) {
 	env := map[string]string{
-		"PAPERBRIDGE_LISTEN":        "0.0.0.0:9000",
-		"PAPERBRIDGE_SOURCE_TYPE":   "serial",
-		"PAPERBRIDGE_SERIAL_BAUD":   "115200",
-		"PAPERBRIDGE_WRITE_CACHE":   "true",
-		"PAPERBRIDGE_LOG_LEVEL":     "debug",
-		"PAPERBRIDGE_UVC_FRAMERATE": "60",
+		"PTCAMBRIDGE_LISTEN":        "0.0.0.0:9000",
+		"PTCAMBRIDGE_SOURCE_TYPE":   "serial",
+		"PTCAMBRIDGE_SERIAL_BAUD":   "115200",
+		"PTCAMBRIDGE_WRITE_CACHE":   "true",
+		"PTCAMBRIDGE_LOG_LEVEL":     "debug",
+		"PTCAMBRIDGE_UVC_FRAMERATE": "60",
 	}
 	cfg := Default()
 	if err := cfg.ApplyEnv(func(k string) string { return env[k] }); err != nil {
@@ -118,9 +118,9 @@ func TestApplyEnvOverridesTheFile(t *testing.T) {
 // not choose, with nothing anywhere saying their variable was thrown away.
 func TestApplyEnvRejectsUnparsableValues(t *testing.T) {
 	cases := map[string]string{
-		"PAPERBRIDGE_SERIAL_BAUD":   "fast",
-		"PAPERBRIDGE_UVC_FRAMERATE": "lots",
-		"PAPERBRIDGE_WRITE_CACHE":   "maybe",
+		"PTCAMBRIDGE_SERIAL_BAUD":   "fast",
+		"PTCAMBRIDGE_UVC_FRAMERATE": "lots",
+		"PTCAMBRIDGE_WRITE_CACHE":   "maybe",
 	}
 	for key, value := range cases {
 		t.Run(key, func(t *testing.T) {
@@ -146,9 +146,9 @@ func TestApplyEnvReportsEveryBadValue(t *testing.T) {
 	cfg := Default()
 	err := cfg.ApplyEnv(func(k string) string {
 		switch k {
-		case "PAPERBRIDGE_SERIAL_BAUD":
+		case "PTCAMBRIDGE_SERIAL_BAUD":
 			return "fast"
-		case "PAPERBRIDGE_WRITE_CACHE":
+		case "PTCAMBRIDGE_WRITE_CACHE":
 			return "maybe"
 		}
 		return ""
@@ -156,7 +156,7 @@ func TestApplyEnvReportsEveryBadValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("ApplyEnv() = nil, want an error")
 	}
-	for _, key := range []string{"PAPERBRIDGE_SERIAL_BAUD", "PAPERBRIDGE_WRITE_CACHE"} {
+	for _, key := range []string{"PTCAMBRIDGE_SERIAL_BAUD", "PTCAMBRIDGE_WRITE_CACHE"} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("error = %v, want it to name %s", err, key)
 		}
@@ -169,7 +169,7 @@ func TestLoadRejectsABadEnvironmentValue(t *testing.T) {
 	if err := Save(path, Default()); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	t.Setenv("PAPERBRIDGE_SERIAL_BAUD", "fast")
+	t.Setenv("PTCAMBRIDGE_SERIAL_BAUD", "fast")
 
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load() = nil, want the bad environment value rejected")
@@ -258,7 +258,7 @@ func TestNormaliseFillsBlanks(t *testing.T) {
 	if cfg.Server.Listen != "127.0.0.1:1" {
 		t.Errorf("Listen = %q, want it trimmed", cfg.Server.Listen)
 	}
-	if cfg.Server.Boundary != "paperbridge" {
+	if cfg.Server.Boundary != "ptcambridge" {
 		t.Errorf("Boundary = %q, want the default", cfg.Server.Boundary)
 	}
 	if cfg.Source.Serial.Port != "auto" || cfg.Source.Serial.Baud != DefaultSerialBaud {
@@ -417,7 +417,7 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 // Strict decoding makes the shipped sample a liability if it ever drifts from
 // the struct, so it is checked here rather than by whoever copies it.
 func TestSampleConfigLoads(t *testing.T) {
-	if _, err := Load("../../configs/paperbridge.toml"); err != nil {
+	if _, err := Load("../../configs/ptcambridge.toml"); err != nil {
 		t.Fatalf("the sample settings file does not load: %v", err)
 	}
 }
@@ -427,7 +427,7 @@ func TestSampleConfigLoads(t *testing.T) {
 func TestSavedConfigLoadsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	cfg := Default()
-	cfg.Server.ExtraHeaders = map[string]string{"X-Frame-Source": "paperbridge"}
+	cfg.Server.ExtraHeaders = map[string]string{"X-Frame-Source": "ptcambridge"}
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	t.Setenv("PAPERBRIDGE_UVC_DEVICE", "from the environment")
+	t.Setenv("PTCAMBRIDGE_UVC_DEVICE", "from the environment")
 
 	fromFile, err := LoadFile(path)
 	if err != nil {
@@ -469,10 +469,10 @@ func TestLoadFileLeavesTheEnvironmentOut(t *testing.T) {
 
 // Restoring the client's address has to work on a settings file the bridge
 // itself would refuse to start on. The folder is right there in the file, and
-// the alternative is telling someone uninstalling PaperBridge that nothing was
+// the alternative is telling someone uninstalling PTCamBridge that nothing was
 // changed while their client still points at it.
 func TestInstallDirFromFileIgnoresTheRestOfTheFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "paperbridge.toml")
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
 	settings := "[server]\nlsiten = 'oops'\nboundary = 'has space'\n\n" +
 		"[source.serial]\nbaud = -1\n\n[papertracker]\ninstall_dir = 'C:\\PaperTracker'\n"
 	if err := os.WriteFile(path, []byte(settings), 0o644); err != nil {
@@ -496,7 +496,7 @@ func TestInstallDirFromFileIgnoresTheRestOfTheFile(t *testing.T) {
 // A file that is not TOML at all has no folder in it, and saying so beats
 // guessing.
 func TestInstallDirFromFileReportsAnUnparsableFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "paperbridge.toml")
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
 	if err := os.WriteFile(path, []byte("[server\nlisten ="), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}

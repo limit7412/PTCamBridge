@@ -1,7 +1,7 @@
 // Package tray is the system tray front end: source selection, pause, status
 // and the autostart toggle.
 //
-// The menu is the only UI PaperBridge has. Anything richer belongs in a
+// The menu is the only UI PTCamBridge has. Anything richer belongs in a
 // separate process talking to the management API, which is why the controller
 // interface here mirrors what that API exposes.
 package tray
@@ -51,19 +51,19 @@ type FFmpegFetcher interface {
 
 // ffmpegPrompt is what the user is shown before anything is downloaded.
 //
-// PaperBridge does not ship ffmpeg, so clicking the menu item makes the user's
+// PTCamBridge does not ship ffmpeg, so clicking the menu item makes the user's
 // machine fetch a third party's binary. Who built it, how big it is and what
 // licence it carries are the three things somebody needs to agree to that, so
 // they are on the screen before the first byte moves rather than in the README.
 func ffmpegPrompt(build ffmpegfetch.Build) string {
 	return fmt.Sprintf(
-		"PaperBridge does not include ffmpeg. UVC cameras need it.\n\n"+
+		"PTCamBridge does not include ffmpeg. UVC cameras need it.\n\n"+
 			"Download it now?\n\n"+
 			"From: %s\n%s\n\n"+
 			"Size: %d MB\n"+
 			"Licence: FFmpeg, %s\n\n"+
-			"It is downloaded from its publisher, not from PaperBridge, and is\n"+
-			"installed under your PaperBridge settings folder.",
+			"It is downloaded from its publisher, not from PTCamBridge, and is\n"+
+			"installed under your PTCamBridge settings folder.",
 		build.Publisher, build.URL, build.Size/(1000*1000), build.License,
 	)
 }

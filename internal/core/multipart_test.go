@@ -18,7 +18,7 @@ func TestEncodePartByteLayout(t *testing.T) {
 	payload := []byte{0xFF, 0xD8, 0x01, 0x02, 0xFF, 0xD9}
 
 	got := enc.EncodePart(payload)
-	want := append([]byte("--paperbridge\r\nContent-Type: image/jpeg\r\nContent-Length: 6\r\n\r\n"), payload...)
+	want := append([]byte("--ptcambridge\r\nContent-Type: image/jpeg\r\nContent-Length: 6\r\n\r\n"), payload...)
 	want = append(want, "\r\n"...)
 
 	if !bytes.Equal(got, want) {
@@ -78,7 +78,7 @@ func TestContentType(t *testing.T) {
 }
 
 func TestValidateBoundary(t *testing.T) {
-	valid := []string{"paperbridge", "frame-1", "a.b_c", "0123456789"}
+	valid := []string{"ptcambridge", "frame-1", "a.b_c", "0123456789"}
 	for _, s := range valid {
 		if err := ValidateBoundary(s); err != nil {
 			t.Errorf("ValidateBoundary(%q) = %v, want nil", s, err)
@@ -160,7 +160,7 @@ func TestExtraHeadersCannotOverrideTheEncodersOwn(t *testing.T) {
 			t.Errorf("NewMultipartEncoder accepted the reserved header %q", name)
 		}
 	}
-	if err := ValidateStreamHeader("X-Frame-Source", "paperbridge"); err != nil {
+	if err := ValidateStreamHeader("X-Frame-Source", "ptcambridge"); err != nil {
 		t.Errorf("ValidateStreamHeader rejected an ordinary header: %v", err)
 	}
 }
@@ -184,7 +184,7 @@ func TestExtraHeadersMustBeValidFieldSyntax(t *testing.T) {
 	}
 
 	good := []StreamHeader{
-		{Name: "X-Frame-Source", Value: "paperbridge"},
+		{Name: "X-Frame-Source", Value: "ptcambridge"},
 		{Name: "X-Odd_But~Legal!", Value: "value with spaces"},
 		{Name: "X-Ok", Value: "tab\tseparated"},
 	}

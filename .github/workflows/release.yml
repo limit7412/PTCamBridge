@@ -77,14 +77,31 @@ jobs:
           `[source.uvc] ffmpeg_path` で指定する、のいずれでも構いません)。
           有線 Babble ボードと WiFi MJPEG カメラだけを使う場合は不要です。
 
-          このリリースに ffmpeg は含まれていません。PaperBridge は ffmpeg を別プロセスとして
+          このリリースに ffmpeg は含まれていません。PTCamBridge は ffmpeg を別プロセスとして
           起動するだけなので同梱の必要がなく、ffmpeg を使わない構成のユーザーに 100 MB 超の
           ダウンロードを負わせないためです。
 
-          初回起動時に `%APPDATA%\PaperBridge\paperbridge.toml` が既定値で生成されます。
+          初回起動時に `%APPDATA%\PTCamBridge\ptcambridge.toml` が既定値で生成されます。
           設定項目は README を参照してください。
 
           動作環境: Windows 10 / 11 (x64)。
+
+          ## PaperBridge (v0.1.x) からの移行
+
+          アプリ名を PTCamBridge に統一したため、設定フォルダ・設定ファイル名・環境変数・
+          レジストリのエントリ名・PaperTracker 側の退避ファイル名がすべて変わりました。
+          **旧バージョンの設定は引き継ぎません。**
+
+          旧バージョンを使っていた場合は、**先に旧 exe で後始末をしてください**。
+
+          1. `paperbridge.exe -restore-cache` (`write_cache` を使っていた場合。
+             これを先にやらないと、PaperTracker 側に残った退避ファイルは新バージョンから
+             見えず、クライアントがブリッジを指したまま戻せなくなります)
+          2. `paperbridge.exe -uninstall-autostart` (自動起動を登録していた場合)
+
+          設定と取得済み ffmpeg を引き継ぐ場合は `%APPDATA%\PaperBridge\` の中身を
+          `%APPDATA%\PTCamBridge\` へ手で移してください (`paperbridge.toml` は
+          `ptcambridge.toml` に改名)。詳細は README を参照してください。
 
           ## アンインストール
 

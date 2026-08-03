@@ -67,8 +67,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           # 成果物と、その中の exe に同じ名前を使う。展開したあとの exe 単体でも
           # どのビルドか分かるようにするため。
-          echo "artifact=paperbridge-windows-amd64-$version" >> "$GITHUB_OUTPUT"
-          echo "exe=paperbridge-windows-amd64-$version.exe" >> "$GITHUB_OUTPUT"
+          echo "artifact=ptcambridge-windows-amd64-$version" >> "$GITHUB_OUTPUT"
+          echo "exe=ptcambridge-windows-amd64-$version.exe" >> "$GITHUB_OUTPUT"
 
       - name: Test
         run: go test -race ./...
@@ -86,7 +86,7 @@ jobs:
           mkdir -p publish
           go build -trimpath \
             -ldflags "-s -w -H=windowsgui -X main.Version=$VERSION" \
-            -o "publish/$EXE" ./cmd/paperbridge
+            -o "publish/$EXE" ./cmd/ptcambridge
 
       - uses: actions/upload-artifact@v4
         with:
@@ -128,7 +128,7 @@ jobs:
           # (2) 常駐させて HTTP を実際に喋らせる。カメラは無いので、届かない MJPEG URL を
           #     指定してドライバを再接続させ続ける (起動そのものは妨げない)。設定ファイルは
           #     ランナー上の一時パスに置き、%APPDATA% を触らせない。
-          $cfg = Join-Path $env:RUNNER_TEMP 'paperbridge-smoke.toml'
+          $cfg = Join-Path $env:RUNNER_TEMP 'ptcambridge-smoke.toml'
           $bridgeArgs = @(
             '-headless', '-console',
             '-config', $cfg,

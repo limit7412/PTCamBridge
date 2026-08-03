@@ -1,7 +1,7 @@
-// Package config loads, validates and persists the PaperBridge settings.
+// Package config loads, validates and persists the PTCamBridge settings.
 //
 // Values are resolved in the order command line, environment
-// (PAPERBRIDGE_*), TOML file, built-in default. The file lives next to the
+// (PTCAMBRIDGE_*), TOML file, built-in default. The file lives next to the
 // user's other application data and is written with defaults on first run.
 package config
 
@@ -21,10 +21,10 @@ import (
 )
 
 // AppName is the folder name used under the user's config and data directories.
-const AppName = "PaperBridge"
+const AppName = "PTCamBridge"
 
 // FileName is the settings file written inside that folder.
-const FileName = "paperbridge.toml"
+const FileName = "ptcambridge.toml"
 
 // DefaultSerialBaud is the rate Babble wired firmware runs at, used when
 // source.serial.baud is left at zero.
@@ -176,7 +176,7 @@ func Load(path string) (Config, error) {
 
 // LoadFile reads the settings file alone, creating it with defaults when
 // absent. The environment is deliberately not applied: this is the file as it
-// stands, which is what saving has to build on if a PAPERBRIDGE_* meant for one
+// stands, which is what saving has to build on if a PTCAMBRIDGE_* meant for one
 // run is not to be written back as a permanent choice.
 func LoadFile(path string) (Config, error) {
 	cfg := Default()
@@ -216,7 +216,7 @@ func LoadFile(path string) (Config, error) {
 // on its own, outside the usual layering, and has to honour the same override:
 // a folder named only by this variable is a folder the bridge writes to, so it
 // is a folder the bridge has to be able to undo.
-const EnvInstallDir = "PAPERBRIDGE_PAPERTRACKER_DIR"
+const EnvInstallDir = "PTCAMBRIDGE_PAPERTRACKER_DIR"
 
 // InstallDirFromFile reads papertracker.install_dir and nothing else.
 //
@@ -275,12 +275,12 @@ func Save(path string, cfg Config) error {
 // envLookup matches os.Getenv and is injected so the mapping can be tested.
 type envLookup func(string) string
 
-// ApplyEnv overlays PAPERBRIDGE_* variables, which take precedence over the
+// ApplyEnv overlays PTCAMBRIDGE_* variables, which take precedence over the
 // file. Only the settings worth scripting are exposed.
 //
 // A value that will not parse is an error, not something to skip. Dropping it
 // silently leaves the file's value in place and starts anyway, so someone who
-// set PAPERBRIDGE_SERIAL_BAUD=abc gets a bridge running on a rate they did not
+// set PTCAMBRIDGE_SERIAL_BAUD=abc gets a bridge running on a rate they did not
 // ask for, with nothing anywhere saying the variable was ignored. Every
 // variable is still attempted, so one typo does not hide the next.
 func (c *Config) ApplyEnv(get envLookup) error {
@@ -291,20 +291,20 @@ func (c *Config) ApplyEnv(get envLookup) error {
 		}
 	}
 
-	setString(get, "PAPERBRIDGE_LISTEN", &c.Server.Listen)
-	setString(get, "PAPERBRIDGE_BOUNDARY", &c.Server.Boundary)
-	setString(get, "PAPERBRIDGE_SOURCE_TYPE", &c.Source.Type)
-	setString(get, "PAPERBRIDGE_UVC_DEVICE", &c.Source.UVC.Device)
-	setString(get, "PAPERBRIDGE_UVC_SIZE", &c.Source.UVC.Size)
-	fail(setInt(get, "PAPERBRIDGE_UVC_FRAMERATE", &c.Source.UVC.Framerate))
-	setString(get, "PAPERBRIDGE_FFMPEG_PATH", &c.Source.UVC.FFmpegPath)
-	setString(get, "PAPERBRIDGE_SERIAL_PORT", &c.Source.Serial.Port)
-	fail(setInt(get, "PAPERBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud))
-	setString(get, "PAPERBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
+	setString(get, "PTCAMBRIDGE_LISTEN", &c.Server.Listen)
+	setString(get, "PTCAMBRIDGE_BOUNDARY", &c.Server.Boundary)
+	setString(get, "PTCAMBRIDGE_SOURCE_TYPE", &c.Source.Type)
+	setString(get, "PTCAMBRIDGE_UVC_DEVICE", &c.Source.UVC.Device)
+	setString(get, "PTCAMBRIDGE_UVC_SIZE", &c.Source.UVC.Size)
+	fail(setInt(get, "PTCAMBRIDGE_UVC_FRAMERATE", &c.Source.UVC.Framerate))
+	setString(get, "PTCAMBRIDGE_FFMPEG_PATH", &c.Source.UVC.FFmpegPath)
+	setString(get, "PTCAMBRIDGE_SERIAL_PORT", &c.Source.Serial.Port)
+	fail(setInt(get, "PTCAMBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud))
+	setString(get, "PTCAMBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
 	setString(get, EnvInstallDir, &c.PaperTracker.InstallDir)
-	fail(setBool(get, "PAPERBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
-	setString(get, "PAPERBRIDGE_LOG_LEVEL", &c.Log.Level)
-	setString(get, "PAPERBRIDGE_LOG_DIR", &c.Log.Dir)
+	fail(setBool(get, "PTCAMBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
+	setString(get, "PTCAMBRIDGE_LOG_LEVEL", &c.Log.Level)
+	setString(get, "PTCAMBRIDGE_LOG_DIR", &c.Log.Dir)
 
 	return errors.Join(errs...)
 }
@@ -393,7 +393,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("server.listen %q must end in a port number", c.Server.Listen)
 	}
 	if number <= 0 || number > 65535 {
-		return fmt.Errorf("server.listen must name a fixed port between 1 and 65535, got %d: port 0 asks for a different one on every start, which leaves the client pointing at an address that no longer exists and lets a second copy of PaperBridge run alongside this one", number)
+		return fmt.Errorf("server.listen must name a fixed port between 1 and 65535, got %d: port 0 asks for a different one on every start, which leaves the client pointing at an address that no longer exists and lets a second copy of PTCamBridge run alongside this one", number)
 	}
 	if err := core.ValidateBoundary(c.Server.Boundary); err != nil {
 		return fmt.Errorf("server.boundary: %w", err)

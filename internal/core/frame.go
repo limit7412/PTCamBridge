@@ -1,4 +1,4 @@
-// Package core holds the side-effect free logic of PaperBridge: JPEG
+// Package core holds the side-effect free logic of PTCamBridge: JPEG
 // validation, wire protocol parsing, multipart encoding and image transforms.
 //
 // Nothing in this package may touch a socket, a serial port, a child process
