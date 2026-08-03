@@ -4,10 +4,12 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 )
 
 func discardLogger() *slog.Logger {
@@ -205,5 +207,47 @@ func TestCommandQueueRunsActionsInOrder(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("action %d (%s) never ran", i+1, want)
 		}
+	}
+}
+
+// The prompt is what stands between a click and a third party's binary landing
+// on the user's machine, so it has to say who, how big and under what licence.
+func TestFFmpegPromptNamesWhatIsBeingDownloaded(t *testing.T) {
+	build := ffmpegfetch.Build{
+		URL:       "https://example.invalid/ffmpeg-lgpl.zip",
+		Size:      145349145,
+		Publisher: "SomeBuilder/FFmpeg-Builds",
+		License:   "LGPL v2.1 or later",
+	}
+
+	prompt := ffmpegPrompt(build)
+	for _, want := range []string{build.Publisher, build.URL, build.License, "145 MB"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestFFmpegStatusLineFollowsTheDownload(t *testing.T) {
+	cases := []struct {
+		name  string
+		state ffmpegfetch.State
+		want  string
+	}{
+		{"nothing yet", ffmpegfetch.State{}, "Get ffmpeg (for UVC cameras)"},
+		{"in flight", ffmpegfetch.State{Downloading: true, Received: 50, Total: 200}, "Downloading ffmpeg... 25%"},
+		{"in flight, size unknown", ffmpegfetch.State{Downloading: true}, "Downloading ffmpeg..."},
+		{"done", ffmpegfetch.State{Installed: true}, "ffmpeg is installed"},
+		{"failed", ffmpegfetch.State{LastError: "digest mismatch"}, "Get ffmpeg (last attempt failed)"},
+		// A download that is running says so even if an earlier one failed:
+		// the entry describes what is happening now.
+		{"retrying", ffmpegfetch.State{Downloading: true, LastError: "digest mismatch"}, "Downloading ffmpeg..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ffmpegStatusLine(tc.state); got != tc.want {
+				t.Errorf("ffmpegStatusLine() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

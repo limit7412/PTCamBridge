@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,4 +277,75 @@ func TestUVCFallsBackWhenTheDeviceRejectsMJPEG(t *testing.T) {
 	if u.copyCodec {
 		t.Error("passthrough was kept after the device rejected MJPEG")
 	}
+}
+
+// A copy the bridge fetched for itself is the last place looked at, after the
+// three the user controls. Anything else and an installation deliberately
+// pointed at a particular ffmpeg would quietly stop using it.
+func TestUVCPrefersTheUsersFFmpegOverTheFetchedOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH lookup needs an executable bit")
+	}
+
+	settings := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", settings)
+	t.Setenv("APPDATA", settings)
+	fetched := writeExecutable(t, filepath.Join(settings, "PaperBridge", "bin"), ffmpegBinaryName())
+
+	// Nothing else on offer: the fetched copy is found.
+	t.Setenv("PATH", t.TempDir())
+	u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger()}
+	if got, err := u.ffmpegPath(); err != nil || got != fetched {
+		t.Fatalf("ffmpegPath() = %q, %v; want the fetched copy %q", got, err, fetched)
+	}
+
+	// One on PATH outranks it.
+	onPath := t.TempDir()
+	writeExecutable(t, onPath, ffmpegBinaryName())
+	t.Setenv("PATH", onPath)
+	got, err := u.ffmpegPath()
+	if err != nil {
+		t.Fatalf("ffmpegPath: %v", err)
+	}
+	if got == fetched {
+		t.Errorf("ffmpegPath() = the fetched copy, want the one on PATH")
+	}
+
+	// And the configured override outranks everything.
+	configured := writeExecutable(t, t.TempDir(), "my-ffmpeg")
+	u.cfg.FFmpegPath = configured
+	if got, err := u.ffmpegPath(); err != nil || got != configured {
+		t.Errorf("ffmpegPath() = %q, %v; want the configured %q", got, err, configured)
+	}
+}
+
+// With nothing anywhere, the failure has to say what the user can do about it.
+func TestUVCSaysHowToGetFFmpegWhenThereIsNone(t *testing.T) {
+	settings := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", settings)
+	t.Setenv("APPDATA", settings)
+	t.Setenv("PATH", t.TempDir())
+
+	u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger()}
+	_, err := u.ffmpegPath()
+	if err == nil {
+		t.Fatal("ffmpegPath succeeded with no ffmpeg anywhere")
+	}
+	for _, want := range []string{"tray", "ffmpeg_path"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func writeExecutable(t *testing.T, dir, name string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
 }

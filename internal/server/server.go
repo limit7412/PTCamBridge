@@ -20,6 +20,7 @@ import (
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
@@ -76,6 +77,20 @@ type Controller interface {
 	Devices(ctx context.Context) Devices
 }
 
+// FFmpegFetcher is the slice of the ffmpeg download the management API drives.
+//
+// An interface rather than the type itself so the server keeps knowing nothing
+// about how the download works, and so a build with no fetcher wired in simply
+// leaves the endpoint off.
+type FFmpegFetcher interface {
+	// State reports what is installed and what is in flight.
+	State() ffmpegfetch.State
+	// Start begins a download, or reports why it cannot. It returns as soon as
+	// the download is under way: a hundred megabytes does not fit inside an
+	// HTTP request, so the caller polls State instead.
+	Start() error
+}
+
 // Options configures a Server.
 type Options struct {
 	Hub    *hub.Hub
@@ -89,6 +104,9 @@ type Options struct {
 	// EnableAdmin serves /api/v1/*. The bridge turns this off whenever the
 	// listener is not on loopback, because the API has no authentication.
 	EnableAdmin bool
+	// FFmpeg enables /api/v1/ffmpeg. Nil leaves the endpoint off, which is
+	// what a platform with no published build gets.
+	FFmpeg FFmpegFetcher
 	// HoldOnSourceLoss keeps stream clients connected while the camera
 	// reconnects rather than closing the response. It is the initial value;
 	// SetStreamOptions replaces it.
@@ -153,6 +171,9 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/api/v1/config", s.handleConfig)
 		mux.HandleFunc("/api/v1/source", s.handleSourceSwitch)
 		mux.HandleFunc("/api/v1/devices", s.handleDevices)
+		if s.opts.FFmpeg != nil {
+			mux.HandleFunc("/api/v1/ffmpeg", s.handleFFmpeg)
+		}
 	}
 	return mux
 }
@@ -546,6 +567,47 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	// No error return: a half-answer is still an answer, and which half
 	// failed is reported inside the body.
 	writeJSON(w, r, http.StatusOK, s.opts.Controller.Devices(r.Context()))
+}
+
+// handleFFmpeg reports whether ffmpeg has been fetched, and starts a fetch.
+//
+// POST rather than PUT, and no body: this is not a resource being set to a
+// value, it is a job being asked to run. The body it would carry -- which
+// archive, from where -- is pinned in the code precisely so that a request
+// cannot choose it.
+func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdmin(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		writeJSON(w, r, http.StatusOK, s.opts.FFmpeg.State())
+
+	case http.MethodPost:
+		// A download already installed is not repeated. Fetching the same
+		// hundred megabytes again is not what a second click means, and
+		// replacing a working ffmpeg is not something to do on a stray request.
+		state := s.opts.FFmpeg.State()
+		if state.Installed {
+			writeJSON(w, r, http.StatusOK, state)
+			return
+		}
+		if err := s.opts.FFmpeg.Start(); err != nil {
+			// Busy is not a failure of the request: the thing it asked for is
+			// happening. Anything else is this machine saying it cannot.
+			if errors.Is(err, ffmpegfetch.ErrBusy) {
+				writeJSON(w, r, http.StatusAccepted, s.opts.FFmpeg.State())
+				return
+			}
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, r, http.StatusAccepted, s.opts.FFmpeg.State())
+
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // decodeStrict rejects a body carrying fields the target does not have, or

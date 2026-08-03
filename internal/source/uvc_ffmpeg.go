@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 )
 
 // UVC capture runs through an ffmpeg child process rather than a native
@@ -339,7 +340,13 @@ func platformInput(device string) (format, input string) {
 }
 
 // ffmpegPath resolves the binary: the configured override, then a copy sitting
-// next to the executable, then PATH.
+// next to the executable, then PATH, then one fetched by the bridge itself.
+//
+// The fetched copy comes last on purpose. It is the one PaperBridge manages, so
+// it is also the one the user cannot easily choose against -- putting it ahead
+// of PATH would mean an installation that has deliberately been pointed at a
+// particular ffmpeg silently stops using it the first time somebody clicks the
+// tray item.
 func (u *UVC) ffmpegPath() (string, error) {
 	if u.cfg.FFmpegPath != "" {
 		if _, err := os.Stat(u.cfg.FFmpegPath); err != nil {
@@ -348,16 +355,18 @@ func (u *UVC) ffmpegPath() (string, error) {
 		return u.cfg.FFmpegPath, nil
 	}
 	if exe, err := os.Executable(); err == nil {
-		bundled := filepath.Join(filepath.Dir(exe), ffmpegBinaryName())
-		if _, statErr := os.Stat(bundled); statErr == nil {
-			return bundled, nil
+		alongside := filepath.Join(filepath.Dir(exe), ffmpegBinaryName())
+		if _, statErr := os.Stat(alongside); statErr == nil {
+			return alongside, nil
 		}
 	}
-	path, err := exec.LookPath(ffmpegBinaryName())
-	if err != nil {
-		return "", fmt.Errorf("uvc: ffmpeg not found next to the executable or on PATH: %w", err)
+	if path, err := exec.LookPath(ffmpegBinaryName()); err == nil {
+		return path, nil
 	}
-	return path, nil
+	if path, ok := ffmpegfetch.Installed(); ok {
+		return path, nil
+	}
+	return "", errors.New("uvc: ffmpeg not found next to the executable, on PATH, or in the settings folder; fetch it from the tray menu or set source.uvc.ffmpeg_path")
 }
 
 func ffmpegBinaryName() string {
