@@ -31,6 +31,12 @@ import (
 // この関数はブロックします。呼び出し側は必ずトレイのイベントループの外で実行して
 // ください。openTarget がそうしています。
 func openPath(target string) error {
+	return openPathOnThisThread(target, true)
+}
+
+// openPathOnThisThread は、いま走っているスレッドを STA にして開きます。
+// retry は、STA が手に入らなかったときに別のスレッドで取り直してよいかどうかです。
+func openPathOnThisThread(target string, retry bool) error {
 	// スレッドを固定して COM を初期化します。既定のハンドラがインプロセスの COM
 	// シェル拡張として実装されている場合、シェルはそちらへ処理を委ねるので、
 	// 初期化されていないスレッドから呼ぶと開けないことがあります。それでは
@@ -51,14 +57,21 @@ func openPath(target string) error {
 		// 場合も釣り合いを取るために CoUninitialize を呼びます。
 		defer coUninitialize.Call()
 	case rpcEChangedMode:
-		// このスレッドは既に MTA です。COM 自体は使えるので進みますが、こちらが
-		// 初期化したのではないので CoUninitialize は呼びません。
+		// このスレッドは既に MTA か NTA で、STA にはできません。要求した
+		// アパートメントが手に入っていない以上、STA を要求するシェル拡張はここから
+		// 呼んでも動きません。別のスレッドを取り直します。
 		//
-		// 呼び出しごとに新しい goroutine が新しいスレッドを固定するので、この分岐に
-		// 来るのは、このプロセスの誰かがそのスレッドを MTA にして戻さなかった場合
-		// だけです。今のところ CoInitializeEx を呼ぶのはここしかなく、ここは必ず
-		// 釣り合いを取ります。それでも進むのは、MTA から開ける相手の方がはるかに
-		// 多く、ここで諦めればクリックは確実に何も起こさないからです。
+		// 新しい goroutine は必ず別の OS スレッドに載ります。こちらは固定したまま
+		// 結果を待つので、ランタイムはこのスレッドを他の goroutine に使えません。
+		// そちらは真新しいスレッドなので、誰かが先に MTA にしていることはありません。
+		//
+		// CoUninitialize は呼びません。ここを初期化したのはこちらではないからです。
+		if !retry {
+			return fmt.Errorf("open %q: no thread could be put into a single-threaded apartment", target)
+		}
+		done := make(chan error, 1)
+		go func() { done <- openPathOnThisThread(target, false) }()
+		return <-done
 	default:
 		// COM がまったく初期化されていない状態です。このまま呼べば、上に書いた
 		// 「クリックしても何も起きない」に戻る可能性があります。ここで失敗させれば、
