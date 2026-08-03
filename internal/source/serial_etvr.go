@@ -37,6 +37,17 @@ var serialStallTimeout = 5 * time.Second
 // not so much that the line turns into a hex dump.
 const previewBytes = 16
 
+// maxWarnedStreams bounds how many different unparsable streams one port is
+// warned about before the rest go to debug.
+//
+// A cap is needed because "the bytes changed" is not always news: a port
+// carrying a live stream hands back different first bytes on every open,
+// depending on where the reader happened to join it, so keying the warning on
+// the stream alone would warn on every reconnect -- the flooding the memory
+// exists to prevent. A few tellings is enough to see that the bytes are
+// varying, and the debug line still carries every one of them.
+const maxWarnedStreams = 3
+
 // knownCameraVIDs are the USB vendor IDs of the bridges and MCUs that Babble
 // and OpenIris boards ship with: Espressif, Silicon Labs, QinHeng, FTDI and
 // Raspberry Pi.
@@ -77,17 +88,16 @@ type Serial struct {
 	tried  map[string]struct{}
 	proven string
 
-	// warnedPorts is the set of ports already reported as carrying something
-	// unparsable, so the warning is said once per port rather than on every
-	// reconnect. Per port rather than per stream: "auto" rotates between
-	// candidates, so remembering only the last stream would warn again every
-	// time the rotation came back round -- and a port carrying a live stream
-	// gives different first bytes on each open anyway, depending on where the
-	// reader joined it. An entry is dropped when that port produces a frame,
-	// so a port that works and later breaks is news again.
+	// warned remembers, per port, which unparsable streams have already been
+	// reported, so the same complaint is not made on every reconnect.
 	//
-	// Bounded by the number of serial ports on the machine.
-	warnedPorts map[string]struct{}
+	// Per port and per stream, because both change independently: "auto"
+	// rotates between candidates, so remembering only the last stream would
+	// warn again every time the rotation came back round; and a firmware
+	// update or a different device on the same COM number is a new thing to
+	// say. An entry is dropped when that port produces a frame, so a port that
+	// works and later breaks is news again.
+	warned map[string][]string
 
 	// listPorts is ListSerialPorts, replaced in tests: the rotation is the
 	// part worth checking and it cannot be reached without control over what
@@ -123,13 +133,13 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 		reporter = NopReporter{}
 	}
 	return &Serial{
-		cfg:         cfg,
-		parser:      parser,
-		log:         log,
-		reporter:    reporter,
-		tried:       map[string]struct{}{},
-		warnedPorts: map[string]struct{}{},
-		listPorts:   ListSerialPorts,
+		cfg:       cfg,
+		parser:    parser,
+		log:       log,
+		reporter:  reporter,
+		tried:     map[string]struct{}{},
+		warned:    map[string][]string{},
+		listPorts: ListSerialPorts,
 		openPort: func(name string, baud int) (serialPort, error) {
 			return serial.Open(name, &serial.Mode{BaudRate: baud})
 		},
@@ -211,7 +221,7 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 				s.proven = name
 				// It works now. If it stops parsing later that is news again,
 				// whatever was said about it before.
-				delete(s.warnedPorts, name)
+				delete(s.warned, name)
 				s.reporter.Connected(s.Name())
 			}
 			count++
@@ -241,22 +251,38 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 // packet header is configurable precisely because firmware revisions differ,
 // and the value to configure is sitting in that line.
 func (s *Serial) stalled(name string, frames uint64, sinceFrame int64, preview []byte) error {
+	if frames > 0 {
+		// A board that worked and then stopped. The count is a lower bound
+		// here and says so: bytes arriving after a frame in that same read are
+		// only still countable while the parser is holding them, and it
+		// discards what cannot begin a packet. Which way that lands does not
+		// change the reading -- nothing arrived, or something did -- but the
+		// number should not be quoted as a total when it is not one.
+		//
+		// Nothing is shown of the stream either: this port was producing
+		// frames a moment ago, so its packets are not the problem.
+		return fmt.Errorf("serial: %s produced no frame for %s (at least %d bytes received since the last frame)", name, serialStallTimeout, sinceFrame)
+	}
+
+	// Nothing has ever parsed on this port, so no frame has reset the count:
+	// this total is every byte the session saw.
 	err := fmt.Errorf("serial: %s produced no frame for %s (%d bytes received in that time)", name, serialStallTimeout, sinceFrame)
-	if frames > 0 || sinceFrame == 0 {
-		// Either the board went quiet after working, or the port is silent.
-		// Both are described by the error; there is nothing to show.
+	if sinceFrame == 0 {
+		// A silent port. The error says so and there is nothing to show.
 		return err
 	}
 
 	head := hexPreview(preview)
-	// Said once per port. The reconnect loop comes back every few seconds, and
-	// the second telling adds nothing the first did not; the bytes are still
-	// in the debug line for anyone watching a port that keeps changing.
-	if _, warned := s.warnedPorts[name]; warned {
+	// Said once per stream, and only so many times per port. The reconnect
+	// loop comes back every few seconds, and repeating a complaint already
+	// made adds nothing; the bytes are still in the debug line for anyone
+	// watching a port whose stream keeps moving.
+	seen := s.warned[name]
+	if slices.Contains(seen, head) || len(seen) >= maxWarnedStreams {
 		s.log.Debug("still nothing that parses on the serial port", "port", name, "first_bytes", head)
 		return err
 	}
-	s.warnedPorts[name] = struct{}{}
+	s.warned[name] = append(seen, head)
 	s.log.Warn("bytes are arriving on the serial port but no packet matched; check the firmware's preamble against source.serial.header, and the baud rate",
 		"port", name,
 		"baud", s.cfg.Baud,

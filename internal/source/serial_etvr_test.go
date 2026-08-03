@@ -274,33 +274,84 @@ func TestSerialStallLogsTheUnparsableStream(t *testing.T) {
 	}
 }
 
-// The reconnect loop comes back every few seconds. Repeating the warning on
-// every pass would bury the log without adding anything.
-func TestSerialStallWarnsOncePerPort(t *testing.T) {
+// The reconnect loop comes back every few seconds. Repeating the same warning
+// on every pass would bury the log without adding anything.
+func TestSerialStallWarnsOncePerStream(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	junk := bytes.Repeat([]byte{0x5A}, 64)
 	s := wiredSerial(t, log, SerialConfig{}, junk)
-	if err := runUntilStall(t, s); err == nil {
-		t.Fatal("session returned nil, want a stall")
-	}
-	// Reconnecting to the same port, which is what the retry loop does. The
-	// bytes differ because a live stream is joined wherever it happens to be,
-	// so keying on them rather than the port would warn all over again.
-	s.openPort = func(string, int) (serialPort, error) {
-		return &fakePort{chunks: [][]byte{bytes.Repeat([]byte{0x6B}, 64)}}, nil
-	}
-	if err := runUntilStall(t, s); err == nil {
-		t.Fatal("second session returned nil, want a stall")
+	for i := 0; i < 3; i++ {
+		s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: [][]byte{junk}}, nil }
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatalf("session %d returned nil, want a stall", i+1)
+		}
 	}
 
 	if warns := strings.Count(logged.String(), "level=WARN"); warns != 1 {
-		t.Errorf("logged %d warnings for one port, want 1:\n%s", warns, logged.String())
+		t.Errorf("logged %d warnings for one unchanged stream, want 1:\n%s", warns, logged.String())
 	}
-	// The bytes are still there for anyone who turns the level up.
-	if !strings.Contains(logged.String(), "level=DEBUG") {
-		t.Errorf("the repeat was not reported at debug:\n%s", logged.String())
+	// The repeats are still there for anyone who turns the level up.
+	if debugs := strings.Count(logged.String(), "level=DEBUG"); debugs != 2 {
+		t.Errorf("logged %d debug lines for the repeats, want 2:\n%s", debugs, logged.String())
+	}
+}
+
+// A stream that changed is worth saying again -- a reflashed board or a
+// different device on the same COM number is a different diagnosis. But not
+// without end: a port carrying a live stream is joined at a different point
+// every time, so the bytes differ on every open and warning on each would be
+// the flooding this memory exists to prevent.
+func TestSerialStallWarnsAboutAChangedStreamButNotForever(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s := wiredSerial(t, log, SerialConfig{})
+	for i := 0; i < maxWarnedStreams+2; i++ {
+		filler := byte(0x40 + i)
+		s.openPort = func(string, int) (serialPort, error) {
+			return &fakePort{chunks: [][]byte{bytes.Repeat([]byte{filler}, 64)}}, nil
+		}
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatalf("session %d returned nil, want a stall", i+1)
+		}
+	}
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != maxWarnedStreams {
+		t.Errorf("logged %d warnings for %d different streams, want the cap of %d:\n%s",
+			warns, maxWarnedStreams+2, maxWarnedStreams, logged.String())
+	}
+}
+
+// A port that starts working has settled whatever was wrong with it. If it
+// breaks again later that is a new complaint, not a repeat of the old one.
+func TestSerialStallWarnsAgainAfterThePortHasWorked(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	parser, err := core.NewETVRParser(nil, 0)
+	if err != nil {
+		t.Fatalf("NewETVRParser: %v", err)
+	}
+	packet, err := parser.EncodePacket(testJPEG(t))
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	junk := bytes.Repeat([]byte{0x5A}, 64)
+
+	s := wiredSerial(t, log, SerialConfig{}, junk)
+	// Unparsable, then a session that works, then unparsable again in exactly
+	// the same way as the first time.
+	for _, chunks := range [][][]byte{{junk}, {packet}, {junk}} {
+		s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: chunks}, nil }
+		if err := runUntilStall(t, s); err == nil {
+			t.Fatal("session returned nil, want a stall")
+		}
+	}
+
+	if warns := strings.Count(logged.String(), "level=WARN"); warns != 2 {
+		t.Errorf("logged %d warnings, want 2 (the port worked in between):\n%s", warns, logged.String())
 	}
 }
 
