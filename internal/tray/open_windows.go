@@ -31,12 +31,20 @@ import (
 // この関数はブロックします。呼び出し側は必ずトレイのイベントループの外で実行して
 // ください。openTarget がそうしています。
 func openPath(target string) error {
-	return openPathOnThisThread(target, true)
+	return openPathOnThisThread(target, staAttempts)
 }
 
+// staAttempts は、STA にできるスレッドを探すのに使う回数です。
+//
+// 1 回の試行につき、STA にできないスレッドが 1 本ずつ確実に減ります (下記)。
+// つまりこれは「他のアパートメントに固まったスレッドを何本まで見送るか」であり、
+// 現状そのようなスレッドを作る箇所はプロセス内に 1 つもないので、2 本目以降まで
+// 使うことはまず無いはずの余裕です。
+const staAttempts = 4
+
 // openPathOnThisThread は、いま走っているスレッドを STA にして開きます。
-// retry は、STA が手に入らなかったときに別のスレッドで取り直してよいかどうかです。
-func openPathOnThisThread(target string, retry bool) error {
+// attempts は、STA が手に入らなかったときに残っている取り直しの回数です。
+func openPathOnThisThread(target string, attempts int) error {
 	// スレッドを固定して COM を初期化します。既定のハンドラがインプロセスの COM
 	// シェル拡張として実装されている場合、シェルはそちらへ処理を委ねるので、
 	// 初期化されていないスレッドから呼ぶと開けないことがあります。それでは
@@ -46,7 +54,14 @@ func openPathOnThisThread(target string, retry bool) error {
 	// COM のアパートメントはスレッドに紐づくので、固定は初期化と同じくらい重要です。
 	// goroutine が別のスレッドへ移った先で呼べば、そこは初期化されていません。
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	// 固定を解けばスレッドはプールに戻ります。STA にできたスレッドはそれでよいの
+	// ですが、できなかったスレッドは戻してはいけません。下の rpcEChangedMode を参照。
+	unlock := true
+	defer func() {
+		if unlock {
+			runtime.UnlockOSThread()
+		}
+	}()
 
 	// シェル拡張が期待するのは STA です。OLE1 の DDE を切るのは、ここで欲しいものが
 	// 何も無いのに、応答しないハンドラを待つ経路だけが増えるからです。
@@ -59,18 +74,26 @@ func openPathOnThisThread(target string, retry bool) error {
 	case rpcEChangedMode:
 		// このスレッドは既に MTA か NTA で、STA にはできません。要求した
 		// アパートメントが手に入っていない以上、STA を要求するシェル拡張はここから
-		// 呼んでも動きません。別のスレッドを取り直します。
+		// 呼んでも動きません。別のスレッドで取り直します。
 		//
-		// 新しい goroutine は必ず別の OS スレッドに載ります。こちらは固定したまま
-		// 結果を待つので、ランタイムはこのスレッドを他の goroutine に使えません。
-		// そちらは真新しいスレッドなので、誰かが先に MTA にしていることはありません。
+		// このスレッドはプールに戻しません。固定したまま goroutine を終えたスレッドは
+		// ランタイムが破棄するので、unlock を降ろすことがそのまま「二度と割り当てるな」
+		// になります。これが取り直しを前に進める仕掛けです。go 文が約束するのは別の
+		// goroutine であって新しいスレッドではないため、戻してしまえば取り直しが同じ
+		// スレッドに当たり続けることがあり得ます。破棄されるのはこの関数を呼んだ
+		// goroutine が終わるときで、openTarget のそれは開き終えた直後に終わります。
+		//
+		// 加えて、こちらは結果を待つ間ずっと固定したままです。だから取り直しが
+		// この 1 本に当たることもありません。試行のたびに STA にできないスレッドが
+		// 1 本ずつ確実に減っていきます。
 		//
 		// CoUninitialize は呼びません。ここを初期化したのはこちらではないからです。
-		if !retry {
+		unlock = false
+		if attempts <= 1 {
 			return fmt.Errorf("open %q: no thread could be put into a single-threaded apartment", target)
 		}
 		done := make(chan error, 1)
-		go func() { done <- openPathOnThisThread(target, false) }()
+		go func() { done <- openPathOnThisThread(target, attempts-1) }()
 		return <-done
 	default:
 		// COM がまったく初期化されていない状態です。このまま呼べば、上に書いた
