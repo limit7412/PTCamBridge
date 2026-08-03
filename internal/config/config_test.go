@@ -619,3 +619,37 @@ func TestLanguageFromTheEnvironment(t *testing.T) {
 		t.Errorf("Language() = %q, want the variable to win", got)
 	}
 }
+
+// -restore-cache is what somebody runs while uninstalling, so reading the
+// language must not put the settings folder back on a machine they are
+// clearing.
+func TestLanguageFromFileCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gone", FileName)
+
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "ja_JP.UTF-8")
+
+	if got := LanguageFromFile(path); got != i18n.Japanese {
+		t.Errorf("LanguageFromFile of a missing file = %q, want the system's", got)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("the settings folder was created (stat error %v)", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the settings file was created (stat error %v)", err)
+	}
+}
+
+// It reads only its one setting, so a file the bridge itself would refuse to
+// start on still answers the question.
+func TestLanguageFromFileIgnoresTheRest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, []byte("[ui]\nlanguage = 'ja'\n\n[server]\nlsiten = 'typo'\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := LanguageFromFile(path); got != i18n.Japanese {
+		t.Errorf("LanguageFromFile = %q, want Japanese despite the unknown key", got)
+	}
+}

@@ -590,13 +590,13 @@ func rememberedWrittenDirs() ([]string, error) {
 // next start, but someone removing PTCamBridge deletes the settings file and
 // the executable together, and there is no next start to notice.
 func restoreCache(opts options) error {
-	// The settings may be unreadable -- that is half the reason this command
-	// exists -- so the language falls back to the system rather than failing.
+	// Read without the ordinary Load, which writes a default settings file when
+	// there is none. This command is what somebody runs while uninstalling, so
+	// putting the settings folder back on a machine they are clearing is the
+	// one thing it must not do.
 	p := i18n.NewPrinter(i18n.Detect())
 	if cfgPath, err := resolveConfigPath(opts.configPath); err == nil {
-		if cfg, err := config.Load(cfgPath); err == nil {
-			p = i18n.NewPrinter(cfg.Language())
-		}
+		p = i18n.NewPrinter(config.LanguageFromFile(cfgPath))
 	}
 
 	restored, err := restoreEverywhereItWas(configuredInstallDir(opts))

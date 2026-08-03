@@ -514,6 +514,12 @@ func restartRequired(previous, next config.Config) error {
 		return errors.New("log.dir cannot be changed while running: edit the settings file and restart")
 	case previous.PaperTracker != next.PaperTracker:
 		return errors.New("papertracker settings are only read at startup: edit the settings file and restart")
+	case previous.UI != next.UI:
+		// The tray builds its menu once, with the labels the language gave it.
+		// Accepting the change would save it and report success while every
+		// word on screen stayed as it was, so the API would disagree with the
+		// interface until the next start.
+		return errors.New("ui.language cannot be changed while running: edit the settings file and restart")
 	}
 	return nil
 }

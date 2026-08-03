@@ -281,6 +281,30 @@ func InstallDirFromFile(path string) (string, error) {
 	return strings.TrimSpace(doc.PaperTracker.InstallDir), nil
 }
 
+// LanguageFromFile reads ui.language on its own, without creating anything and
+// without validating the rest of the file.
+//
+// The same reasoning as InstallDirFromFile: -restore-cache is what somebody
+// runs while uninstalling, when the settings may be half deleted or gone
+// altogether, and the ordinary read would write a fresh settings file and its
+// folder back onto a machine the user is clearing. A missing or unreadable
+// file is not an error here -- it just means the system language.
+func LanguageFromFile(path string) i18n.Lang {
+	var doc struct {
+		UI struct {
+			Language string `toml:"language"`
+		} `toml:"ui"`
+	}
+	if _, err := toml.DecodeFile(path, &doc); err != nil {
+		return i18n.Detect()
+	}
+	lang, err := i18n.ParseLang(doc.UI.Language)
+	if err != nil {
+		return i18n.Detect()
+	}
+	return lang
+}
+
 // ErrNotSaved marks a settings change that took effect but could not be
 // written to disk, and so will be lost on the next restart. Callers wrap it so
 // that the difference from "the change was rejected" survives the trip out to

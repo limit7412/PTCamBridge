@@ -1908,3 +1908,30 @@ func TestLatestOnlyNeverBlocksTheDriver(t *testing.T) {
 		t.Fatal("the driver was blocked by a consumer that never read")
 	}
 }
+
+// The tray builds its menu once, with the labels the language gave it, so
+// accepting a change here would save it and report success while every word on
+// screen stayed as it was.
+func TestApplyRefusesALanguageChangeWhileRunning(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+	frames := hub.New()
+	b := New(mjpegConfig(upstream.URL), "", frames, status.New(), discardLogger())
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	cfg := b.Snapshot()
+	cfg.UI.Language = "ja"
+
+	err := b.Apply(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Apply accepted a language change while running")
+	}
+	if !strings.Contains(err.Error(), "ui.language") {
+		t.Errorf("error = %v, want it to name the setting", err)
+	}
+	if got := b.Snapshot().UI.Language; got == "ja" {
+		t.Error("the rejected language was kept anyway")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
@@ -309,5 +310,43 @@ func TestStatusLineTruncatesTheReason(t *testing.T) {
 	got := statusLine(i18n.NewPrinter(i18n.Japanese), long, false, 0, 0)
 	if strings.Count(got, "x") > 60 {
 		t.Errorf("the reason was not truncated: %q", got)
+	}
+}
+
+// Japanese reasons run well past sixty bytes, and cutting there lands inside a
+// character: what reaches the tray is invalid UTF-8, which draws as a
+// replacement glyph rather than a shortened sentence.
+func TestTruncateCutsOnCharacterBoundaries(t *testing.T) {
+	long := strings.Repeat("あ", 100)
+	got := truncate(long, 60)
+
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate produced invalid UTF-8: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != 60 {
+		t.Errorf("truncate kept %d runes, want 60", n)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncate = %q, want it to end in an ellipsis", got)
+	}
+	// Short enough already: returned untouched, in either script.
+	for _, s := range []string{"短い", "short"} {
+		if got := truncate(s, 60); got != s {
+			t.Errorf("truncate(%q) = %q, want it unchanged", s, got)
+		}
+	}
+}
+
+// The whole status line has to survive it, since that is what the tray is
+// handed.
+func TestStatusLineStaysValidUTF8(t *testing.T) {
+	snapshot := status.Snapshot{
+		Source:       "uvc",
+		LastError:    "ignored, the key wins",
+		LastErrorKey: string(i18n.ErrNoFFmpeg),
+	}
+	got := statusLine(i18n.NewPrinter(i18n.Japanese), snapshot, false, 0, 0)
+	if !utf8.ValidString(got) {
+		t.Errorf("status line is not valid UTF-8: %q", got)
 	}
 }

@@ -239,9 +239,19 @@ func reason(p i18n.Printer, snapshot status.Snapshot) string {
 	return snapshot.LastError
 }
 
+// truncate shortens a reason to fit a menu entry.
+//
+// Counted in runes, not bytes. A translated reason is comfortably over sixty
+// bytes in Japanese, and cutting there lands in the middle of a character:
+// what reaches the tray is invalid UTF-8, which draws as a replacement glyph
+// rather than as a shortened sentence.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if max < 3 {
+		max = 3
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }
