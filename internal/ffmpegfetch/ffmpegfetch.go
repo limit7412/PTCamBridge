@@ -34,7 +34,27 @@ import (
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
+
+// Prompt は、何かがダウンロードされる前にユーザーへ見せる内容です。
+//
+// PTCamBridge は ffmpeg を同梱していないので、取得を選ぶとユーザーの機械が第三者の
+// バイナリを取ってくることになります。誰が作ったのか、どこから来るのか、どれくらいの
+// 大きさか、どのライセンスなのか。同意するために必要なのはこの 4 つなので、README では
+// なく、最初の 1 バイトが動く前の画面に出します。
+//
+// これは仕組みそのものの成立条件でもあります。上流から直接取ること、改変して配らない
+// こと、そしてユーザーの明示的な操作を起点にし、取得元とライセンスを提示してから実行
+// すること。パッケージのコメントを参照。
+//
+// ここに置いているのは、取得の入口が 2 つ — トレイと設定画面 — あるからです。片方だけが
+// 提示する形にすると、もう片方から入ったユーザーは何も知らされずにダウンロードが始まる
+// ことになります。
+func Prompt(p i18n.Printer, build Build) string {
+	return p.F(i18n.DialogFFmpegBody,
+		build.Publisher, build.URL, build.Size/(1000*1000), build.License)
+}
 
 // Build は、公開されたアーカイブ 1 つを、検証できる程度に正確に記述します。
 type Build struct {

@@ -93,6 +93,9 @@ type uiState struct {
 	HasFrame   bool   `json:"has_frame"`
 	FFmpeg     string `json:"ffmpeg"`
 	HasFFmpeg  bool   `json:"has_ffmpeg"`
+	// FFmpegPrompt は、取得を始める前にユーザーへ見せなければならない内容です。
+	// 配布元、URL、サイズ、ライセンス。取得できる状態のときだけ入ります。
+	FFmpegPrompt string `json:"ffmpeg_prompt,omitempty"`
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +270,11 @@ func newUIState(p i18n.Printer, snapshot status.Snapshot, frames hub.Stats, ffmp
 	if ffmpeg.present {
 		out.HasFFmpeg = true
 		out.FFmpeg = describeFFmpeg(p, ffmpeg.state)
+		// 同意を求める文面は、これから取得できるときにだけ意味があります。
+		// 導入済みや取得中に出すと、押していないボタンの説明になります。
+		if ffmpeg.state.Supported && !ffmpeg.state.Installed && !ffmpeg.state.Downloading {
+			out.FFmpegPrompt = ffmpegfetch.Prompt(p, ffmpeg.state.Source)
+		}
 	}
 	return out
 }

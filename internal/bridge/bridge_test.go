@@ -1978,6 +1978,55 @@ func TestApplyCanTakeBackADeferredChange(t *testing.T) {
 	}
 }
 
+// 保留の判定は、直前に受け入れた設定ではなく、このプロセスが実際に使っているものと
+// 比べなければならない。直前と比べると答えが 2 通りに裏返る。
+func TestDeferredNamesFollowWhatIsRunning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+	b := New(mjpegConfig(upstream.URL), path, hub.New(), status.New(), discardLogger())
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	running := b.Snapshot().UI.Language
+
+	cfg := b.Snapshot()
+	cfg.UI.Language = "ja"
+	deferred, err := b.Apply(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !slices.Contains(deferred, "ui.language") {
+		t.Fatalf("deferred = %v, want it to name ui.language", deferred)
+	}
+
+	// 無関係な項目だけを保存する。言語はまだ効いていないので、名前は出続けなければ
+	// ならない。直前の設定と比べていると、ここで黙る。
+	next := b.Snapshot()
+	next.Server.HoldOnSourceLoss = !next.Server.HoldOnSourceLoss
+	deferred, err = b.Apply(context.Background(), next)
+	if err != nil {
+		t.Fatalf("Apply (unrelated change): %v", err)
+	}
+	if !slices.Contains(deferred, "ui.language") {
+		t.Errorf("deferred = %v, want ui.language to still be waiting for a restart", deferred)
+	}
+
+	// 元に戻す。動作中の値と同じになったので、もう待っているものは無い。直前の
+	// 設定と比べていると、ここで逆に名前が出る。
+	back := b.Snapshot()
+	back.UI.Language = running
+	deferred, err = b.Apply(context.Background(), back)
+	if err != nil {
+		t.Fatalf("Apply (taking it back): %v", err)
+	}
+	if slices.Contains(deferred, "ui.language") {
+		t.Errorf("deferred = %v, want nothing waiting once the value matches what is running", deferred)
+	}
+}
+
 // 保留になる変更と、今すぐ効く変更が同じ要求に混ざっていることはある。前者だけを
 // 取り除き、後者はそのまま適用しなければならない。
 func TestApplyDefersOnlyWhatItMust(t *testing.T) {

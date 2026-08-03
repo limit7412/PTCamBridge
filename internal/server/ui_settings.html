@@ -48,7 +48,7 @@
           <input type="text" id="uvc-ffmpeg" class="mono">
         </div>
         <div class="actions" id="ffmpeg-actions" hidden>
-          <button type="button" id="get-ffmpeg">{{index .Text "getFFmpeg"}}</button>
+          <button type="button" id="get-ffmpeg" disabled>{{index .Text "getFFmpeg"}}</button>
           <span id="ffmpeg-state" class="hint mono"></span>
         </div>
       </div>
@@ -347,6 +347,11 @@ async function loadDevices() {
 
 // ffmpeg の取得。100 メガバイトは 1 つの応答に収まらないので、開始したら状態を
 // 見に行く。診断画面と同じ数字を同じところから読んでいる。
+//
+// prompt は、取得を始める前にユーザーへ見せなければならない内容 — 配布元、URL、
+// サイズ、ライセンス。取得できる状態のときだけ届く。
+let ffmpegPrompt = "";
+
 async function pollFFmpeg() {
   try {
     const response = await fetch("/ui/state", { cache: "no-store" });
@@ -354,19 +359,30 @@ async function pollFFmpeg() {
     const state = await response.json();
     el("ffmpeg-actions").hidden = !state.has_ffmpeg;
     el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
+    ffmpegPrompt = state.ffmpeg_prompt || "";
+    // 提示するものが無いなら押させない。取得できない状態か、状態そのものが
+    // まだ読めていないかのどちらかで、後者で始めるのは黙って落とすのと同じ。
+    el("get-ffmpeg").disabled = !ffmpegPrompt;
   } catch (err) {
-    // 状態が読めないだけ。取得ボタンは押せる。
+    // 状態が読めない間は押させない。
+    el("get-ffmpeg").disabled = true;
   }
 }
 
+// クリックしただけで第三者のバイナリのダウンロードが始まってはいけない。誰が
+// 作ったのか、どこから来るのか、どれくらいの大きさか、どのライセンスなのか。
+// 同意するために必要なものを出してから、承認されたときだけ始める。トレイの
+// 「ffmpeg を取得」がダイアログでしているのと同じことで、文面も同じ 1 つから来る。
+// 入口が 2 つあることは、片方が黙ってよい理由にならない。
 el("get-ffmpeg").addEventListener("click", async () => {
+  if (!ffmpegPrompt || !window.confirm(ffmpegPrompt)) return;
+
   el("get-ffmpeg").disabled = true;
   try {
     await fetch("/api/v1/ffmpeg", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   } catch (err) {
     // 進捗は下の polling が拾う。
   } finally {
-    el("get-ffmpeg").disabled = false;
     pollFFmpeg();
   }
 });

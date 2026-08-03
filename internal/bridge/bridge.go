@@ -71,6 +71,11 @@ type Bridge struct {
 	// PTCAMBRIDGE_* が、ユーザーが恒久的に選んだかのように書き戻されないためです。
 	persistBase config.Config
 
+	// startup は、このプロセスが実際に使っている、起動時にしか読まれない設定です。
+	// 動かしません。動かしてしまうと、何が「まだ効いていない」のかを言う基準が
+	// 無くなります。restartDeferred を参照。
+	startup config.Config
+
 	// unsaved は、ファイルまで届かなかった書き込みです。ファイルが最新である間は
 	// nil です。これを保持していれば、再試行は失われた設定を書けます。そうしないと、
 	// 既にその値を持っている動作中の設定と差分を取って「することが無い」と判断して
@@ -154,7 +159,7 @@ func (b *Bridge) publishView() {
 // New は、渡された設定でブリッジを組み立てます。キャプチャを始めるには Start を
 // 呼ぶ必要があります。
 func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log *slog.Logger) *Bridge {
-	b := &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg}
+	b := &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg, startup: cfg}
 	b.publishView()
 	return b
 }
@@ -246,7 +251,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 	provenBefore := b.provenLocked()
 	// 起動時にしか読まれない設定は、そのまま受け入れて名前だけを控える。保存はされ、
 	// 設定としても残るが、この起動の振る舞いは変わらない。restartDeferred を参照。
-	deferred := restartDeferred(previous, cfg)
+	deferred := restartDeferred(b.startup, cfg)
 
 	// Apply の保証は「新しいソースが起動できた場合にのみ設定を残す」ことだが、
 	// 一時停止中は何も起動できない。確認できるのはせいぜいドライバのオブジェクトを
@@ -338,7 +343,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 		b.unsaved = nil
 	}
 	if len(deferred) > 0 {
-		b.log.Info("settings saved but not applied, they are only read at startup", "settings", deferred)
+		b.log.Info("these settings differ from the ones this process started with, they are only read at startup", "settings", deferred)
 	}
 	return deferred, nil
 }
@@ -540,8 +545,9 @@ func captureUnchanged(previous, next config.Config) bool {
 	}
 }
 
-// restartDeferred は、プロセスの起動時にしか読まれない設定のうち、この変更で
-// 動いたものの名前を返します。設定そのものには手を触れません。
+// restartDeferred は、プロセスの起動時にしか読まれない設定のうち、このプロセスが
+// 実際に使っているものと食い違っているものの名前を返します。設定そのものには手を
+// 触れません。
 //
 // これらは保存され、設定としても受け入れられますが、動作中の振る舞いは変わりません。
 // listen 済みのソケットは動きませんし、ログのハンドラは組み立て済みですし、
@@ -561,23 +567,31 @@ func captureUnchanged(previous, next config.Config) bool {
 // 名前で伝えます。これらの葉を動作中に読む場所はどこにもないので、受け入れて困る
 // ものもありません。
 //
+// 比べる相手は直前の設定ではなく、起動時の設定です。直前と比べると、答えが 2 通りに
+// 裏返ります。en で起動して ja を保存した後、無関係な項目だけを保存すると、直前も次も
+// ja なので何も保留になっていないことになりますが、画面はまだ en です。逆に再起動前に
+// en へ取り消すと差が出るので ui.language を保留として返しますが、その値はもう動いて
+// います。「効いていない設定の名前」は、動いているものと比べたときにだけ正しくなります。
+//
+// 起動時の設定はこのプロセスの間ずっと変わりません。だから比較の基準になれます。
+//
 // 名前は TOML のキーそのものです。翻訳しません。ユーザーが設定ファイルを開いた
 // ときに探す文字列だからです。
-func restartDeferred(previous, next config.Config) []string {
+func restartDeferred(startup, next config.Config) []string {
 	var deferred []string
-	if previous.Server.Listen != next.Server.Listen {
+	if startup.Server.Listen != next.Server.Listen {
 		deferred = append(deferred, "server.listen")
 	}
-	if previous.Log.Level != next.Log.Level {
+	if startup.Log.Level != next.Log.Level {
 		deferred = append(deferred, "log.level")
 	}
-	if previous.Log.Dir != next.Log.Dir {
+	if startup.Log.Dir != next.Log.Dir {
 		deferred = append(deferred, "log.dir")
 	}
-	if previous.PaperTracker != next.PaperTracker {
+	if startup.PaperTracker != next.PaperTracker {
 		deferred = append(deferred, "papertracker")
 	}
-	if previous.UI != next.UI {
+	if startup.UI != next.UI {
 		deferred = append(deferred, "ui.language")
 	}
 	return deferred

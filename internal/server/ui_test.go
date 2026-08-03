@@ -441,3 +441,43 @@ func TestConfigPutStillRejectsUnknownFields(t *testing.T) {
 		t.Errorf("PUT with a misspelled section = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
+
+// クリックしただけで第三者のバイナリのダウンロードが始まってはいけない。誰が
+// 作ったのか、どこから来るのか、どれくらいの大きさか、どのライセンスなのか。画面が
+// 同意を求められるよう、状態がそれを運ぶ。トレイの導線と同じもの。
+func TestUIStateCarriesTheFFmpegConsentText(t *testing.T) {
+	p := i18n.NewPrinter(i18n.English)
+	build := ffmpegfetch.Build{
+		URL:       "https://example.invalid/ffmpeg.zip",
+		Size:      145_000_000,
+		Publisher: "Someone",
+		License:   "LGPL v2.1+",
+	}
+
+	ready := newUIState(p, status.Snapshot{}, hub.Stats{}, ffmpegView{
+		present: true,
+		state:   ffmpegfetch.State{Supported: true, Source: build},
+	}, time.Now())
+	for _, want := range []string{build.URL, build.Publisher, build.License, "145"} {
+		if !strings.Contains(ready.FFmpegPrompt, want) {
+			t.Errorf("the consent text does not mention %q: %q", want, ready.FFmpegPrompt)
+		}
+	}
+
+	// 押せない状態で出しても、押していないボタンの説明にしかならない。
+	for _, tc := range []struct {
+		name  string
+		state ffmpegfetch.State
+	}{
+		{"installed", ffmpegfetch.State{Supported: true, Installed: true, Source: build}},
+		{"downloading", ffmpegfetch.State{Supported: true, Downloading: true, Source: build}},
+		{"unsupported", ffmpegfetch.State{Source: build}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := newUIState(p, status.Snapshot{}, hub.Stats{}, ffmpegView{present: true, state: tc.state}, time.Now())
+			if got.FFmpegPrompt != "" {
+				t.Errorf("the consent text is offered when the download cannot start: %q", got.FFmpegPrompt)
+			}
+		})
+	}
+}
