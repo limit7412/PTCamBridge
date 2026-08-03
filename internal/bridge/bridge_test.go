@@ -1936,6 +1936,20 @@ func TestApplyRefusesALanguageChangeWhileRunning(t *testing.T) {
 	}
 }
 
+// waitFor polls until want holds, so a test does not have to guess how long a
+// driver takes to notice something.
+func waitFor(t *testing.T, timeout time.Duration, what string, want func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if want() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", timeout, what)
+}
+
 // silentUpstream answers and then says nothing, so a driver connects and waits
 // where a verification cannot.
 func silentUpstream(t *testing.T) *httptest.Server {
@@ -2101,5 +2115,115 @@ func TestBridgeStillRefusesASourceChangeWhilePausedWithAWorkingSource(t *testing
 	}
 	if !strings.Contains(err.Error(), "resume first") {
 		t.Errorf("error = %v, want it to say what to do", err)
+	}
+}
+
+// Startup and resume launch without waiting for a frame, so all they can
+// record is that a driver began. A driver that stops on its own a moment later
+// -- a 404, ffmpeg gone from disk -- leaves settings that look proven and are
+// not, and the refusal that protects a working source from being traded away
+// while paused then protects nothing while blocking the only way out.
+func TestBridgeAcceptsAChangeWhilePausedAfterTheSourceDiedOnItsOwn(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	// 404 is fatal to the MJPEG driver: it stops rather than reconnecting.
+	dead := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	defer dead.Close()
+
+	frames := hub.New()
+	b := New(mjpegConfig(dead.URL), "", frames, status.New(), discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Startup does not verify, so this succeeds: a driver was launched.
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	waitFor(t, 5*time.Second, "the source to stop on its own", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.provenLocked()
+	})
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	if err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+		t.Fatalf("changing source while paused after the old one died: %v", err)
+	}
+	if err := b.SetPaused(false); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	waitForFrame(t, frames, 5*time.Second)
+}
+
+// Tearing the failed source down clears the status. Going back to settings
+// that were not running is still worth doing for that reason alone: without
+// it a failed camera change answers a precise complaint with "no source".
+func TestBridgeKeepsTheDiagnosisWhenTheRevertCannotStartEither(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	tracker := status.New()
+	// uvc with no device name: a driver that cannot even be built.
+	b := New(config.Default(), "", hub.New(), tracker, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err == nil {
+		t.Fatal("expected the unconfigured camera to fail to start")
+	}
+	defer b.Stop()
+
+	before := tracker.Snapshot()
+	if before.LastError == "" {
+		t.Fatal("the starting point has no diagnosis to keep")
+	}
+
+	if err := b.Apply(ctx, mjpegConfig(silentUpstream(t).URL)); err == nil {
+		t.Fatal("expected the silent upstream to fail verification")
+	}
+
+	after := tracker.Snapshot()
+	if after.Source != config.SourceUVC {
+		t.Errorf("source = %q, want the settings that are back in effect", after.Source)
+	}
+	if after.LastError != before.LastError {
+		t.Errorf("reason = %q, want the original %q", after.LastError, before.LastError)
+	}
+}
+
+// A source changed while paused is the source the status has to name. Left
+// alone it keeps naming the one that was replaced, with the error that one
+// had, so a camera swapped while paused reads as the old camera still failing.
+func TestBridgeNamesTheNewSourceWhenItIsChangedWhilePaused(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	tracker := status.New()
+	b := New(config.Default(), "", hub.New(), tracker, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err == nil {
+		t.Fatal("expected the unconfigured camera to fail to start")
+	}
+	defer b.Stop()
+
+	if err := b.SetPaused(true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := b.Apply(ctx, mjpegConfig(mjpegUpstream(t, testJPEG(t, 32, 32)).URL)); err != nil {
+		t.Fatalf("changing source while paused: %v", err)
+	}
+
+	snapshot := tracker.Snapshot()
+	if snapshot.Source != config.SourceMJPEG {
+		t.Errorf("source = %q, want the source that was just chosen", snapshot.Source)
+	}
+	if snapshot.LastError != "" {
+		t.Errorf("reason = %q, want the replaced source's error gone", snapshot.LastError)
 	}
 }

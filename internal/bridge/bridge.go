@@ -97,6 +97,20 @@ type Bridge struct {
 	stopped chan struct{}
 	paused  bool
 
+	// died says the driver launched under cfg stopped on its own -- an MJPEG
+	// upstream answering 404, ffmpeg not on disk -- rather than being
+	// cancelled. It is atomic because the driver goroutine is what learns it,
+	// and that goroutine cannot take mu: a verifying Apply holds it while
+	// waiting for exactly that news.
+	//
+	// Read through provenLocked rather than on its own. Startup and resume
+	// launch without waiting for a frame, so they can only record that a
+	// driver began; this is the other half of the answer, and without it a
+	// source that died a second later still counts as working. The bridge
+	// would then refuse to be handed a different one while paused, which is
+	// the corner all of this exists to open up.
+	died atomic.Bool
+
 	// proven says the settings in cfg got a driver running, and that nothing
 	// since has said otherwise.
 	//
@@ -129,6 +143,13 @@ type pendingSave struct {
 type view struct {
 	cfg    config.Config
 	paused bool
+}
+
+// provenLocked reports whether the current settings have a working source
+// behind them: one that started, and that has not stopped on its own since.
+// The caller holds mu.
+func (b *Bridge) provenLocked() bool {
+	return b.proven && !b.died.Load()
 }
 
 // publishView refreshes the lock-free copy. The caller holds mu.
@@ -229,7 +250,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	// Read before anything is torn down: from here on the flag tracks the
 	// settings being tried, and whether the ones being replaced were working
 	// is the only thing that says a revert can succeed.
-	provenBefore := b.proven
+	provenBefore := b.provenLocked()
 	if err := restartRequired(previous, cfg); err != nil {
 		return err
 	}
@@ -248,7 +269,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	// protects nothing and only takes away the one move left: picking a
 	// different source. Somebody who pauses a bridge that is already down
 	// would have to edit the settings file to get it back.
-	if b.paused && b.proven && !captureUnchanged(previous, cfg) {
+	if b.paused && b.provenLocked() && !captureUnchanged(previous, cfg) {
 		return errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
 	}
 
@@ -277,17 +298,22 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 			b.cfg = previous
 			b.publishView()
 
-			if !provenBefore {
-				// Nothing was running before this change either, so there is
-				// nothing to put back. Trying anyway fails for a second reason
-				// that has nothing to do with what the caller asked for, and
-				// reporting the pair of them buries the one that does.
-				b.log.Warn("nothing is capturing: the settings in place before this change had not started a source either")
-				return err
-			}
-			// The previous source was working, so it is put back without being
-			// made to prove itself again.
+			// The previous source is put back without being made to prove
+			// itself again. That is right when it was working, and it is
+			// still worth doing when it was not: tearing the new source down
+			// cleared the status, and this is what puts the old source and
+			// the reason it was not running back on the tray and /healthz.
+			// Skipping it would answer a failed camera change by replacing a
+			// precise complaint with "no source".
 			if revertErr := b.startLocked(); revertErr != nil {
+				if !provenBefore {
+					// It was not running before this change either, so this
+					// second failure is not news and has nothing to do with
+					// what the caller asked for. Reporting the pair of them
+					// buries the one that does.
+					b.log.Warn("nothing is capturing: the settings in place before this change had not started a source either", "error", revertErr)
+					return err
+				}
 				return fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
 			}
 			return err
@@ -686,8 +712,16 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		// whichever way it goes. Leaving the flag as it was would credit them
 		// with what the settings they replaced had done.
 		b.proven = false
-		_, err := b.newSource()
-		return err
+		if _, err := b.newSource(); err != nil {
+			return err
+		}
+		// Nothing started, but the settings did change, and the status is
+		// where the tray and /healthz read the source from. Left alone it
+		// keeps naming the source that was replaced, complete with the error
+		// that source last had -- so a camera swapped while paused reads as
+		// the old camera still failing, until somebody resumes.
+		b.status.SetSource(b.cfg.Source.Type)
+		return nil
 	}
 
 	drv, err := b.newSource()
@@ -729,6 +763,7 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 
 	b.cancel = cancel
 	b.stopped = stopped
+	b.died.Store(false)
 	b.status.SetSource(drv.Name())
 
 	transform := b.cfg.CoreTransform()
@@ -746,6 +781,10 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		// fix, so any error here means this source will never produce a frame.
 		if err := drv.Run(ctx, frames); err != nil && ctx.Err() == nil {
 			log.Error("source stopped", "source", drv.Name(), "error", err)
+			// Before the send: a source that has stopped is not one the
+			// bridge may still count on, whether or not anybody is waiting to
+			// hear about it. Startup and resume are not.
+			b.died.Store(true)
 			failed <- err
 		}
 	}()
