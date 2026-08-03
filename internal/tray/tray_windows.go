@@ -265,11 +265,39 @@ func toggleAutostart(opts Options, m menu) {
 	}
 }
 
+// openTarget はシェルに開かせます。呼び出しはイベントループから外します。
+//
+// ShellExecuteW は同期 API です。応答しない UNC パスのログフォルダや、DDE や COM の
+// 起動待ちに入った既定ハンドラを相手にすると、タイムアウトまで返ってきません。
+// イベントループの上で待てば、その間トレイは終了もクリックも 1 秒ごとの状態更新も
+// 処理できなくなります。以前の子プロセス起動は rundll32 に仕事を渡して即座に返って
+// いたので、ここで待つとトレイ全体が固まる回帰になります。
+//
+// commandQueue には載せません。あちらはブリッジのロックで直列化される操作を、
+// クリックされた順に保つためのものです。開く操作はブリッジの設定に触れずソース切替と
+// 競合もしないので、順序を守る理由が無く、代わりに 1 つの遅い呼び出しが後続の
+// クリックすべてを足止めすることになります。ffmpeg の確認ダイアログを載せていないのと
+// 同じ理由です。
+//
+// その代わり、同じ対象への 2 回目以降は実行中の間だけ捨てます。効かないと思った
+// ユーザーが押し直したぶんだけ、固まったスレッドと、回復したときに一斉に開く窓が
+// 積み上がるのを避けるためです。inFlight を参照。
 func openTarget(target string, opts Options) {
 	if target == "" {
 		return
 	}
-	if err := openPath(target); err != nil {
-		opts.Log.Error("could not open", "target", target, "error", err)
+	if !opening.begin(target) {
+		opts.Log.Debug("ignoring a click, the target is still opening", "target", target)
+		return
 	}
+	go func() {
+		defer opening.done(target)
+		if err := openPath(target); err != nil {
+			opts.Log.Error("could not open", "target", target, "error", err)
+		}
+	}()
 }
+
+// opening は、いま開いている最中の対象です。トレイはプロセスに 1 つなので、状態も
+// 1 つで足ります。
+var opening = newInFlight()
