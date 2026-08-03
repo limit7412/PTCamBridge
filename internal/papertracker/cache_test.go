@@ -23,8 +23,8 @@ func TestWriteCache(t *testing.T) {
 	}
 }
 
-// The client prefixes the cached value with http:// itself, so a scheme in the
-// file would produce http://http://... and silently fail to connect.
+// クライアントはキャッシュされた値に自分で http:// を前置するので、ファイルに
+// スキームが入っていると http://http://... になり、黙って接続に失敗する。
 func TestWriteCacheRejectsAScheme(t *testing.T) {
 	if err := WriteCache(t.TempDir(), "http://127.0.0.1:18080"); err == nil {
 		t.Fatal("expected an address with a scheme to be rejected")
@@ -48,9 +48,9 @@ func TestWriteCacheRejectsABadDirectory(t *testing.T) {
 	}
 }
 
-// The backup exists to preserve the camera address the client had. Taking it
-// again on the second run would overwrite it with the bridge's own address,
-// which is exactly the value the user does not want back.
+// バックアップは、クライアントが持っていたカメラのアドレスを保つために存在する。
+// 2 回目にも取るとそれをブリッジ自身のアドレスで上書きすることになり、それこそ
+// ユーザーが戻したくない値だ。
 func TestBackupIsTakenOnlyOnce(t *testing.T) {
 	dir := t.TempDir()
 	original := "192.168.1.50"
@@ -108,9 +108,9 @@ func TestRestoreCache(t *testing.T) {
 	}
 }
 
-// "Nothing was ever changed here" has to be distinguishable from "the restore
-// failed": the bridge restores on every start with write_cache off, and would
-// otherwise log an error each time on a machine it never touched.
+// 「ここは一度も変更していない」と「復元に失敗した」は区別できなければならない。
+// write_cache が切られていればブリッジは起動のたびに復元を試みるので、さもないと
+// 一度も触れていない機械で毎回エラーを記録することになる。
 func TestRestoreCacheWithoutABackup(t *testing.T) {
 	err := RestoreCache(t.TempDir())
 	if err == nil {
@@ -122,7 +122,7 @@ func TestRestoreCacheWithoutABackup(t *testing.T) {
 }
 
 func TestFindInstallDirReportsNotFound(t *testing.T) {
-	// The temp home has no PaperTracker in it, so every candidate misses.
+	// 一時的なホームには PaperTracker が無いので、どの候補にも当たらない。
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir())
 	t.Setenv("LOCALAPPDATA", t.TempDir())
@@ -157,9 +157,9 @@ func TestFindInstallDirRecognisesAnInstall(t *testing.T) {
 	}
 }
 
-// The first run has nothing to preserve, but it still has to record that --
-// otherwise the second run backs up the bridge's own address and calls it the
-// client's, and the pre-bridge state is gone for good.
+// 初回に保つべきものは無いが、それでもその事実は記録しなければならない。さもないと
+// 2 回目はブリッジ自身のアドレスをバックアップしてクライアントのものと称し、
+// ブリッジ以前の状態は永久に失われる。
 func TestWriteCacheRecordsThatThereWasNoOriginal(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -174,7 +174,7 @@ func TestWriteCacheRecordsThatThereWasNoOriginal(t *testing.T) {
 		t.Errorf("a backup was taken when there was no original: %v", err)
 	}
 
-	// A second run must not now treat the bridge's own address as the client's.
+	// 2 回目が、ブリッジ自身のアドレスをクライアントのものとして扱ってはいけない。
 	if err := WriteCache(dir, "127.0.0.1:18081"); err != nil {
 		t.Fatalf("second WriteCache: %v", err)
 	}
@@ -182,7 +182,8 @@ func TestWriteCacheRecordsThatThereWasNoOriginal(t *testing.T) {
 		t.Errorf("the second run backed up the bridge's own address: %v", err)
 	}
 
-	// Restoring "no cache" means removing the file, not leaving an address.
+	// 「キャッシュ無し」の復元とは、ファイルを削除することであって、アドレスを
+	// 残すことではない。
 	if err := RestoreCache(dir); err != nil {
 		t.Fatalf("RestoreCache: %v", err)
 	}
@@ -195,8 +196,7 @@ func TestWriteCacheRecordsThatThereWasNoOriginal(t *testing.T) {
 	}
 }
 
-// The ordinary case still has to work: a real original is preserved and put
-// back verbatim.
+// 通常の場合も当然動かなければならない。実在する元の値が保たれ、そのまま戻される。
 func TestWriteCachePreservesARealOriginal(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -222,11 +222,10 @@ func TestWriteCachePreservesARealOriginal(t *testing.T) {
 	}
 }
 
-// Restoring runs on every start once write_cache is off, and the folder is
-// searched for when the settings do not name one. A backup named so generally
-// that anything could have written it would be read back on a machine where
-// the bridge was never enabled -- replacing the client's cache with a stranger's
-// file, and deleting that file on the way out.
+// write_cache を切ると復元は起動のたびに走り、設定がフォルダを指定していなければ
+// 探索も行う。何が書いたとしてもおかしくないほど一般的な名前のバックアップは、
+// ブリッジを一度も有効にしていない機械で読み戻されることになる。クライアントの
+// キャッシュを見知らぬファイルで置き換え、そのうえでそのファイルを削除していく。
 func TestRestoreCacheIgnoresABackupTheBridgeDidNotWrite(t *testing.T) {
 	dir := t.TempDir()
 	cache := CachePath(dir)
@@ -235,7 +234,7 @@ func TestRestoreCacheIgnoresABackupTheBridgeDidNotWrite(t *testing.T) {
 	if err := os.WriteFile(cache, []byte("192.168.1.50:80"), 0o644); err != nil {
 		t.Fatalf("write the cache: %v", err)
 	}
-	// Somebody else's backup, sitting in the same folder.
+	// 同じフォルダにある、誰か別の人のバックアップ。
 	if err := os.WriteFile(foreign, []byte("something else entirely"), 0o644); err != nil {
 		t.Fatalf("write the foreign backup: %v", err)
 	}
@@ -256,17 +255,16 @@ func TestRestoreCacheIgnoresABackupTheBridgeDidNotWrite(t *testing.T) {
 	}
 }
 
-// Restoring runs against whichever folder the search returns, and more than one
-// PaperTracker can sit on a machine -- an old copy beside a new one. The one
-// that matters is the one the bridge wrote to; picking the first that merely
-// looks like an install reports "nothing to restore" while the client that was
-// really changed stays pointed at a bridge that is no longer running.
+// 復元は探索が返したフォルダに対して走るが、PaperTracker は機械に複数あり得る —
+// 新しいコピーの隣にある古いコピー。意味があるのはブリッジが書き込んだ方だ。単に
+// インストールに見えるだけの最初の 1 つを選ぶと、「復元するものは無い」と報告する
+// 一方で、本当に変更されたクライアントは、もう動いていないブリッジを指したまま残る。
 func TestFindRestoreDirPrefersTheFolderTheBridgeWroteTo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	// Searched first, and a perfectly ordinary install -- but untouched.
+	// 先に探索され、まったく普通のインストールでもある。ただし触れられていない。
 	untouched := filepath.Join(home, "PaperTracker")
 	if err := os.MkdirAll(untouched, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -275,7 +273,7 @@ func TestFindRestoreDirPrefersTheFolderTheBridgeWroteTo(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	// Searched later, and the one the bridge actually took over.
+	// 後から探索される、ブリッジが実際に引き継いだ方。
 	changed := filepath.Join(home, ".local", "share", "PaperTracker")
 	if err := os.MkdirAll(changed, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -299,8 +297,8 @@ func TestFindRestoreDirPrefersTheFolderTheBridgeWroteTo(t *testing.T) {
 	}
 }
 
-// The marker counts as well: a first run against a client with no cache at all
-// leaves only that behind, and it is just as much "the bridge was here".
+// 印も同じく数に入る。キャッシュをまったく持たないクライアントに対する初回起動が
+// 残すのはそれだけだが、それも同じく「ブリッジがここに居た」ことを示す。
 func TestFindRestoreDirFindsAFolderWithOnlyTheMarker(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -323,8 +321,8 @@ func TestFindRestoreDirFindsAFolderWithOnlyTheMarker(t *testing.T) {
 	}
 }
 
-// Nothing to restore has to be distinguishable from a failure: the search runs
-// on every start with write_cache off, on machines the bridge never touched.
+// 「復元するものが無い」ことは失敗と区別できなければならない。write_cache を切れば
+// 探索は起動のたびに走り、それはブリッジが一度も触れていない機械の上でも同じだ。
 func TestFindRestoreDirReportsNoBackup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -347,15 +345,14 @@ func TestFindRestoreDirReportsNoBackup(t *testing.T) {
 	}
 }
 
-// The cache itself is replaced, not overwritten in place. os.WriteFile empties
-// the file before writing it, so a disk that fills up in between leaves the
-// client with no address at all -- and WriteCache's caller only logs the
-// failure and carries on, so nothing would put it back.
+// キャッシュ自体はその場で上書きせず置き換える。os.WriteFile は書く前にファイルを
+// 空にするので、その間にディスクが一杯になるとクライアントにはアドレスがまったく
+// 残らない。しかも WriteCache の呼び出し側は失敗をログに書いて先へ進むだけなので、
+// それを戻すものが無い。
 //
-// A hard link is what makes the difference visible: it keeps hold of the file
-// that was there, so it still reads as the old address if the new one arrived
-// under a different name and was renamed into place, and as the new address if
-// the old file was truncated and written over.
+// 違いを可視化するのがハードリンク。元々あったファイルを掴んだままにするので、
+// 新しい方が別の名前で作られて rename されたなら古いアドレスのまま読め、古い
+// ファイルが切り詰められて上書きされたなら新しいアドレスとして読める。
 func TestWriteCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -384,9 +381,8 @@ func TestWriteCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
 	}
 }
 
-// Restoring is the same, and worse if it goes wrong: the backup is removed
-// straight afterwards, so a half-written original is all the user would have
-// left.
+// 復元も同じで、失敗したときはより悪い。直後にバックアップを削除するので、
+// 書きかけの元の値だけがユーザーの手元に残ることになる。
 func TestRestoreCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -418,11 +414,11 @@ func TestRestoreCacheReplacesTheCacheRatherThanTruncatingIt(t *testing.T) {
 	}
 }
 
-// Restoring runs on every start with write_cache off, so it has to be
-// impossible to do twice. If the record survives a restore -- its removal
-// failing on a locked or read-only file -- the next start would put the
-// pre-bridge address back over whatever the client cached since, undoing a
-// camera the user chose after they stopped using the bridge.
+// write_cache を切ると復元は起動のたびに走るので、二度実行できてはいけない。
+// 記録が復元を生き延びた場合 — ロックされたファイルや読み取り専用のせいで削除に
+// 失敗した場合 — 次の起動は、その後クライアントがキャッシュしたものの上に
+// ブリッジ以前のアドレスを書き戻し、ブリッジを使うのをやめた後にユーザーが選んだ
+// カメラを取り消してしまう。
 func TestRestoreCacheIsNotAppliedTwice(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -436,13 +432,13 @@ func TestRestoreCacheIsNotAppliedTwice(t *testing.T) {
 		t.Fatalf("RestoreCache: %v", err)
 	}
 
-	// Stand in for a removal that failed: the record is back under the name a
-	// restore in progress uses, which is the state that removal would leave.
+	// 削除に失敗した状況の代わり。記録が、進行中の復元が使う名前のもとに戻って
+	// いる。削除が失敗したときに残る状態そのもの。
 	working := path + BackupSuffix + RestoringSuffix
 	if err := os.WriteFile(working, []byte("192.168.1.50"), 0o644); err != nil {
 		t.Fatalf("write the leftover: %v", err)
 	}
-	// The client has moved on to another camera since.
+	// クライアントはその後、別のカメラへ移っている。
 	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
 		t.Fatalf("write the new address: %v", err)
 	}
@@ -463,10 +459,9 @@ func TestRestoreCacheIsNotAppliedTwice(t *testing.T) {
 	}
 }
 
-// A restore that could not write is a restore that has not happened, so the
-// record has to go back where it was. Left taken, the next start would find
-// contents that do not match the cache and refuse to guess -- a full disk or a
-// locked file would turn into something only a person can finish.
+// 書けなかった復元は起きていない復元なので、記録は元の場所へ戻さなければならない。
+// 確保したままにすると、次の起動はキャッシュと一致しない内容を見つけて推測を拒む。
+// ディスク満杯やファイルのロックが、人にしか終わらせられない何かに化ける。
 func TestRestoreCachePutsTheRecordBackWhenItCannotWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -474,8 +469,8 @@ func TestRestoreCachePutsTheRecordBackWhenItCannotWrite(t *testing.T) {
 	if err := os.WriteFile(path+BackupSuffix, []byte(original), 0o644); err != nil {
 		t.Fatalf("write the backup: %v", err)
 	}
-	// A directory where the cache should be: the rename onto it cannot succeed,
-	// which is the closest thing to a full disk that a test can arrange.
+	// キャッシュがあるべき場所にディレクトリを置く。そこへの rename は成功し得ず、
+	// テストで用意できるものとしてはディスク満杯に最も近い。
 	if err := os.MkdirAll(filepath.Join(path, "in-the-way"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -495,7 +490,7 @@ func TestRestoreCachePutsTheRecordBackWhenItCannotWrite(t *testing.T) {
 		t.Errorf("the claim was left taken: %v", err)
 	}
 
-	// And once the way is clear it restores, without anyone renaming anything.
+	// そして道が開けば、誰が何の名前も変えずに復元される。
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatalf("clear the way: %v", err)
 	}
@@ -507,9 +502,8 @@ func TestRestoreCachePutsTheRecordBackWhenItCannotWrite(t *testing.T) {
 	}
 }
 
-// The ordinary version of that: the restore finished and only the tidying up
-// failed, so the client already holds what the record says. Nothing is left to
-// do but remove it, quietly -- this runs on every start.
+// その通常版。復元は完了して後片付けだけが失敗したので、クライアントは既に記録の
+// 述べるものを持っている。あとは黙って削除するだけ。これは起動のたびに走る。
 func TestRestoreCacheCleansUpAfterItself(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -533,10 +527,10 @@ func TestRestoreCacheCleansUpAfterItself(t *testing.T) {
 	}
 }
 
-// An interrupted restore is a restore waiting to happen, not litter. Turning
-// write_cache back on takes the cache over again, and the address under the
-// working name is still the one to hand back -- so it becomes the record once
-// more, instead of being replaced by a copy of the bridge's own address.
+// 中断された復元はゴミではなく、これから起きるべき復元。write_cache を戻せば
+// キャッシュを再び引き継ぐことになり、作業名のもとにあるアドレスは依然として
+// 返すべきもの。だからそれは改めて記録になり、ブリッジ自身のアドレスの写しで
+// 置き換えられたりはしない。
 func TestWriteCacheReclaimsAnInterruptedRestore(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -563,7 +557,7 @@ func TestWriteCacheReclaimsAnInterruptedRestore(t *testing.T) {
 		t.Errorf("the working name outlived the reclaim: %v", err)
 	}
 
-	// And it restores as usual from there.
+	// そしてそこから通常どおり復元される。
 	if err := RestoreCache(dir); err != nil {
 		t.Fatalf("RestoreCache: %v", err)
 	}
@@ -572,9 +566,9 @@ func TestWriteCacheReclaimsAnInterruptedRestore(t *testing.T) {
 	}
 }
 
-// The same for a client that had no cache at all: restoring means removing the
-// file, and doing that a second time would delete a cache the client wrote
-// after the bridge was done with it.
+// キャッシュをまったく持たなかったクライアントについても同じ。復元とはファイルを
+// 削除することであり、それを二度やると、ブリッジが手を引いた後にクライアントが
+// 書いたキャッシュを消すことになる。
 func TestRestoreCacheDoesNotRemoveACacheWrittenAfterTheRestore(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -589,7 +583,7 @@ func TestRestoreCacheDoesNotRemoveACacheWrittenAfterTheRestore(t *testing.T) {
 	if err := os.WriteFile(working, nil, 0o644); err != nil {
 		t.Fatalf("write the leftover: %v", err)
 	}
-	// The client has since cached a camera of its own.
+	// クライアントはその後、自分のカメラをキャッシュしている。
 	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
 		t.Fatalf("write the new address: %v", err)
 	}
@@ -602,8 +596,8 @@ func TestRestoreCacheDoesNotRemoveACacheWrittenAfterTheRestore(t *testing.T) {
 	}
 }
 
-// A folder in the middle of a restore still has to be found, or the search
-// would report that the bridge never touched the machine.
+// 復元の途中にあるフォルダも見つけられなければならない。さもないと探索は、
+// ブリッジがこの機械に一度も触れていないと報告することになる。
 func TestFindRestoreDirFindsAnInterruptedRestore(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -627,10 +621,9 @@ func TestFindRestoreDirFindsAnInterruptedRestore(t *testing.T) {
 	}
 }
 
-// A backup only counts once it is complete. Half of one is worse than none:
-// backupOnce would see it and decide the pre-bridge address was already safe,
-// so the real one would be overwritten and only a truncated copy left to
-// restore.
+// バックアップが数に入るのは完成してからだけ。中途半端なものは無いより悪い。
+// backupOnce はそれを見て「ブリッジ以前のアドレスは既に安全だ」と判断するので、
+// 本物は上書きされ、復元に使えるのは切り詰められた写しだけになる。
 func TestBackupIsNeverVisibleHalfWritten(t *testing.T) {
 	dir := t.TempDir()
 	cache := CachePath(dir)
@@ -643,8 +636,8 @@ func TestBackupIsNeverVisibleHalfWritten(t *testing.T) {
 		t.Fatalf("WriteCache: %v", err)
 	}
 
-	// Nothing under a temporary name is left lying about, and the backup that
-	// is there holds the whole address.
+	// 一時的な名前のものが放置されておらず、そこにあるバックアップはアドレス全体を
+	// 保持している。
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read the directory: %v", err)
@@ -665,10 +658,10 @@ func TestBackupIsNeverVisibleHalfWritten(t *testing.T) {
 	}
 }
 
-// install_dir can change while write_cache is on, and the bridge then holds a
-// record in the folder it used to write to as well as the one it writes to now.
-// Restoring has to find both, or the client left behind keeps pointing at a
-// bridge that has stopped.
+// write_cache が有効なまま install_dir は変わり得るので、ブリッジは今書き込んで
+// いるフォルダと、以前書き込んでいたフォルダの両方に記録を抱えることになる。復元は
+// その両方を見つけなければならない。さもないと取り残されたクライアントは、止まった
+// ブリッジを指し続ける。
 func TestFindRestoreDirsFindsEveryFolderTheBridgeWroteTo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -676,7 +669,7 @@ func TestFindRestoreDirsFindsEveryFolderTheBridgeWroteTo(t *testing.T) {
 
 	first := filepath.Join(home, "PaperTracker")
 	second := filepath.Join(home, ".local", "share", "PaperTracker")
-	// A third folder that looks like an installation but was never touched.
+	// インストールに見えるが一度も触れていない 3 つ目のフォルダ。
 	untouched := filepath.Join(home, ".wine", "drive_c", "PaperTracker")
 
 	for _, dir := range []string{first, second, untouched} {
@@ -702,11 +695,10 @@ func TestFindRestoreDirsFindsEveryFolderTheBridgeWroteTo(t *testing.T) {
 	}
 }
 
-// install_dir can name a folder the search knows nothing about -- a portable
-// copy of the client anywhere the user likes. Once that setting is cleared,
-// and deleting the whole [papertracker] section is how someone returns to the
-// defaults, the bridge's own note is the only thing left that says where to
-// undo the change.
+// install_dir は、探索がまったく知らないフォルダを指定できる — ユーザーの好きな
+// 場所に置いたクライアントのポータブルなコピー。その設定が消され、しかも
+// [papertracker] セクションを丸ごと削除するのが既定へ戻る方法である以上、変更を
+// どこで取り消せばよいかを述べるものは、ブリッジ自身の覚書だけになる。
 func TestWrittenDirsRecordsFoldersTheSearchCannotFind(t *testing.T) {
 	state := t.TempDir()
 	portable := filepath.Join(t.TempDir(), "PaperTracker Portable")
@@ -717,7 +709,7 @@ func TestWrittenDirsRecordsFoldersTheSearchCannotFind(t *testing.T) {
 	if err := RememberWrittenDir(state, portable); err != nil {
 		t.Fatalf("RememberWrittenDir: %v", err)
 	}
-	// Recording it again on the next start must not repeat it.
+	// 次の起動でまた記録しても、重複してはいけない。
 	if err := RememberWrittenDir(state, portable); err != nil {
 		t.Fatalf("RememberWrittenDir again: %v", err)
 	}
@@ -730,7 +722,7 @@ func TestWrittenDirsRecordsFoldersTheSearchCannotFind(t *testing.T) {
 		t.Errorf("WrittenDirs() = %q, want exactly %q", dirs, portable)
 	}
 
-	// A second folder joins it rather than replacing it.
+	// 2 つ目のフォルダは、置き換えではなく追加される。
 	other := filepath.Join(t.TempDir(), "PaperTracker")
 	if err := RememberWrittenDir(state, other); err != nil {
 		t.Fatalf("RememberWrittenDir: %v", err)
@@ -744,8 +736,8 @@ func TestWrittenDirsRecordsFoldersTheSearchCannotFind(t *testing.T) {
 	}
 }
 
-// Nothing recorded and nowhere to record are ordinary answers, not failures:
-// this runs on every start.
+// 何も記録されていないことと、記録する先が無いことは、失敗ではなく普通の答え。
+// これは起動のたびに走る。
 func TestWrittenDirsIgnoresAnEmptyRequest(t *testing.T) {
 	if err := RememberWrittenDir("", "/somewhere"); err != nil {
 		t.Errorf("RememberWrittenDir with no state directory = %v", err)
@@ -758,18 +750,18 @@ func TestWrittenDirsIgnoresAnEmptyRequest(t *testing.T) {
 	}
 }
 
-// Removing the working file is the last step of a restore and the one most
-// likely to fail on its own. What is left then has to say that its address is
-// already back in the cache, because a file under the working name alone is
-// indistinguishable from a restore that never wrote anything.
+// 作業ファイルの削除は復元の最後の手順であり、単独で失敗する可能性が最も高い。
+// その結果残るものは、自身のアドレスが既にキャッシュへ戻っていることを述べなければ
+// ならない。作業名のもとにあるだけのファイルは、何も書かないまま終わった復元と
+// 区別がつかないからだ。
 func TestRestoreCacheMarksALeftoverAsApplied(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
 	if err := os.WriteFile(path, []byte("127.0.0.1:18080"), 0o644); err != nil {
 		t.Fatalf("write the cache: %v", err)
 	}
-	// A record that cannot be removed: a directory with something in it. The
-	// marker is empty in normal use, so nothing reads its contents.
+	// 削除できない記録。中身のあるディレクトリ。印は通常の使い方では空なので、
+	// その内容を読むものは無い。
 	marker := path + NoOriginalSuffix
 	if err := os.MkdirAll(filepath.Join(marker, "in-the-way"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -780,7 +772,7 @@ func TestRestoreCacheMarksALeftoverAsApplied(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the removal to be reported")
 	}
-	// The restore itself happened: there was no cache before the bridge.
+	// 復元自体は起きた。ブリッジ以前にキャッシュは無かった。
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the cache is still there: %v", err)
 	}
@@ -792,18 +784,18 @@ func TestRestoreCacheMarksALeftoverAsApplied(t *testing.T) {
 	}
 }
 
-// A record marked as applied is litter. Reclaiming it as "what the client had"
-// would file an address the client has already moved on from, and the next
-// restore would undo the user's own choice.
+// 適用済みと印の付いた記録はゴミ。それを「クライアントが持っていたもの」として
+// 取り戻すと、クライアントが既に離れたアドレスを綴じ込むことになり、次の復元は
+// ユーザー自身の選択を取り消す。
 func TestWriteCacheDoesNotReclaimAnAppliedRestore(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
 
-	// The state a restore leaves when only its own file could not be removed.
+	// 自分のファイルだけ削除できなかった復元が残す状態。
 	if err := os.WriteFile(path+BackupSuffix+AppliedSuffix, []byte("192.168.1.50"), 0o644); err != nil {
 		t.Fatalf("write the leftover: %v", err)
 	}
-	// The client has since picked a camera of its own.
+	// クライアントはその後、自分のカメラを選んでいる。
 	if err := os.WriteFile(path, []byte("192.168.1.77"), 0o644); err != nil {
 		t.Fatalf("write the new address: %v", err)
 	}
@@ -822,7 +814,7 @@ func TestWriteCacheDoesNotReclaimAnAppliedRestore(t *testing.T) {
 		t.Errorf("the applied leftover was kept: %v", err)
 	}
 
-	// And restoring hands back what the user chose, not the older address.
+	// そして復元が返すのは、古いアドレスではなくユーザーが選んだ方。
 	if err := RestoreCache(dir); err != nil {
 		t.Fatalf("RestoreCache: %v", err)
 	}
@@ -831,9 +823,8 @@ func TestWriteCacheDoesNotReclaimAnAppliedRestore(t *testing.T) {
 	}
 }
 
-// Restoring runs on every start with write_cache off, so it meets the same
-// leftover. There is nothing to put back, and the client's cache is not to be
-// touched.
+// write_cache を切れば復元は起動のたびに走るので、同じ残り物に出くわす。戻すものは
+// 無く、クライアントのキャッシュには触れてはいけない。
 func TestRestoreCacheIgnoresAnAppliedLeftover(t *testing.T) {
 	dir := t.TempDir()
 	path := CachePath(dir)
@@ -855,17 +846,16 @@ func TestRestoreCacheIgnoresAnAppliedLeftover(t *testing.T) {
 	}
 }
 
-// A relative install_dir means a different folder depending on where the
-// bridge was started from, and the record is read back by a later run started
-// somewhere else entirely -- at sign-in, or from wherever the uninstaller
-// happens to run.
+// 相対の install_dir は、ブリッジがどこから起動されたかによって別のフォルダを
+// 意味する。そして記録を読み返すのは、まったく別の場所から始まった後の実行 —
+// サインイン時や、アンインストーラがたまたま走る場所からの実行 — だ。
 func TestRememberWrittenDirRecordsAnAbsolutePath(t *testing.T) {
 	state := t.TempDir()
 	install := t.TempDir()
 
-	// Chdir rather than t.Chdir: the module targets a Go version that predates
-	// it. Nothing here runs in parallel, so the process-wide change is safe as
-	// long as it is put back.
+	// t.Chdir ではなく Chdir。このモジュールが対象とする Go のバージョンは
+	// t.Chdir より前のもの。ここは並行実行しないので、元に戻す限りプロセス全体への
+	// 変更でも安全。
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -892,7 +882,7 @@ func TestRememberWrittenDirRecordsAnAbsolutePath(t *testing.T) {
 	if !filepath.IsAbs(dirs[0]) {
 		t.Errorf("recorded %q, want an absolute path", dirs[0])
 	}
-	// It has to name the folder that was actually written to.
+	// 実際に書き込んだフォルダを指していなければならない。
 	same, err := filepath.EvalSymlinks(dirs[0])
 	if err != nil {
 		t.Fatalf("resolve the record: %v", err)

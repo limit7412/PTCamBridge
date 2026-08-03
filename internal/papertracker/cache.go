@@ -1,8 +1,8 @@
-// Package papertracker writes the address cache the PaperTracker client falls
-// back to when no camera is attached over serial.
+// Package papertracker は、シリアル接続のカメラが無いときに PaperTracker
+// クライアントが頼るアドレスキャッシュを書きます。
 //
-// The client reads a single line holding a bare address and prefixes it with
-// http:// itself, so pointing it at the bridge is a one-line file write.
+// クライアントは裸のアドレスが 1 行だけ入ったファイルを読み、自分で http:// を
+// 前置します。つまりブリッジを指させるには 1 行書けば済みます。
 package papertracker
 
 import (
@@ -15,70 +15,65 @@ import (
 	"strings"
 )
 
-// CacheFileName is the client's address cache, which sits beside its
-// executable.
+// CacheFileName は、クライアントの実行ファイルの隣に置かれるアドレスキャッシュです。
 const CacheFileName = "wifi_cache.txt"
 
-// BackupSuffix is appended to preserve the address the client had before the
-// bridge took over.
+// BackupSuffix は、ブリッジが引き継ぐ前にクライアントが持っていたアドレスを
+// 保存するために付ける接尾辞です。
 //
-// The name says PTCamBridge in it on purpose. Restoring runs on every start
-// once write_cache is off, and the folder is searched for when the settings do
-// not name one, so a plain ".bak" would be read back on a machine where the
-// bridge had never been enabled -- overwriting whatever the client had with a
-// file somebody else left there, and deleting that file afterwards. Only a
-// name nothing else would choose can stand for "the bridge put this here".
+// 名前に PTCamBridge が入っているのは意図的です。write_cache を切ると復元は起動の
+// たびに走りますし、設定がフォルダを指定していなければ探索も行います。単なる
+// ".bak" では、ブリッジを一度も有効にしたことのない機械でそれを読み戻すことに
+// なります。クライアントが持っていたものを、誰か別の人が置いたファイルで上書きし、
+// そのうえでそのファイルを削除してしまいます。「これはブリッジが置いた」ことを
+// 表せるのは、他の誰も選ばない名前だけです。
 const BackupSuffix = ".ptcambridge-backup"
 
-// NoOriginalSuffix marks that the client had no cached address at all when the
-// bridge first wrote one.
+// NoOriginalSuffix は、ブリッジが最初に書いた時点でクライアントがキャッシュ済みの
+// アドレスをまったく持っていなかったことを示します。
 //
-// Without it the first run leaves no record, so the second run finds the
-// bridge's own address sitting there and preserves that as "the original".
-// Restoring would then hand the user back the bridge instead of the state they
-// started from, and there would be no way to get to "no cache" again.
+// これが無いと初回は記録を残さないので、2 回目はそこにあるブリッジ自身のアドレスを
+// 見つけ、それを「元の値」として保存します。復元はユーザーに、始まりの状態ではなく
+// ブリッジを返すことになり、「キャッシュが無い」状態へ戻る手段も失われます。
 const NoOriginalSuffix = ".ptcambridge-backup.none"
 
-// RestoringSuffix is appended to whichever of the two records is being put
-// back, for as long as that is going on.
+// RestoringSuffix は、2 種類の記録のうち今まさに戻している方に、その作業のあいだ
+// だけ付ける接尾辞です。
 //
-// Restoring is attempted on every start once write_cache is off, so it has to
-// be impossible to do twice. The record is moved under this name before the
-// cache is written and removed once it is: a removal that fails at the end can
-// then leave litter, but never a restore that runs again and puts the
-// pre-bridge address back over an address the client has cached since.
+// write_cache を切ると復元は起動のたびに試みられるので、二度実行できてはいけません。
+// 記録はキャッシュを書く前にこの名前へ移し、書き終えたら削除します。最後の削除が
+// 失敗すればゴミが残ることはありますが、復元がもう一度走って、その後クライアントが
+// キャッシュしたアドレスの上にブリッジ以前のアドレスを書き戻すことは決してありません。
 //
-// A restore interrupted part way is still recognised under this name and
-// finished on the next start, because the move happens before the write and so
-// a record found here may never have been applied.
+// 途中で中断された復元もこの名前のもとで認識され、次の起動で完了します。移動は
+// 書き込みより前に起きるので、ここで見つかった記録はまだ適用されていない可能性が
+// あるからです。
 const RestoringSuffix = ".restoring"
 
-// AppliedSuffix marks a record whose address is back in the client's cache and
-// which is only waiting to be deleted.
+// AppliedSuffix は、そのアドレスが既にクライアントのキャッシュへ戻っており、あとは
+// 削除を待つだけの記録に付けます。
 //
-// Removing the working file is the last step of a restore, and it is the step
-// most likely to fail on its own -- a file held open by a scanner, a folder
-// that has gone read-only. What is left then looks exactly like a restore that
-// stopped before it wrote anything, and the two call for opposite answers: one
-// is litter, the other is the client's own address and the only copy of it.
-// Renaming rather than guessing is what keeps them apart.
+// 作業ファイルの削除は復元の最後の手順であり、単独で失敗する可能性が最も高い手順
+// でもあります。スキャナに掴まれたファイル、読み取り専用になったフォルダ。そうして
+// 残ったものは、何も書かないうちに止まった復元とまったく同じに見えます。しかし
+// この 2 つは正反対の対応を求めます。一方はゴミ、もう一方はクライアント自身の
+// アドレスであり、その唯一の写しです。推測せず名前を変えることが、両者を分けています。
 const AppliedSuffix = ".applied"
 
-// ErrNotFound means no PaperTracker installation was located.
+// ErrNotFound は、PaperTracker のインストール先が見つからなかったことを表します。
 var ErrNotFound = errors.New("papertracker: no installation directory found")
 
-// CachePath is the cache file inside an installation directory.
+// CachePath は、インストールディレクトリ内のキャッシュファイルです。
 func CachePath(installDir string) string {
 	return filepath.Join(installDir, CacheFileName)
 }
 
-// WriteCache points the client's cache at addr, which must be a bare
-// host:port such as "127.0.0.1:18080".
+// WriteCache は、クライアントのキャッシュを addr へ向けます。addr は
+// "127.0.0.1:18080" のような裸の host:port でなければなりません。
 //
-// The original file is copied to wifi_cache.txt.bak the first time, and only
-// the first time: a backup taken on every run would quickly hold the bridge's
-// own address instead of the camera's, which is the value the user would want
-// back.
+// 元のファイルは初回だけ wifi_cache.txt.bak へ複製します。初回だけなのは、毎回
+// バックアップを取るとすぐに、カメラのアドレスではなくブリッジ自身のアドレスを
+// 抱えることになるからです。ユーザーが戻したい値は前者です。
 func WriteCache(installDir, addr string) error {
 	if strings.TrimSpace(installDir) == "" {
 		return errors.New("papertracker: install directory is empty")
@@ -102,24 +97,25 @@ func WriteCache(installDir, addr string) error {
 	if err := backupOnce(path); err != nil {
 		return err
 	}
-	// Replaced rather than overwritten in place. os.WriteFile truncates first,
-	// so a disk that fills up between the two leaves the client with an empty or
-	// half-written address -- and the caller only logs the failure and carries
-	// on, so nothing would put it right. A rename either happens or does not.
+	// その場で上書きせず置き換える。os.WriteFile はまず切り詰めるので、その間に
+	// ディスクが一杯になると、クライアントには空か書きかけのアドレスが残る。しかも
+	// 呼び出し側は失敗をログに書いて先へ進むだけなので、それを直すものが無い。
+	// rename なら、起きるか起きないかのどちらかで済む。
 	if err := writeAtomic(path, []byte(addr)); err != nil {
 		return err
 	}
 	return nil
 }
 
-// backupOnce records the pre-bridge state, once. That is either the original
-// file copied to path+BackupSuffix, or the marker saying there was no original.
+// backupOnce は、ブリッジ以前の状態を一度だけ記録します。元のファイルを
+// path+BackupSuffix へ複製するか、元のファイルが無かったことを示す印を置くかの
+// どちらかです。
 func backupOnce(path string) error {
 	backup := path + BackupSuffix
 	marker := path + NoOriginalSuffix
 
-	// Either file means the pre-bridge state is already on disk, and a second
-	// pass would only overwrite it with the bridge's own address.
+	// どちらのファイルがあっても、ブリッジ以前の状態は既にディスク上にあるという
+	// こと。2 度目はそれをブリッジ自身のアドレスで上書きするだけになる。
 	for _, existing := range []string{backup, marker} {
 		switch found, err := exists(existing); {
 		case err != nil:
@@ -129,20 +125,20 @@ func backupOnce(path string) error {
 		}
 	}
 
-	// A file left under a restore's working name is one of two things, and they
-	// call for opposite answers -- the same question RestoreCache has to ask.
+	// 復元の作業名のもとに残されたファイルは 2 つのうちどちらかであり、両者は
+	// 正反対の対応を求める。RestoreCache が問うのと同じ問い。
 	//
-	// If the restore never finished, the file still holds what the client had
-	// before the bridge, and the bridge is taking the cache over again right
-	// now: it becomes the record once more, which is what makes an interrupted
-	// restore recoverable rather than litter.
+	// 復元が完了していないなら、そのファイルはブリッジ以前にクライアントが持って
+	// いたものをまだ保持していて、しかも今まさにブリッジがキャッシュを再び引き継ごう
+	// としている。それは改めて記録になる。中断された復元がゴミではなく回復可能である
+	// のは、これによる。
 	//
-	// If the restore did finish and only the tidying up failed, the address in
-	// it is already back in the cache -- and the client may have moved on to a
-	// camera of its own since. Reclaiming it then would file that stale address
-	// as "what the client had", and the next restore would undo the user's own
-	// choice. It is litter, and the record to keep is a fresh copy of whatever
-	// the cache says now.
+	// 復元は完了していて後片付けだけが失敗したのなら、その中のアドレスは既に
+	// キャッシュへ戻っている。そしてクライアントはその後、自分のカメラへ移っている
+	// かもしれない。そこでそれを取り戻すと、古くなったアドレスを「クライアントが
+	// 持っていたもの」として綴じ込むことになり、次の復元はユーザー自身の選択を
+	// 取り消してしまう。それはゴミであり、残すべき記録は、今キャッシュが述べている
+	// ものの新しい写しの方だ。
 	for _, record := range []struct {
 		name  string
 		erase bool
@@ -150,10 +146,10 @@ func backupOnce(path string) error {
 		{backup, false},
 		{marker, true},
 	} {
-		// Marked as applied by the restore itself: the address in it is the one
-		// the client is holding, or was until the client chose another. Either
-		// way it is not the pre-bridge state any more, and the record to keep is
-		// a fresh copy of whatever the cache says now.
+		// 復元自身によって適用済みと印が付いている。その中のアドレスはクライアントが
+		// 今持っているものか、クライアントが別のものを選ぶまで持っていたもの。
+		// いずれにせよもうブリッジ以前の状態ではないので、残すべき記録は、今
+		// キャッシュが述べているものの新しい写し。
 		dropped, err := dropApplied(record.name)
 		if err != nil {
 			return err
@@ -169,11 +165,10 @@ func backupOnce(path string) error {
 		case !found:
 			continue
 		}
-		// Not marked, so it is a restore that may never have written anything.
-		// The client holding exactly what the record says is the one reading
-		// that settles it; anything else is treated as unapplied, because the
-		// cost of being wrong that way is a stale record rather than the loss
-		// of the only copy of the client's own address.
+		// 印が無いので、何も書かないまま終わった復元かもしれない。決め手になるのは、
+		// クライアントが記録の述べるものをそのまま持っているかどうか。それ以外は
+		// 未適用として扱う。その方向で間違えた場合の代償は古い記録が残ることであり、
+		// クライアント自身のアドレスの唯一の写しを失うことではないから。
 		done, err := restoreLooksDone(path, claimed, record.erase)
 		if err != nil {
 			return err
@@ -192,8 +187,8 @@ func backupOnce(path string) error {
 
 	original, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// The client had no cached address. Recording that is what makes the
-		// state restorable at all.
+		// クライアントはキャッシュ済みのアドレスを持っていなかった。それを記録する
+		// ことが、この状態を復元可能にしている。
 		if err := writeAtomic(marker, nil); err != nil {
 			return err
 		}
@@ -201,18 +196,17 @@ func backupOnce(path string) error {
 	} else if err != nil {
 		return fmt.Errorf("papertracker: read %s: %w", path, err)
 	}
-	// Written to a temporary name and renamed, so the backup only ever exists
-	// complete. A half-written one is worse than none: the check above would
-	// see it and decide the pre-bridge state was already safe, and restoring
-	// would hand back a truncated address.
+	// 一時的な名前で書いてから rename するので、バックアップは常に完全な形でしか
+	// 存在しない。書きかけのものは無いより悪い。上の検査はそれを見て「ブリッジ以前の
+	// 状態は既に安全だ」と判断し、復元は切り詰められたアドレスを返すことになる。
 	if err := writeAtomic(backup, original); err != nil {
 		return err
 	}
 	return nil
 }
 
-// writeAtomic writes data to path via a temporary file in the same directory,
-// so a reader never sees a partial file under that name.
+// writeAtomic は、同じディレクトリの一時ファイルを経由して data を path へ書きます。
+// 読み手がその名前のもとで不完全なファイルを目にすることはありません。
 func writeAtomic(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
 	if err != nil {
@@ -236,20 +230,19 @@ func writeAtomic(path string, data []byte) error {
 	return nil
 }
 
-// ErrNoBackup means there is nothing to put back: the bridge never wrote this
-// cache, or it has already been restored. Callers that restore on every start
-// use it to tell that apart from a restore that failed.
+// ErrNoBackup は、戻すものが無いことを表します。ブリッジがこのキャッシュを一度も
+// 書いていないか、既に復元済みかのどちらかです。起動のたびに復元を試みる呼び出し側は、
+// これで「失敗した復元」と区別します。
 var ErrNoBackup = errors.New("papertracker: no backup to restore")
 
-// ErrRestoreInterrupted means a restore stopped part way and the address from
-// before the bridge is sitting under its working name. It is deliberately not
-// applied on its own: doing that on the next start is how a cache the client
-// has since updated gets written over.
+// ErrRestoreInterrupted は、復元が途中で止まり、ブリッジ以前のアドレスが作業名の
+// もとに残っていることを表します。これを自動では適用しないのは意図的です。次の
+// 起動でそれをやると、クライアントがその後更新したキャッシュを上書きすることに
+// なります。
 var ErrRestoreInterrupted = errors.New("papertracker: a restore was interrupted")
 
-// RestoreCache puts the pre-bridge address back and removes the record of it,
-// so a user who stops using PTCamBridge can return the client to its own
-// camera.
+// RestoreCache は、ブリッジ以前のアドレスを戻し、その記録を削除します。PTCamBridge
+// を使うのをやめたユーザーが、クライアントを自分のカメラへ戻せるようにするためです。
 func RestoreCache(installDir string) error {
 	path := CachePath(installDir)
 
@@ -259,11 +252,10 @@ func RestoreCache(installDir string) error {
 	}
 
 	if err := applyRestore(path, working, erase); err != nil {
-		// Nothing was put back, so the claim goes back with it. Leaving it
-		// taken would turn a full disk or a locked file into a restore that
-		// only a person can finish: the next start would find a record whose
-		// contents do not match the cache and refuse to guess. Put back where
-		// it was, it is simply tried again.
+		// 何も戻せなかったので、確保も一緒に戻す。確保したままにすると、ディスク
+		// 満杯やファイルのロックが「人にしか終わらせられない復元」に化ける。次の
+		// 起動は、内容がキャッシュと一致しない記録を見つけて推測を拒む。元の場所に
+		// 戻しておけば、単にもう一度試されるだけで済む。
 		if undo := unclaimRestore(working); undo != nil {
 			return errors.Join(err, undo)
 		}
@@ -271,12 +263,11 @@ func RestoreCache(installDir string) error {
 	}
 
 	if err := os.Remove(working); err != nil {
-		// The client is already back where it started, so what is left is only
-		// the bridge's own file -- but a file under the working name is
-		// ambiguous, and the next start would have to guess whether the address
-		// in it had been applied. Saying so in the name is what removes the
-		// guess. If even that fails there is nothing further to try, and the
-		// caller is told either way.
+		// クライアントは既に出発点へ戻っているので、残っているのはブリッジ自身の
+		// ファイルだけ。ただし作業名のもとにあるファイルは曖昧で、次の起動はその
+		// 中のアドレスが適用済みかどうかを推測しなければならなくなる。名前でそう
+		// 述べることが、その推測を取り除く。それすら失敗したなら他に試せることは
+		// 無く、いずれにせよ呼び出し側には伝える。
 		applied := strings.TrimSuffix(working, RestoringSuffix) + AppliedSuffix
 		if renameErr := os.Rename(working, applied); renameErr != nil {
 			return errors.Join(
@@ -290,9 +281,9 @@ func RestoreCache(installDir string) error {
 	return nil
 }
 
-// dropApplied removes a record that has already been put back, and reports
-// whether there was one. Nothing about it needs deciding: the name says the
-// address in it is the one the client is holding.
+// dropApplied は、既に戻し終えた記録を削除し、そもそも在ったかどうかを返します。
+// 判断すべきことは何もありません。その中のアドレスがクライアントの持っているもので
+// あることは、名前が述べています。
 func dropApplied(recordName string) (bool, error) {
 	applied := recordName + AppliedSuffix
 	switch found, err := exists(applied); {
@@ -307,11 +298,11 @@ func dropApplied(recordName string) (bool, error) {
 	return true, nil
 }
 
-// applyRestore puts the client back the way the claimed record describes.
+// applyRestore は、確保した記録が述べるとおりにクライアントを戻します。
 func applyRestore(path, working string, erase bool) error {
 	if erase {
-		// There was no cache before the bridge, so putting that back means
-		// removing the file rather than writing an empty one.
+		// ブリッジ以前にキャッシュは無かったので、それを戻すとは、空のファイルを
+		// 書くことではなくファイルを削除すること。
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("papertracker: remove %s: %w", path, err)
 		}
@@ -321,14 +312,13 @@ func applyRestore(path, working string, erase bool) error {
 	if err != nil {
 		return fmt.Errorf("papertracker: read %s: %w", working, err)
 	}
-	// Written under a temporary name and renamed, because the record is
-	// dropped straight after: a partial write here would lose the address for
-	// good, leaving a truncated copy as the only thing to hand back.
+	// 一時的な名前で書いてから rename する。この直後に記録を捨てるので、ここで
+	// 書きかけになるとアドレスは永久に失われ、切り詰められた写しだけが返せるものと
+	// して残る。
 	return writeAtomic(path, original)
 }
 
-// unclaimRestore puts a claimed record back under the name that means "waiting
-// to be restored".
+// unclaimRestore は、確保した記録を「復元待ち」を意味する名前へ戻します。
 func unclaimRestore(working string) error {
 	record := strings.TrimSuffix(working, RestoringSuffix)
 	if err := os.Rename(working, record); err != nil {
@@ -337,24 +327,22 @@ func unclaimRestore(working string) error {
 	return nil
 }
 
-// claimRestore takes charge of the pre-bridge record and reports how to apply
-// it: the file to read it from, and whether it means "there was no cache".
+// claimRestore は、ブリッジ以前の記録を確保し、それをどう適用するかを返します。
+// 読み出すファイルと、それが「キャッシュは無かった」を意味するかどうかです。
 //
-// Moving it aside first is what stops the same restore happening twice. A
-// record already under the working name is never applied for that reason: the
-// most likely way to get one is a restore that put the address back and then
-// could not delete its own file, and applying it again on the next start would
-// undo an address the client had cached in the meantime -- a camera the user
-// chose after they stopped using the bridge.
+// 先に脇へ move することが、同じ復元が二度起きるのを防いでいます。作業名のもとに
+// 既にある記録を決して適用しないのはそのためです。そうした記録が生まれる最もあり
+// がちな経緯は、アドレスを戻したうえで自分のファイルを削除できなかった復元であり、
+// 次の起動でそれをもう一度適用すると、その間にクライアントがキャッシュしたアドレス —
+// ブリッジを使うのをやめた後にユーザーが選んだカメラ — を取り消してしまいます。
 //
-// That case is recognised by the client already holding what the record says,
-// and cleaned up silently. Anything else means the restore stopped before it
-// finished, which is reported rather than guessed at: the address is still on
-// disk and the user can decide, where writing it over a cache that has moved on
-// cannot be undone.
+// その場合は、クライアントが記録の述べるものを既に持っていることで見分けがつき、
+// 黙って片付けます。それ以外は復元が終わる前に止まったということで、推測せず報告
+// します。アドレスはまだディスク上にあってユーザーが判断できますが、先へ進んだ
+// キャッシュの上に書いてしまえば取り消せません。
 func claimRestore(path string) (working string, erase bool, err error) {
-	// The marker wins: it says the client had no cache at all, and a backup
-	// cannot exist alongside it.
+	// 印の方が優先する。クライアントにキャッシュがまったく無かったと述べており、
+	// バックアップがそれと並んで存在することはあり得ない。
 	for _, record := range []struct {
 		name  string
 		erase bool
@@ -362,8 +350,7 @@ func claimRestore(path string) (working string, erase bool, err error) {
 		{path + NoOriginalSuffix, true},
 		{path + BackupSuffix, false},
 	} {
-		// A record that says it was already applied is only litter, and this is
-		// the pass that clears it.
+		// 適用済みと述べている記録はゴミでしかなく、それを片付けるのがこの経路。
 		switch dropped, err := dropApplied(record.name); {
 		case err != nil:
 			return "", false, err
@@ -393,9 +380,9 @@ func claimRestore(path string) (working string, erase bool, err error) {
 	return "", false, fmt.Errorf("%w at %s", ErrNoBackup, path+BackupSuffix)
 }
 
-// tidyClaimed deals with a record left under its working name, and always
-// returns an error saying what happened: either there is nothing left to
-// restore, or the leftover needs a person.
+// tidyClaimed は、作業名のもとに残された記録を処理し、必ず何が起きたかを述べる
+// エラーを返します。復元するものがもう無いか、残ったものに人の判断が要るかの
+// どちらかです。
 func tidyClaimed(path, claimed string, record struct {
 	name  string
 	erase bool
@@ -414,12 +401,12 @@ func tidyClaimed(path, claimed string, record struct {
 	return fmt.Errorf("%w at %s", ErrNoBackup, record.name)
 }
 
-// restoreLooksDone reports whether the client is already in the state the
-// record describes, which is what tells a restore that only failed to tidy up
-// from one that never finished.
+// restoreLooksDone は、クライアントが既に記録の述べる状態にあるかを返します。
+// 後片付けだけに失敗した復元と、そもそも完了しなかった復元を見分けるのがこれです。
 func restoreLooksDone(path, claimed string, erase bool) (bool, error) {
 	if erase {
-		// "No cache before the bridge" is restored by there being no cache.
+		// 「ブリッジ以前にキャッシュは無い」という状態は、キャッシュが無いことに
+		// よって復元される。
 		found, err := exists(path)
 		return !found, err
 	}
@@ -436,8 +423,8 @@ func restoreLooksDone(path, claimed string, erase bool) (bool, error) {
 	return bytes.Equal(got, want), nil
 }
 
-// exists reports whether path is there, treating anything other than "not
-// found" as a reason to stop rather than a no.
+// exists は path があるかどうかを返します。「見つからない」以外はすべて、否定の
+// 答えではなく中断すべき理由として扱います。
 func exists(path string) (bool, error) {
 	if _, err := os.Stat(path); err == nil {
 		return true, nil
@@ -447,8 +434,8 @@ func exists(path string) (bool, error) {
 	return false, nil
 }
 
-// recordNames lists every file that stands for a pre-bridge state, including
-// the names a restore in progress uses.
+// recordNames は、ブリッジ以前の状態を表すファイルをすべて列挙します。進行中の
+// 復元が使う名前も含みます。
 func recordNames(path string) []string {
 	return []string{
 		path + BackupSuffix,
@@ -460,7 +447,7 @@ func recordNames(path string) []string {
 	}
 }
 
-// ReadCache returns the address currently cached by the client.
+// ReadCache は、クライアントが現在キャッシュしているアドレスを返します。
 func ReadCache(installDir string) (string, error) {
 	data, err := os.ReadFile(CachePath(installDir))
 	if err != nil {
@@ -469,8 +456,8 @@ func ReadCache(installDir string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// FindInstallDir looks for a PaperTracker installation in the usual places.
-// It is best effort: the user can always set papertracker.install_dir instead.
+// FindInstallDir は、よくある場所から PaperTracker のインストール先を探します。
+// あくまで最善努力です。ユーザーはいつでも papertracker.install_dir を指定できます。
 func FindInstallDir() (string, error) {
 	for _, dir := range candidateDirs() {
 		if dir == "" {
@@ -483,19 +470,17 @@ func FindInstallDir() (string, error) {
 	return "", ErrNotFound
 }
 
-// FindRestoreDir looks for the installation the bridge actually wrote to.
+// FindRestoreDir は、ブリッジが実際に書き込んだインストール先を探します。
 //
-// Restoring needs a different answer from writing. FindInstallDir returns the
-// first folder that looks like PaperTracker at all, and with more than one on
-// the machine -- an old copy beside a new one, or a portable build in Downloads
-// -- that is quite likely not the one whose cache the bridge replaced. Restoring
-// there finds no backup, reports that there is nothing to undo, and leaves the
-// client that was really changed pointing at a bridge which is no longer
-// running.
+// 復元に必要な答えは、書き込みのときとは違います。FindInstallDir は少しでも
+// PaperTracker に見える最初のフォルダを返しますが、機械に複数ある場合 — 新しい
+// コピーの隣にある古いコピー、Downloads にあるポータブル版 — それはブリッジが
+// キャッシュを置き換えた相手ではない可能性がかなり高いのです。そこで復元しても
+// バックアップは見つからず、「取り消すものは無い」と報告し、本当に変更された
+// クライアントは、もう動いていないブリッジを指したまま残されます。
 //
-// Only the bridge's own files count as a match, for the same reason the backup
-// is named after it: the search runs on machines the bridge may never have
-// touched.
+// 一致とみなすのはブリッジ自身のファイルだけです。バックアップにその名を付けるのと
+// 同じ理由で、この探索はブリッジが一度も触れていないかもしれない機械でも走ります。
 func FindRestoreDir() (string, error) {
 	dirs, err := FindRestoreDirs()
 	if err != nil {
@@ -507,13 +492,12 @@ func FindRestoreDir() (string, error) {
 	return dirs[0], nil
 }
 
-// FindRestoreDirs lists every folder the bridge left a record in.
+// FindRestoreDirs は、ブリッジが記録を残したフォルダをすべて列挙します。
 //
-// There can be more than one. install_dir is allowed to change while
-// write_cache is on -- the client is reinstalled or moved -- and the folder
-// left behind still holds a client pointed at the bridge, with a record beside
-// it saying what it used to be. Restoring only the first would leave that one
-// as it is, and nothing later would look again.
+// 複数あり得ます。write_cache が有効なまま install_dir が変わることは許されていて —
+// クライアントが再インストールされたり移動されたり — 取り残されたフォルダには、
+// ブリッジを指したままのクライアントと、以前の値を述べる記録が並んで残ります。
+// 最初の 1 つだけを復元すると、そちらはそのまま残り、後から見直すものは何もありません。
 func FindRestoreDirs() ([]string, error) {
 	var dirs []string
 	for _, dir := range candidateDirs() {
@@ -527,29 +511,27 @@ func FindRestoreDirs() ([]string, error) {
 	return dirs, nil
 }
 
-// WrittenDirsFile is the bridge's own note of which folders it has pointed at
-// itself. It lives with the bridge's settings, not with the client.
+// WrittenDirsFile は、どのフォルダを自分へ向けたかについてのブリッジ自身の覚書です。
+// クライアント側ではなく、ブリッジの設定と一緒に置かれます。
 //
-// The search below only knows the usual places a client is installed, and
-// install_dir can name somewhere else entirely -- a portable copy in a folder
-// of the user's choosing. Once that setting goes away, and deleting the whole
-// [papertracker] section is how someone returns to the defaults, nothing would
-// ever name that folder again: the record would sit beside the client, and the
-// client would keep pointing at a bridge that has stopped.
+// 下の探索が知っているのはクライアントがよく置かれる場所だけですが、install_dir は
+// まったく別の場所 — ユーザーが選んだフォルダにあるポータブルのコピー — を指定でき
+// ます。その設定が消えたら、そして [papertracker] セクションを丸ごと削除するのが
+// 既定へ戻る方法なのですが、そのフォルダの名前を挙げるものは二度と無くなります。
+// 記録はクライアントの隣に残り、クライアントは止まったブリッジを指し続けます。
 const WrittenDirsFile = "written-dirs.txt"
 
-// RememberWrittenDir notes installDir as somewhere to look when restoring.
-// Recording the same folder twice does nothing.
+// RememberWrittenDir は、復元時に見るべき場所として installDir を書き留めます。
+// 同じフォルダを二度記録しても何も起きません。
 func RememberWrittenDir(stateDir, installDir string) error {
 	installDir = strings.TrimSpace(installDir)
 	if strings.TrimSpace(stateDir) == "" || installDir == "" {
 		return nil
 	}
-	// Recorded as an absolute path. install_dir may be relative, and the folder
-	// it names then depends on where the bridge was started from -- a manual
-	// run from the client's own folder and the next sign-in are two different
-	// places. What is recorded has to be the folder that was actually written
-	// to, not a phrase that means something else later.
+	// 絶対パスで記録する。install_dir は相対でもよく、その場合それが指すフォルダは
+	// ブリッジがどこから起動されたかに依存する。クライアント自身のフォルダからの
+	// 手動実行と、次のサインインとでは別の場所になる。記録すべきは実際に書き込んだ
+	// フォルダであって、後で別の意味になる言い回しではない。
 	installDir, err := filepath.Abs(installDir)
 	if err != nil {
 		return fmt.Errorf("papertracker: resolve %s: %w", installDir, err)
@@ -568,8 +550,8 @@ func RememberWrittenDir(stateDir, installDir string) error {
 	return writeAtomic(filepath.Join(stateDir, WrittenDirsFile), []byte(strings.Join(known, "\n")+"\n"))
 }
 
-// WrittenDirs lists the folders recorded by RememberWrittenDir. A missing file
-// is an ordinary answer: it means the bridge has never written a cache.
+// WrittenDirs は、RememberWrittenDir が記録したフォルダを列挙します。ファイルが
+// 無いのは普通の答えです。ブリッジが一度もキャッシュを書いていないという意味です。
 func WrittenDirs(stateDir string) ([]string, error) {
 	if strings.TrimSpace(stateDir) == "" {
 		return nil, nil
@@ -591,9 +573,9 @@ func WrittenDirs(stateDir string) ([]string, error) {
 	return dirs, nil
 }
 
-// hasBackup reports whether the bridge recorded a pre-bridge state in dir,
-// which is either a backup of the client's address or the marker saying it had
-// none. A restore left half done counts: it still has to be finished.
+// hasBackup は、ブリッジが dir にブリッジ以前の状態を記録したかどうかを返します。
+// それはクライアントのアドレスのバックアップか、無かったことを示す印のどちらかです。
+// 途中まで進んだ復元も数に入ります。まだ終わらせる必要があるからです。
 func hasBackup(dir string) bool {
 	path := CachePath(dir)
 	for _, name := range recordNames(path) {
@@ -604,8 +586,8 @@ func hasBackup(dir string) bool {
 	return false
 }
 
-// looksLikeInstall reports whether dir holds something recognisably
-// PaperTracker: either the client executable or an address cache it wrote.
+// looksLikeInstall は、dir に PaperTracker と分かるもの — クライアントの実行
+// ファイルか、それが書いたアドレスキャッシュ — があるかどうかを返します。
 func looksLikeInstall(dir string) bool {
 	for _, marker := range []string{"PaperTracker.exe", "paperTracker.exe", CacheFileName} {
 		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {

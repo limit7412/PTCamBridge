@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 )
 
-// candidateDirs covers the Wine and development layouts a non-Windows build
-// might see. The client itself only ships for Windows, so this exists to keep
-// the package testable and the code path identical across platforms.
+// candidateDirs は、Windows 以外のビルドが目にし得る Wine や開発時の配置を
+// 想定しています。クライアント自体は Windows 版しか配布されていないので、これは
+// パッケージをテスト可能にし、コード経路をプラットフォーム間で同一に保つために
+// 存在します。
 func candidateDirs() []string {
 	var dirs []string
 	home, err := os.UserHomeDir()

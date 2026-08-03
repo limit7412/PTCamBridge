@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 )
 
-// candidateDirs lists the folders a PaperTracker install is typically found
-// in, most specific first.
+// candidateDirs は、PaperTracker のインストール先として典型的なフォルダを、
+// 具体的なものから順に並べます。
 func candidateDirs() []string {
 	var dirs []string
 	for _, base := range []string{
