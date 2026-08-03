@@ -265,11 +265,26 @@ func toggleAutostart(opts Options, m menu) {
 	}
 }
 
+// openTarget はシェルに開かせます。呼び出しはイベントループから外します。
+//
+// ShellExecuteW は同期 API です。応答しない UNC パスのログフォルダや、DDE や COM の
+// 起動待ちに入った既定ハンドラを相手にすると、タイムアウトまで返ってきません。
+// イベントループの上で待てば、その間トレイは終了もクリックも 1 秒ごとの状態更新も
+// 処理できなくなります。以前の子プロセス起動は rundll32 に仕事を渡して即座に返って
+// いたので、ここで待つとトレイ全体が固まる回帰になります。
+//
+// commandQueue には載せません。あちらはブリッジのロックで直列化される操作を、
+// クリックされた順に保つためのものです。開く操作はブリッジの設定に触れずソース切替と
+// 競合もしないので、順序を守る理由が無く、代わりに 1 つの遅い呼び出しが後続の
+// クリックすべてを足止めすることになります。ffmpeg の確認ダイアログを載せていないのと
+// 同じ理由です。
 func openTarget(target string, opts Options) {
 	if target == "" {
 		return
 	}
-	if err := openPath(target); err != nil {
-		opts.Log.Error("could not open", "target", target, "error", err)
-	}
+	go func() {
+		if err := openPath(target); err != nil {
+			opts.Log.Error("could not open", "target", target, "error", err)
+		}
+	}()
 }
