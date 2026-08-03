@@ -2,12 +2,12 @@ package tray
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"fyne.io/systray"
 
 	"github.com/limit7412/PTCamBridge/internal/autostart"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
 
 // refreshInterval paces the status line in the menu. It is a display concern
@@ -27,39 +27,42 @@ func Run(ctx context.Context, opts Options) {
 }
 
 func onReady(ctx context.Context, opts Options) {
-	systray.SetIcon(iconICO)
-	systray.SetTitle("PTCamBridge")
-	systray.SetTooltip("PTCamBridge")
+	p := opts.Printer
 
-	statusItem := systray.AddMenuItem("Starting...", "Current source and frame rate")
+	systray.SetIcon(iconICO)
+	systray.SetTitle(p.S(i18n.DialogTitle))
+	systray.SetTooltip(p.S(i18n.DialogTitle))
+
+	statusItem := systray.AddMenuItem(p.S(i18n.MenuStatusStarting), p.S(i18n.MenuStatusTip))
 	statusItem.Disable()
-	addressItem := systray.AddMenuItem("http://"+opts.Address, "Stream address; click to open a preview")
+	addressItem := systray.AddMenuItem("http://"+opts.Address, p.S(i18n.MenuAddressTip))
 	systray.AddSeparator()
 
-	sourceMenu := systray.AddMenuItem("Source", "Choose the camera to bridge")
+	sourceMenu := systray.AddMenuItem(p.S(i18n.MenuSource), p.S(i18n.MenuSourceTip))
 	sourceItems := make(map[string]*systray.MenuItem, len(sourceChoices))
 	for _, choice := range sourceChoices {
-		sourceItems[choice.kind] = sourceMenu.AddSubMenuItemCheckbox(choice.label, choice.label, false)
+		label := p.S(choice.label)
+		sourceItems[choice.kind] = sourceMenu.AddSubMenuItemCheckbox(label, label, false)
 	}
 
-	pauseItem := systray.AddMenuItemCheckbox("Pause", "Stop capturing and release the camera", opts.Controller.Paused())
+	pauseItem := systray.AddMenuItemCheckbox(p.S(i18n.MenuPause), p.S(i18n.MenuPauseTip), opts.Controller.Paused())
 	systray.AddSeparator()
 
-	logItem := systray.AddMenuItem("Open log folder", "Show the log files in Explorer")
+	logItem := systray.AddMenuItem(p.S(i18n.MenuLogDir), p.S(i18n.MenuLogDirTip))
 	if opts.LogDir == "" {
 		logItem.Hide()
 	}
-	configItem := systray.AddMenuItem("Edit settings", "Open ptcambridge.toml")
+	configItem := systray.AddMenuItem(p.S(i18n.MenuSettings), p.S(i18n.MenuSettingsTip))
 	if opts.ConfigPath == "" {
 		configItem.Hide()
 	}
 
-	ffmpegItem := systray.AddMenuItem("Get ffmpeg (for UVC cameras)", "Download ffmpeg from its publisher")
+	ffmpegItem := systray.AddMenuItem(p.S(i18n.MenuFFmpegGet), p.S(i18n.MenuFFmpegTip))
 	if opts.FFmpeg == nil {
 		ffmpegItem.Hide()
 	}
 
-	autostartItem := systray.AddMenuItemCheckbox("Start with Windows", "Launch PTCamBridge at sign-in", false)
+	autostartItem := systray.AddMenuItemCheckbox(p.S(i18n.MenuAutostart), p.S(i18n.MenuAutostartTip), false)
 	if !autostart.Supported() {
 		autostartItem.Hide()
 	} else if on, err := autostart.Enabled(opts.ConfigFlag); err != nil {
@@ -69,7 +72,7 @@ func onReady(ctx context.Context, opts Options) {
 	}
 
 	systray.AddSeparator()
-	quitItem := systray.AddMenuItem("Quit", "Stop PTCamBridge")
+	quitItem := systray.AddMenuItem(p.S(i18n.MenuQuit), p.S(i18n.MenuQuitTip))
 
 	go run(ctx, opts, menu{
 		status:    statusItem,
@@ -212,35 +215,11 @@ func refresh(opts Options, m menu) {
 	}
 
 	if opts.FFmpeg != nil {
-		m.ffmpeg.SetTitle(ffmpegStatusLine(opts.FFmpeg.State()))
+		m.ffmpeg.SetTitle(ffmpegStatusLine(opts.Printer, opts.FFmpeg.State()))
 	}
 
-	m.status.SetTitle(statusLine(snapshot.Source, paused, snapshot.Connected, stats.InputFPS, stats.Subscribers, snapshot.LastError))
-	systray.SetTooltip("PTCamBridge - " + m.status.String())
-}
-
-// statusLine is the one line of text the user reads to know whether it works.
-func statusLine(source string, paused, connected bool, fps float64, clients int, lastError string) string {
-	if source == "" {
-		source = "no source"
-	}
-	switch {
-	case paused:
-		return source + ": paused"
-	case !connected && lastError != "":
-		return fmt.Sprintf("%s: reconnecting (%s)", source, truncate(lastError, 60))
-	case !connected:
-		return source + ": connecting..."
-	default:
-		return fmt.Sprintf("%s: %.1f fps, %d client(s)", source, fps, clients)
-	}
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
+	m.status.SetTitle(statusLine(opts.Printer, snapshot, paused, stats.InputFPS, stats.Subscribers))
+	systray.SetTooltip(opts.Printer.S(i18n.DialogTitle) + " - " + m.status.String())
 }
 
 // startFFmpegFetch asks first, then downloads.
@@ -248,6 +227,7 @@ func startFFmpegFetch(opts Options) {
 	if opts.FFmpeg == nil {
 		return
 	}
+	p := opts.Printer
 	state := opts.FFmpeg.State()
 	switch {
 	case state.Downloading:
@@ -255,10 +235,10 @@ func startFFmpegFetch(opts Options) {
 	case state.Installed:
 		// Already there. Saying so beats a click that looks like it did
 		// nothing, and re-downloading a working ffmpeg is not what it means.
-		confirm("PTCamBridge", "ffmpeg is already installed:\n\n"+state.Path)
+		confirm(p.S(i18n.DialogTitle), p.F(i18n.DialogFFmpegInstalled, state.Path))
 		return
 	}
-	if !confirm("PTCamBridge - download ffmpeg", ffmpegPrompt(state.Source)) {
+	if !confirm(p.S(i18n.DialogFFmpegTitle), ffmpegPrompt(p, state.Source)) {
 		return
 	}
 	if err := opts.FFmpeg.Start(); err != nil {

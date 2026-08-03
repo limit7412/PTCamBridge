@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -491,11 +492,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
 
 	case http.MethodPut:
-		var cfg config.Config
-		if err := decodeStrict(http.MaxBytesReader(w, r.Body, 1<<20), &cfg); err != nil {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		var cfg config.Config
+		if err := decodeStrict(bytes.NewReader(body), &cfg); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		carryUnmentioned(&cfg, body, s.opts.Controller.Snapshot())
 		cfg.Normalise()
 		if err := cfg.Validate(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -607,6 +614,36 @@ func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// carryUnmentioned keeps a setting the request never named at its current
+// value, for the ones a client written before that setting existed cannot know
+// to send.
+//
+// PUT replaces the whole configuration, so a field left out of the body comes
+// back from Normalise as its default. That is right for the caller this API
+// was built for -- read the settings, change one, send them all back -- and
+// wrong for a caller written against an older schema, which cannot send a
+// field that did not exist when it was written.
+//
+// For most settings the difference goes unnoticed. For one that may only
+// change while stopped it does not: the default it decays to differs from the
+// running value, so the whole request is refused and that client finds the
+// management API closed to it over a setting it never touched.
+//
+// Only ui, because it is the only setting added since anything could have been
+// written against this API. Anything added later belongs here too.
+func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) {
+	var mentioned struct {
+		UI *json.RawMessage `json:"ui"`
+	}
+	if err := json.Unmarshal(body, &mentioned); err != nil {
+		// Undecodable bodies never reach here; strict decoding ran first.
+		return
+	}
+	if mentioned.UI == nil {
+		cfg.UI = current.UI
 	}
 }
 
