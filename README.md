@@ -345,6 +345,60 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o paperbridge.exe ./cmd/paperb
 cgo は使いません。Windows でのカメラ取得は ffmpeg を子プロセスとして起動し
 stdout から MJPEG を読む方式で解決しているため、`CGO_ENABLED=0` の単一バイナリを維持できます。
 
+配布用の exe はさらに `-trimpath -ldflags "-s -w -H=windowsgui -X main.Version=<version>"`
+を付けて作ります。`-H=windowsgui` はトレイ常駐アプリがコンソール窓を連れてこないため、
+`-X main.Version` は `-version` と `/stats` が返す値を埋め込むためです。
+
+## ビルドとリリース (GitHub Actions)
+
+| ワークフロー | 起動条件 | 内容 |
+| --- | --- | --- |
+| `ci.yml` | `master` への push / PR | gofmt・vet (Linux/Windows 両 GOOS)・`go test -race`・Windows 向けビルド |
+| `build.yml` | 手動 / `release.yml` から | テスト → バージョン入り単一 exe を発行 → Windows でスモークテスト |
+| `release.yml` | バージョンタグの push | `build.yml` を呼び、成果物を GitHub Release へ添付 |
+
+`build.yml` が発行する exe のファイル名にはバージョンが入ります
+(`paperbridge-windows-amd64-0.1.0.exe`)。Artifacts の名前も同じで、展開したあとの
+exe 単体でもどのビルドか分かります。動作はファイル名に依存しません。
+
+発行は Linux でのクロスコンパイル (`CGO_ENABLED=0`) で、`ci.yml` が全 push で
+作っているものと同じ経路です。リリースのときだけ別の作り方をすると、CI が通っているのに
+リリースだけ壊れる、という食い違いが起きるためです。
+
+スモークテストは Windows ランナーで実際に exe を起動します。`-version` が正常終了すること、
+`-headless` で常駐させて `/stats` が埋め込んだバージョンを返すこと、カメラ未接続なので
+`/healthz` が 503 を返すことを確認します。バージョンの確認に標準出力を使わないのは、
+`-H=windowsgui` の exe が親のコンソールに出力を渡せるかどうかが実行環境によるためで、
+動いているプロセス自身に答えさせる方が確実だからです。
+
+### 手動ビルド
+
+公開リリースを作らずにリリース用の exe を得たい場合 (実機確認用など) は、
+Actions → **Build** → Run workflow を実行し、完了後に Artifacts からダウンロードします。
+`version` を省略すると `0.0.0` になります。
+
+### リリース
+
+バージョンのタグを push すると `release.yml` が動きます。接頭辞 `v` の有無はどちらでも構いません。
+
+```bash
+git tag 0.1.0
+git push origin 0.1.0
+```
+
+GitHub の UI からリリースを作った場合もタグが作られるのでワークフローは動きます。
+その場合はリリースが既に存在するため、**成果物の添付だけ**を行い、リリースノートは
+上書きしません。
+
+対応するタグ形式は `[v]MAJOR.MINOR.PATCH[-プレリリース識別子]` (例: `1.2.3`、`v1.2.3-rc.1`)。
+プレリリース識別子を含むタグは、ワークフローが**リリースを新規作成する場合に限り**
+prerelease として公開されます。ビルドメタデータ (`1.2.3+build.1`) を含むタグは、埋め込まれる
+バージョンとタグが食い違ったまま公開されるのを避けるため、ワークフローの冒頭で拒否します。
+
+リリースには `ffmpeg.exe` を同梱していません。UVC カメラを使う場合はユーザーが用意する
+必要があります (リリースノートにも記載しています)。同梱するかどうかは配布ライセンスの
+判断を伴うため、決めてから対応します。
+
 ## ライセンス
 
 MIT
