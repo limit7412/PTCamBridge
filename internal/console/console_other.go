@@ -2,6 +2,6 @@
 
 package console
 
-// Attach is a no-op away from Windows, where the standard streams are already
-// connected to whatever launched the process.
+// Attach は Windows 以外では何もしません。標準ストリームは、プロセスを起動した
+// ものに最初から繋がっています。
 func Attach() {}

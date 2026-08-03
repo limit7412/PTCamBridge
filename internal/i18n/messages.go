@@ -1,16 +1,15 @@
 package i18n
 
-// The message catalogue.
+// メッセージカタログ。
 //
-// Every key carries both languages. English is the source text, so it is
-// written first and a translation is never allowed to be missing -- a test
-// enforces that, because a half-translated menu is worse than an English one:
-// it reads as a bug rather than as a language the program does not have.
+// すべてのキーが両方の言語を持ちます。英語が原文なので先に書き、翻訳が欠けることは
+// 許しません。テストがそれを強制します。半分だけ翻訳されたメニューは英語のままより
+// 悪く、言語が無いのではなくバグに見えるからです。
 //
-// Format verbs must match between the two. The same test checks that as well,
-// since a %s that becomes a %d turns a menu entry into "%!d(string=uvc)".
+// 書式指定子は両言語で一致していなければなりません。同じテストがそれも確認します。
+// %s が %d になると、メニュー項目が "%!d(string=uvc)" に化けるためです。
 
-// Tray menu entries and their tooltips.
+// トレイのメニュー項目とそのツールチップ。
 const (
 	MenuStatusStarting  Key = "menu.status.starting"
 	MenuStatusTip       Key = "menu.status.tip"
@@ -38,7 +37,7 @@ const (
 	MenuFFmpegProgress  Key = "menu.ffmpeg.progress"
 )
 
-// The one-line status the tray shows, and the states it can be in.
+// トレイが表示する 1 行の状態表示と、取り得る状態。
 const (
 	StatusNoSource     Key = "status.nosource"
 	StatusPaused       Key = "status.paused"
@@ -47,7 +46,7 @@ const (
 	StatusRunning      Key = "status.running"
 )
 
-// The ffmpeg download dialog.
+// ffmpeg のダウンロードダイアログ。
 const (
 	DialogFFmpegTitle     Key = "dialog.ffmpeg.title"
 	DialogFFmpegBody      Key = "dialog.ffmpeg.body"
@@ -55,7 +54,7 @@ const (
 	DialogTitle           Key = "dialog.title"
 )
 
-// Console output from the command line flags.
+// コマンドラインフラグのコンソール出力。
 const (
 	CLICaptureDevices   Key = "cli.capture_devices"
 	CLISerialPorts      Key = "cli.serial_ports"
@@ -69,9 +68,9 @@ const (
 	CLINoSerialPorts    Key = "cli.no_serial_ports"
 )
 
-// The failures a user is expected to do something about. Only these: the rest
-// stay as the English the log records, because nobody can act on "read from
-// COM4: access denied" in either language without the log around it.
+// ユーザーが何かできると想定される失敗。これだけです。残りはログが記録する英語の
+// ままにします。"read from COM4: access denied" は、どちらの言語であってもログの
+// 文脈無しに対処できるものではないからです。
 const (
 	ErrNoCamera Key = "err.no_camera"
 	ErrNoFFmpeg Key = "err.no_ffmpeg"

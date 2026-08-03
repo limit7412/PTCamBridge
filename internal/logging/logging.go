@@ -1,9 +1,8 @@
-// Package logging sets up the application logger and the rotating file it
-// writes to.
+// Package logging は、アプリケーションのロガーと、その書き込み先であるローテー
+// ションするファイルを用意します。
 //
-// Rotation is built in rather than pulled from a dependency: the requirement
-// is a fixed size and generation count, and keeping it here preserves the
-// cgo-free single-binary build.
+// ローテーションは依存に頼らず自前で持っています。要件は固定のサイズと世代数だけ
+// であり、ここに置いておけば cgo 無しの単一バイナリという構成を保てます。
 package logging
 
 import (
@@ -16,30 +15,30 @@ import (
 	"sync"
 )
 
-// Rotation policy: ten megabytes per file, five generations kept.
+// ローテーションの方針。1 ファイル 10 メガバイト、5 世代を保持。
 const (
 	DefaultMaxSize    = 10 << 20
 	DefaultMaxBackups = 5
-	// FileName is the active log file inside the log directory.
+	// FileName は、ログディレクトリ内で現在書き込み中のログファイルです。
 	FileName = "ptcambridge.log"
 )
 
-// Options configures Setup.
+// Options は Setup を設定します。
 type Options struct {
-	// Dir receives the log files. An empty Dir logs only to the console.
+	// Dir はログファイルの置き場所です。空ならコンソールにだけ出します。
 	Dir string
-	// Level is debug, info, warn or error.
+	// Level は debug・info・warn・error のいずれかです。
 	Level string
-	// Console also writes to stderr, which is useful when the bridge is
-	// started from a terminal rather than as a tray application.
+	// Console は標準エラー出力にも書きます。トレイアプリとしてではなく
+	// 端末から起動したときに役立ちます。
 	Console bool
-	// MaxSize and MaxBackups override the rotation policy.
+	// MaxSize と MaxBackups はローテーションの方針を上書きします。
 	MaxSize    int64
 	MaxBackups int
 }
 
-// Setup builds the logger. The returned closer flushes and closes the log
-// file; it is safe to call even when only console logging is active.
+// Setup はロガーを組み立てます。返される closer はログファイルを flush して
+// 閉じます。コンソール出力だけの場合に呼んでも安全です。
 func Setup(opts Options) (*slog.Logger, io.Closer, error) {
 	var writers []io.Writer
 	var closer io.Closer = nopCloser{}
@@ -63,8 +62,8 @@ func Setup(opts Options) (*slog.Logger, io.Closer, error) {
 	return slog.New(handler), closer, nil
 }
 
-// ParseLevel maps a configured level name onto a slog level, falling back to
-// info for anything unrecognised.
+// ParseLevel は、設定されたレベル名を slog のレベルに対応付けます。認識できない
+// ものは info にします。
 func ParseLevel(name string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "debug":
@@ -78,8 +77,8 @@ func ParseLevel(name string) slog.Level {
 	}
 }
 
-// rotatingWriter appends to a file and rolls it over once it passes maxSize,
-// keeping maxBackups older generations as name.1 through name.N.
+// rotatingWriter はファイルに追記し、maxSize を超えたら切り替えます。古い世代は
+// name.1 から name.N として maxBackups 個まで残します。
 type rotatingWriter struct {
 	mu         sync.Mutex
 	path       string
@@ -87,9 +86,9 @@ type rotatingWriter struct {
 	maxBackups int
 	file       *os.File
 	size       int64
-	// closed marks a deliberate shutdown, which is the only reason to stop
-	// accepting writes. A missing file on its own means the last rotation
-	// could not reopen one, and that is recoverable.
+	// closed は意図的な終了を表します。書き込みの受付をやめる理由はこれだけです。
+	// ファイルが無いというだけなら、直前のローテーションが開き直せなかったという
+	// ことであり、それは回復可能です。
 	closed bool
 }
 
@@ -133,15 +132,15 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 	}
 	if w.file != nil && w.size+int64(len(p)) > w.maxSize {
 		if err := w.rotate(); err != nil {
-			// Losing rotation is better than losing the log line.
+			// ローテーションを失う方が、ログ 1 行を失うよりましだ。
 			fmt.Fprintf(os.Stderr, "ptcambridge: log rotation failed: %v\n", err)
 		}
 	}
 	if w.file == nil {
-		// A rotation closed the old file and could not open a new one -- a
-		// full disk, or a scanner holding the file open on Windows. Opening
-		// here is what stops that moment from wedging logging for the rest of
-		// the run, which is what happens if writes only ever fail from then on.
+		// ローテーションが古いファイルを閉じ、新しいファイルを開けなかった —
+		// ディスクが一杯、あるいは Windows でスキャナがファイルを掴んでいる。
+		// ここで開き直すことが、その一瞬のせいで以降ずっとログが詰まるのを
+		// 防いでいる。それをしなければ、書き込みは以後失敗し続ける。
 		if err := w.open(); err != nil {
 			return 0, err
 		}
@@ -151,18 +150,18 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// rotate shifts the existing generations up by one and starts a fresh file.
+// rotate は既存の世代を 1 つずつ繰り上げ、新しいファイルを開始します。
 func (w *rotatingWriter) rotate() error {
-	// Clear the handle whatever Close reports: the descriptor is gone either
-	// way, and leaving it in place would have later writes go to a closed
-	// file instead of taking the reopen path in Write.
+	// Close が何を返そうとハンドルは消す。どちらにせよ記述子は失われており、
+	// 残しておくと以降の書き込みが Write の開き直し経路に入らず、閉じた
+	// ファイルへ向かってしまう。
 	err := w.file.Close()
 	w.file = nil
 	if err != nil {
 		return err
 	}
 
-	// Drop the oldest, then shift each remaining generation up.
+	// 最古を捨て、残りの世代を 1 つずつ繰り上げる。
 	_ = os.Remove(fmt.Sprintf("%s.%d", w.path, w.maxBackups))
 	for i := w.maxBackups - 1; i >= 1; i-- {
 		from := fmt.Sprintf("%s.%d", w.path, i)
@@ -172,14 +171,14 @@ func (w *rotatingWriter) rotate() error {
 		_ = os.Rename(from, fmt.Sprintf("%s.%d", w.path, i+1))
 	}
 	if err := os.Rename(w.path, w.path+".1"); err != nil && !os.IsNotExist(err) {
-		// Reopen regardless so logging keeps working.
+		// いずれにせよ開き直し、ログを動かし続ける。
 		_ = w.open()
 		return err
 	}
 	return w.open()
 }
 
-// Close flushes and closes the underlying file.
+// Close は下層のファイルを flush して閉じます。
 func (w *rotatingWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

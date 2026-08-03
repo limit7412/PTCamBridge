@@ -66,7 +66,7 @@ func TestSetupHonoursTheLevel(t *testing.T) {
 	}
 }
 
-// Rotation keeps the log bounded on a bridge that runs for days.
+// ローテーションは、何日も動き続けるブリッジのログを一定量に抑える。
 func TestRotationKeepsBoundedGenerations(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName)
@@ -89,7 +89,7 @@ func TestRotationKeepsBoundedGenerations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
-	// The active file plus at most maxBackups generations.
+	// 現在書き込み中のファイルと、多くても maxBackups 個の世代。
 	if len(entries) > 4 {
 		names := make([]string, 0, len(entries))
 		for _, e := range entries {
@@ -108,8 +108,8 @@ func TestRotationKeepsBoundedGenerations(t *testing.T) {
 	}
 }
 
-// Restarting must append rather than truncate, or a crash loop would erase the
-// evidence of the previous run.
+// 再起動時は切り詰めではなく追記でなければならない。さもないとクラッシュを
+// 繰り返す状況で、前回の実行の証拠が消える。
 func TestRotatingWriterAppendsOnReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 
@@ -161,8 +161,8 @@ func TestWriteAfterCloseDoesNotPanic(t *testing.T) {
 	}
 }
 
-// A rotation that closes the old file and cannot open a new one must not wedge
-// logging for the rest of the run: the next write opens the file again.
+// 古いファイルを閉じたあと新しいファイルを開けなかったローテーションが、以降の
+// ログを詰まらせてはいけない。次の書き込みがファイルを開き直す。
 func TestRotatingWriterRecoversFromAFailedRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ptcambridge.log")
 	w, err := newRotatingWriter(path, 1<<20, 3)
@@ -171,8 +171,8 @@ func TestRotatingWriterRecoversFromAFailedRotation(t *testing.T) {
 	}
 	defer w.Close()
 
-	// Stand in for a rotation whose reopen failed, which is the state a full
-	// disk or a file lock leaves behind.
+	// 開き直しに失敗したローテーションの代わり。ディスク満杯やファイルロックが
+	// 残していく状態。
 	w.mu.Lock()
 	_ = w.file.Close()
 	w.file, w.size = nil, 0
@@ -190,7 +190,7 @@ func TestRotatingWriterRecoversFromAFailedRotation(t *testing.T) {
 	}
 }
 
-// Close is the one reason to stop accepting writes, and it has to stick.
+// 書き込みの受付をやめる理由は Close だけであり、それは覆ってはならない。
 func TestRotatingWriterRejectsWritesAfterClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ptcambridge.log")
 	w, err := newRotatingWriter(path, 1<<20, 3)

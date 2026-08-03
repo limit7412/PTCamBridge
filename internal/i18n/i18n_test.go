@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// A half-translated menu reads as a bug rather than as a language the program
-// does not have, so every key carries every language. The fallback in S exists
-// for safety, not as somewhere to leave work unfinished.
+// 半分だけ翻訳されたメニューは、言語が無いのではなくバグに見える。だからすべての
+// キーがすべての言語を持つ。S のフォールバックは安全のためにあるのであって、
+// やりかけを置いておく場所ではない。
 func TestEveryMessageHasEveryLanguage(t *testing.T) {
 	for key, forms := range messages {
 		for _, lang := range []Lang{English, Japanese} {
@@ -19,12 +19,12 @@ func TestEveryMessageHasEveryLanguage(t *testing.T) {
 	}
 }
 
-// verbs finds the format placeholders in a message. %% is an escaped percent
-// and takes no argument, so it is not one.
+// verbs はメッセージ中の書式指定子を探す。%% はエスケープされたパーセントで引数を
+// 取らないので、これには数えない。
 var verbs = regexp.MustCompile(`%[-+# 0-9.*]*[a-zA-Z]`)
 
-// A %s that became a %d in translation does not fail to build; it renders as
-// "%!d(string=uvc)" in front of the user, in the language they chose.
+// 翻訳の過程で %s が %d になってもビルドは通る。ユーザーの目の前に、本人が選んだ
+// 言語で "%!d(string=uvc)" と表示されるだけ。
 func TestTranslationsTakeTheSameArguments(t *testing.T) {
 	for key, forms := range messages {
 		want := verbs.FindAllString(forms[English], -1)
@@ -44,7 +44,7 @@ func TestTranslationsTakeTheSameArguments(t *testing.T) {
 }
 
 func TestPrinterFallsBackToEnglish(t *testing.T) {
-	// A language nobody wrote text for still has to render something.
+	// 誰もテキストを書いていない言語でも、何かは表示されなければならない。
 	p := NewPrinter(Lang("de"))
 	if got := p.S(MenuQuit); got != "Quit" {
 		t.Errorf("S(MenuQuit) = %q, want the English text", got)
@@ -54,8 +54,8 @@ func TestPrinterFallsBackToEnglish(t *testing.T) {
 	}
 }
 
-// An unknown key is rendered as itself: visible at a glance, rather than an
-// empty menu entry that looks like a rendering bug.
+// 未知のキーはキー自身として表示する。描画のバグに見える空のメニュー項目ではなく、
+// 一目で分かる形にする。
 func TestPrinterShowsUnknownKeys(t *testing.T) {
 	if got := NewPrinter(Japanese).S(Key("menu.nothing")); got != "menu.nothing" {
 		t.Errorf("S of an unknown key = %q, want the key itself", got)
@@ -84,12 +84,12 @@ func TestParseLang(t *testing.T) {
 		{in: "ja", want: Japanese},
 		{in: "JA", want: Japanese},
 		{in: " en ", want: English},
-		// Empty and "auto" both mean "ask the system", which the environment
-		// above pins to English for this test.
+		// 空と "auto" はどちらも「システムに従う」を意味する。上の環境変数に
+		// より、このテストではそれが英語に固定される。
 		{in: "", want: English},
 		{in: "auto", want: English},
-		// Not silently English: someone who wrote this meant Japanese and has
-		// to be told it did not take.
+		// 黙って英語にはしない。こう書いた人は日本語のつもりであり、それが
+		// 効いていないことを伝えなければならない。
 		{in: "jp", wantErr: true},
 		{in: "japanese", wantErr: true},
 	}
@@ -132,8 +132,8 @@ func TestFromTag(t *testing.T) {
 	}
 }
 
-// Detection has to honour the environment, which is the only way to try the
-// other language without changing a system setting.
+// 判定は環境変数を尊重しなければならない。システム設定を変えずにもう一方の言語を
+// 試せる唯一の手段だから。
 func TestDetectReadsTheEnvironment(t *testing.T) {
 	t.Setenv("LC_ALL", "")
 	t.Setenv("LC_MESSAGES", "")
@@ -142,7 +142,7 @@ func TestDetectReadsTheEnvironment(t *testing.T) {
 		t.Errorf("Detect() = %q, want Japanese from LANG", got)
 	}
 
-	// LC_ALL wins over LANG, the way the C library orders them.
+	// C ライブラリの順序どおり、LC_ALL が LANG に勝つ。
 	t.Setenv("LC_ALL", "en_US.UTF-8")
 	if got := Detect(); got != English {
 		t.Errorf("Detect() = %q, want LC_ALL to win", got)

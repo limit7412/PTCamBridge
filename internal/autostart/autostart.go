@@ -1,33 +1,32 @@
-// Package autostart registers PTCamBridge to launch when the user signs in.
+// Package autostart は、サインイン時に PTCamBridge が起動するよう登録します。
 //
-// On Windows that means an entry under the per-user Run key, which needs no
-// elevation. Everything else reports that it is unsupported rather than
-// pretending to succeed.
+// Windows ではユーザーごとの Run キーの下にエントリを作ります。昇格は不要です。
+// それ以外のプラットフォームでは、成功したふりをせず未対応であると報告します。
 package autostart
 
 import "errors"
 
-// ErrUnsupported is returned on platforms with no autostart integration.
+// ErrUnsupported は、自動起動の実装が無いプラットフォームで返されます。
 var ErrUnsupported = errors.New("autostart: not supported on this platform")
 
-// EntryName is the value name written under the Run key.
+// EntryName は、Run キーの下に書く値の名前です。
 const EntryName = "PTCamBridge"
 
-// Enabled reports whether the autostart entry exists and matches what Enable
-// would write for the same configPath.
+// Enabled は、自動起動のエントリが存在し、同じ configPath に対して Enable が
+// 書くであろう内容と一致しているかを返します。
 func Enabled(configPath string) (bool, error) { return enabled(configPath) }
 
-// Enable registers the current executable to start at sign-in.
+// Enable は、現在の実行ファイルをサインイン時に起動するよう登録します。
 //
-// configPath is the settings file the user named on the command line, and is
-// written into the registered command so the next sign-in starts with the same
-// settings. Pass an empty string when no path was given, which leaves the
-// entry using the default per-user location.
+// configPath はユーザーがコマンドラインで指定した設定ファイルで、登録するコマンドに
+// 書き込みます。次のサインインが同じ設定で始まるようにするためです。指定が無かった
+// 場合は空文字列を渡してください。その場合エントリは既定のユーザーごとの場所を
+// 使います。
 func Enable(configPath string) error { return enable(configPath) }
 
-// Disable removes the autostart entry. Removing an entry that is not there
-// succeeds.
+// Disable は自動起動のエントリを削除します。存在しないエントリの削除は成功と
+// して扱います。
 func Disable() error { return disable() }
 
-// Supported reports whether this platform has an autostart implementation.
+// Supported は、このプラットフォームに自動起動の実装があるかを返します。
 func Supported() bool { return supported }
