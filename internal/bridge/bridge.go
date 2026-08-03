@@ -1,6 +1,6 @@
-// Package bridge wires a capture source to the frame hub and owns the
-// lifecycle of both, so the tray menu and the management API can change the
-// source at runtime without either of them knowing how a driver is built.
+// Package bridge は、キャプチャソースをフレーム hub に繋ぎ、その両方の生存期間を
+// 受け持ちます。これにより、トレイメニューと管理 API は、ドライバがどう作られるかを
+// 知らないまま実行時にソースを変更できます。
 package bridge
 
 import (
@@ -23,71 +23,68 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
-// undecodableRecheckInterval is how often the pump tries to decode again while
-// nothing from a source has decoded yet. Frames in between are dropped: they
-// come from an upstream that has not yet produced a usable image, and decoding
-// every one of them at capture rate would cost more than the answer is worth.
+// undecodableRecheckInterval は、そのソースからまだ 1 枚もデコードできていない間に、
+// pump がデコードを再試行する間隔です。その間のフレームは捨てます。使える画像を
+// まだ 1 枚も出していない上流から来たものであり、それをキャプチャ速度で全部デコード
+// するのは、得られる答えに見合わないからです。
 var undecodableRecheckInterval = 500 * time.Millisecond
 
-// frameQueueDepth is the slot between the driver and the transform step. One
-// frame is enough: the hub past it never blocks, and a deeper queue would only
-// add latency.
+// frameQueueDepth は、ドライバと変換段の間の枠です。1 フレームで足ります。その先の
+// hub は決してブロックしませんし、キューを深くしても遅延が増えるだけです。
 const frameQueueDepth = 1
 
-// startVerifyTimeout is how long Apply waits for a new source to prove itself
-// before giving up on it.
+// startVerifyTimeout は、Apply が新しいソースの実力を待ち、諦めるまでの時間です。
 //
-// The proof is the first frame, not the absence of an early error: a driver
-// reconnects on its own, so "has not failed yet" says nothing.
+// 実力の証明は最初のフレームであって、早々にエラーが出ないことではありません。
+// ドライバは自力で再接続するので、「まだ失敗していない」ことは何も語りません。
 //
-// The window has to outlast a whole first attempt, or a source that was going
-// to work gets rolled back for being slow. The two worst cases are close to
-// each other:
+// この窓は最初の試行 1 回分より長くなければなりません。さもないと、動くはずだった
+// ソースが遅いというだけで巻き戻されます。最悪のケースは 2 つあり、いずれも近い値
+// です。
 //
-//   - MJPEG spends its connect timeout on each of dial, TLS and response
-//     headers, then its stall timeout waiting for the first frame: 5s x 4.
-//   - UVC spends its stall timeout on the first ffmpeg, and a camera with no
-//     native MJPEG then spends a backoff and a second one: 10s + 1s + 10s.
+//   - MJPEG は接続タイムアウトを dial・TLS・応答ヘッダーのそれぞれに費やし、続いて
+//     最初のフレームを待つ停滞タイムアウトを費やす。5 秒 x 4。
+//   - UVC は最初の ffmpeg に停滞タイムアウトを費やし、ネイティブ MJPEG を持たない
+//     カメラはさらにバックオフと 2 回目を費やす。10 秒 + 1 秒 + 10 秒。
 //
-// Nothing here costs a working source anything. It returns the moment a frame
-// reaches the hub, so this only runs long when the answer is going to be no.
+// 動くソースがこれによって何かを払うことはありません。フレームが hub に届いた瞬間に
+// 返るので、長く走るのは答えが「否」になるときだけです。
 var startVerifyTimeout = 30 * time.Second
 
-// StreamConfigurator receives the parts of a settings change that the HTTP
-// server owns and must adopt for itself.
+// StreamConfigurator は、設定変更のうち HTTP サーバが受け持ち、自分で適用しなければ
+// ならない部分を受け取ります。
 type StreamConfigurator interface {
 	SetStreamOptions(encoder core.MultipartEncoder, holdOnSourceLoss bool)
 }
 
-// Bridge owns the active source and republishes its frames on the hub.
+// Bridge は稼働中のソースを所有し、そのフレームを hub へ配信し直します。
 type Bridge struct {
 	hub    *hub.Hub
 	status *status.Tracker
 	log    *slog.Logger
 
-	// cfgPath is where Apply persists settings; empty disables persistence.
+	// cfgPath は Apply が設定を保存する先です。空なら保存しません。
 	cfgPath string
 
-	// persistBase is what the settings file said, before the environment and
-	// the command line were layered on. Saving starts from this so a
-	// -device or a PTCAMBRIDGE_* meant for one run is not written back as if
-	// the user had chosen it permanently.
+	// persistBase は、環境変数とコマンドラインを重ねる前に設定ファイルが述べていた
+	// 内容です。保存はここから始めます。一度きりの実行のための -device や
+	// PTCAMBRIDGE_* が、ユーザーが恒久的に選んだかのように書き戻されないためです。
 	persistBase config.Config
 
-	// unsaved is a write that never reached the file. It is nil while the
-	// file is up to date. Keeping it means a retry writes the settings that
-	// were lost rather than diffing against a running configuration that
-	// already has them and finding nothing to do.
+	// unsaved は、ファイルまで届かなかった書き込みです。ファイルが最新である間は
+	// nil です。これを保持していれば、再試行は失われた設定を書けます。そうしないと、
+	// 既にその値を持っている動作中の設定と差分を取って「することが無い」と判断して
+	// しまいます。
 	unsaved *pendingSave
 
-	// stream is told about settings the HTTP server has to reapply itself.
-	// It is set once during wiring, before anything can call Apply.
+	// stream には、HTTP サーバが自分で適用し直す必要のある設定を伝えます。組み立て
+	// 時に一度だけ設定し、それは何かが Apply を呼べるようになる前のことです。
 	stream StreamConfigurator
 
-	// view mirrors the state the tray polls once a second. Reading that
-	// through mu would freeze the tray's whole event loop for the length of a
-	// slow Apply -- up to startVerifyTimeout -- so the user could not even
-	// quit while a failing source was being given its chance.
+	// view は、トレイが 1 秒ごとに読む状態の写しです。これを mu 越しに読むと、
+	// 遅い Apply の間 — 最長で startVerifyTimeout — トレイのイベントループ全体が
+	// 凍りつき、失敗しつつあるソースに機会を与えている最中、ユーザーは終了する
+	// ことすらできなくなります。
 	view atomic.Pointer[view]
 
 	mu      sync.Mutex
@@ -126,63 +123,61 @@ type Bridge struct {
 	proven bool
 }
 
-// pendingSave is a settings write that failed and still has to happen.
+// pendingSave は、失敗してまだ行われていない設定の書き込みです。
 //
-// Both halves are needed. want is the whole configuration, so it can be
-// written as-is. from is what the file held when this pending write was first
-// built, and it is the only thing that says which parts of want are the
-// bridge's own doing: the leaves where they differ. Everything else in want is
-// just a copy of the file at that moment, and laying that back over a file the
-// user has edited since would undo the edit.
+// 両方の要素が必要です。want は設定全体なので、そのまま書き出せます。from は、この
+// 保留中の書き込みが最初に組み立てられた時点でファイルが持っていた内容であり、
+// want のどの部分がブリッジ自身の意図によるものか — 両者が異なる葉 — を示す唯一の
+// 手がかりです。want のそれ以外は、その時点のファイルの写しでしかなく、それを
+// その後ユーザーが編集したファイルの上に敷き直せば、編集を取り消すことになります。
 type pendingSave struct {
 	want config.Config
 	from config.Config
 }
 
-// view is the lock-free copy of what callers read but never change.
+// view は、呼び出し側が読むだけで決して変更しないもののロックフリーな写しです。
 type view struct {
 	cfg    config.Config
 	paused bool
 }
 
-// provenLocked reports whether the current settings have a working source
-// behind them: one that started, and that has not stopped on its own since.
-// The caller holds mu.
+// provenLocked は、現在の設定の背後に動くソースがあるかどうかを返します。起動に
+// 成功し、その後自力で止まっていないソースのことです。呼び出し側が mu を保持します。
 func (b *Bridge) provenLocked() bool {
 	return b.proven && !b.died.Load()
 }
 
-// publishView refreshes the lock-free copy. The caller holds mu.
+// publishView はロックフリーな写しを更新します。呼び出し側が mu を保持します。
 func (b *Bridge) publishView() {
 	b.view.Store(&view{cfg: b.cfg, paused: b.paused})
 }
 
-// New builds a bridge for the given settings. Start must be called to begin
-// capturing.
+// New は、渡された設定でブリッジを組み立てます。キャプチャを始めるには Start を
+// 呼ぶ必要があります。
 func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log *slog.Logger) *Bridge {
 	b := &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg}
 	b.publishView()
 	return b
 }
 
-// SetPersistBase records the settings as the file has them, which is what
-// saving builds on. Without it the effective settings are saved verbatim, and
-// a one-off override becomes permanent the first time anything calls Apply.
+// SetPersistBase は、ファイルが持っているとおりの設定を記録します。保存はこれを
+// 土台にします。これが無いと、実効設定がそのまま保存され、一度きりの上書きが、
+// 何かが Apply を呼んだ最初の瞬間に恒久的なものになります。
 func (b *Bridge) SetPersistBase(cfg config.Config) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.persistBase = cfg
 }
 
-// SetStreamConfigurator registers the HTTP server so that Apply can hand it the
-// stream settings it owns. It must be called during wiring, before the
-// management API or the tray can reach Apply.
+// SetStreamConfigurator は HTTP サーバを登録し、Apply がそちらの受け持つストリーム
+// 設定を渡せるようにします。組み立て時、管理 API やトレイが Apply に到達できるように
+// なる前に呼ぶ必要があります。
 func (b *Bridge) SetStreamConfigurator(sc StreamConfigurator) {
 	b.stream = sc
 }
 
-// Start begins capturing and keeps doing so until ctx is cancelled. The
-// context also bounds every source started later through Apply or Switch.
+// Start はキャプチャを開始し、ctx がキャンセルされるまで続けます。このコンテキストは、
+// 後から Apply や Switch で起動されるすべてのソースの生存期間も区切ります。
 func (b *Bridge) Start(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -191,35 +186,35 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return errors.New("bridge: already started")
 	}
 	b.root = ctx
-	// Startup does not verify: a camera that is not plugged in yet has to be
-	// picked up when it appears, and tearing the driver down would stop that.
+	// 起動時は検証しない。まだ挿さっていないカメラは、現れたときに拾えなければ
+	// ならず、ドライバを畳んでしまうとそれができなくなる。
 	return b.startLocked()
 }
 
-// Stop halts capture and waits for the driver to finish releasing its device.
+// Stop はキャプチャを止め、ドライバがデバイスを解放し終えるまで待ちます。
 func (b *Bridge) Stop() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stopLocked()
 }
 
-// Snapshot returns the settings currently in effect.
+// Snapshot は現在有効な設定を返します。
 //
-// It reads the lock-free copy, so it stays answerable while a settings change
-// is in progress. A caller that needs the settings and the change to be one
-// operation must hold mu itself; see Switch.
+// ロックフリーな写しを読むので、設定変更の最中でも答えられます。設定の読み取りと
+// 変更を 1 つの操作にする必要がある呼び出し側は、自身で mu を保持しなければなりません。
+// Switch を参照。
 func (b *Bridge) Snapshot() config.Config {
 	return b.view.Load().cfg
 }
 
-// Apply adopts new settings, restarting the source, and persists them when a
-// config path was provided. The settings are only kept if the new source
-// starts, so a bad device name does not leave the bridge with nothing running.
+// Apply は新しい設定を採用してソースを再起動し、設定ファイルのパスが与えられて
+// いれば保存します。設定を残すのは新しいソースが起動できた場合だけなので、誤った
+// デバイス名を渡してもブリッジが何も動かない状態にはなりません。
 //
-// Settings that only take effect at startup are rejected rather than accepted
-// and quietly ignored; see restartRequired. A failure to persist is reported
-// as an error wrapping config.ErrNotSaved, because the caller has to know that
-// what it just changed will not survive a restart.
+// 起動時にしか効かない設定は、受け入れて黙って無視するのではなく拒否します。
+// restartRequired を参照。保存の失敗は config.ErrNotSaved を包んだエラーとして
+// 報告します。今変更したものが再起動を越えないことを、呼び出し側が知る必要が
+// あるからです。
 func (b *Bridge) Apply(ctx context.Context, cfg config.Config) error {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
@@ -231,61 +226,56 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config) error {
 	return b.applyLocked(ctx, cfg)
 }
 
-// applyLocked is Apply with mu already held, so that a caller which has to
-// read the current settings first can do the whole read-modify-apply without
-// letting anything in between. The caller has already normalised and
-// validated cfg.
+// applyLocked は mu を保持済みの Apply です。先に現在の設定を読む必要のある
+// 呼び出し側が、読み取り・変更・適用の全体を、間に何も挟ませずに行えるようにする
+// ためのものです。cfg の正規化と検証は呼び出し側が済ませています。
 func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
-	// Waiting for the lock can take as long as another caller's whole
-	// verification, so the request that got here may already be gone. Nothing
-	// below this point is free to happen on its behalf: a change that only
-	// touches the server settings never reaches the verification and would
-	// otherwise be applied and written out for a caller that was told the
-	// request timed out.
+	// ロック待ちは、別の呼び出し側の検証まるごと分の長さになり得るので、ここへ
+	// 辿り着いたリクエストは既に居なくなっているかもしれない。この先で起きることは
+	// どれも、そのリクエストの代わりに勝手にやってよいものではない。サーバ設定
+	// だけを触る変更は検証に到達しないので、そうしなければ、タイムアウトを告げ
+	// られた呼び出し側のために適用され書き出されてしまう。
 	if ctx != nil && ctx.Err() != nil {
 		return fmt.Errorf("bridge: the request ended before its change was applied: %w", ctx.Err())
 	}
 
 	previous := b.cfg
-	// Read before anything is torn down: from here on the flag tracks the
-	// settings being tried, and whether the ones being replaced were working
-	// is the only thing that says a revert can succeed.
+	// 何かを畳む前に読む。ここから先このフラグは「試している設定」を追うことに
+	// なるし、置き換えられる側が動いていたかどうかだけが、巻き戻しが成功し得ると
+	// 言える根拠だから。
 	provenBefore := b.provenLocked()
 	if err := restartRequired(previous, cfg); err != nil {
 		return err
 	}
 
-	// Apply's guarantee is that settings are only kept if the new source
-	// starts, and while paused nothing can start: the most that could be
-	// checked is that a driver object can be constructed, which says nothing
-	// about the device being there. Accepting the change anyway would trade a
-	// known-good configuration for an unproven one and write it out, and
-	// resuming does not verify either -- a camera plugged in after sign-in has
-	// to be picked up, so resume leaves the driver retrying exactly as startup
-	// does. Saying so is better than any of that.
+	// Apply の保証は「新しいソースが起動できた場合にのみ設定を残す」ことだが、
+	// 一時停止中は何も起動できない。確認できるのはせいぜいドライバのオブジェクトを
+	// 構築できることまでで、それはデバイスの存在について何も語らない。それでも変更を
+	// 受け入れると、既知の良い設定を未検証の設定と引き換えにして書き出すことになる。
+	// resume も検証はしない。サインイン後に挿されたカメラを拾う必要があるので、
+	// resume は起動時とまったく同じくドライバに再試行させるだけ。だったら、そう
+	// 言ってしまう方がどれよりましだ。
 	//
-	// All of which assumes there is a known-good configuration. With none --
-	// nothing ever started, or what did has since failed -- the refusal
-	// protects nothing and only takes away the one move left: picking a
-	// different source. Somebody who pauses a bridge that is already down
-	// would have to edit the settings file to get it back.
+	// 以上はすべて「既知の良い設定がある」ことを前提にしている。それが無い場合 —
+	// 何も起動していないか、起動したものが既に失敗しているか — この拒否は何も守らず、
+	// 残された唯一の手 (別のソースを選ぶこと) を奪うだけになる。既に落ちている
+	// ブリッジを一時停止した人は、設定ファイルを編集しなければ戻せなくなる。
 	if b.paused && b.provenLocked() && !captureUnchanged(previous, cfg) {
 		return errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
 	}
 
-	// Build the encoder before anything is torn down: an unusable boundary
-	// should not cost the user the source that is running right now.
+	// 何かを畳む前にエンコーダを組み立てる。使えない boundary のせいで、今動いて
+	// いるソースをユーザーから奪うべきではない。
 	encoder, err := core.NewMultipartEncoder(cfg.Server.Boundary, cfg.StreamHeaders())
 	if err != nil {
 		return fmt.Errorf("server.boundary: %w", err)
 	}
 
 	if captureUnchanged(previous, cfg) && b.captureAsExpectedLocked() {
-		// Only the server-side settings moved, so the camera is left alone.
-		// Restarting it would interrupt the stream for nothing, and the
-		// verification below would reject the change outright while the camera
-		// happened to be reconnecting -- including hold_on_source_loss, which
-		// is the setting for exactly that situation.
+		// 動いたのはサーバ側の設定だけなので、カメラには触れない。再起動すれば
+		// 何の得も無くストリームが途切れるし、カメラがたまたま再接続中であれば
+		// 下の検証が変更を丸ごと拒否してしまう。まさにその状況のための設定である
+		// hold_on_source_loss さえも。
 		b.cfg = cfg
 		b.publishView()
 	} else {
@@ -298,19 +288,17 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 			b.cfg = previous
 			b.publishView()
 
-			// The previous source is put back without being made to prove
-			// itself again. That is right when it was working, and it is
-			// still worth doing when it was not: tearing the new source down
-			// cleared the status, and this is what puts the old source and
-			// the reason it was not running back on the tray and /healthz.
-			// Skipping it would answer a failed camera change by replacing a
-			// precise complaint with "no source".
+			// 元のソースは、改めて実力を示させることなく戻す。動いていた場合は
+			// それが正しいし、動いていなかった場合もやる価値がある。新しいソースを
+			// 畳んだ時点でステータスは消えており、古いソースと、それが動いていな
+			// かった理由をトレイと /healthz に戻すのがこれだから。省略すれば、
+			// 失敗したカメラ変更への答えとして、具体的な訴えを「ソース無し」に
+			// 置き換えることになる。
 			if revertErr := b.startLocked(); revertErr != nil {
 				if !provenBefore {
-					// It was not running before this change either, so this
-					// second failure is not news and has nothing to do with
-					// what the caller asked for. Reporting the pair of them
-					// buries the one that does.
+					// この変更の前も動いていなかったので、この 2 つ目の失敗は
+					// 新しい知らせではないし、呼び出し側が求めたこととは無関係。
+					// 2 つ並べて報告すれば、関係のある方が埋もれる。
 					b.log.Warn("nothing is capturing: the settings in place before this change had not started a source either", "error", revertErr)
 					return err
 				}
@@ -325,13 +313,12 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	}
 
 	if b.cfgPath != "" {
-		// Changes are merged onto whatever is still waiting to be written, not
-		// onto the file's last known contents. After a failed save the two are
-		// not the same, and building on the file would drop the earlier change
-		// on the floor -- including when the caller reacts to the error by
-		// sending the very same settings again, which diffs to nothing against
-		// the running configuration and would otherwise rewrite the stale file
-		// and report success.
+		// 変更を重ねる先は、ファイルの最後に判明している内容ではなく、まだ書き
+		// 込みを待っているものの方。保存に失敗した後、この 2 つは同じではないし、
+		// ファイルを土台にすると先の変更を取り落とす。呼び出し側がエラーを受けて
+		// まったく同じ設定を送り直してきた場合も同様で、それは動作中の設定との
+		// 差分が無いため、そうしなければ古いファイルを書き直して成功を報告する
+		// ことになる。
 		base, baseErr := b.saveBaseLocked()
 		saved := mergeChanges(base, previous, cfg)
 		err := baseErr
@@ -339,10 +326,10 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 			err = config.Save(b.cfgPath, saved)
 		}
 		if err != nil {
-			// The running configuration is already correct, so nothing is torn
-			// down; the caller is told so it can say the change is temporary.
-			// The pending write is kept so a retry, or the next change, writes
-			// it once the file can be written again.
+			// 動作中の設定は既に正しいので何も畳まない。呼び出し側には伝える。
+			// 変更が一時的なものであると言えるようにするため。保留中の書き込みは
+			// 保持しておき、ファイルが再び書けるようになったときに、再試行か次の
+			// 変更がそれを書く。
 			b.holdUnsavedLocked(base, previous, cfg)
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
 			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
@@ -353,19 +340,17 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	return nil
 }
 
-// captureAsExpectedLocked reports whether the capture is in the state the
-// current settings ask for, which is what makes leaving it alone safe.
+// captureAsExpectedLocked は、キャプチャが現在の設定の求める状態にあるかを返します。
+// それが、手を触れずにおいて安全である根拠です。
 //
-// A driver can stop on its own: Run returns a FatalError for something
-// retrying cannot fix, such as an MJPEG upstream answering 404 or ffmpeg not
-// being on disk yet. Nothing restarts it, and the settings that produced it
-// are still the ones in b.cfg. Re-selecting that same source once the cause is
-// dealt with is the obvious way to recover, and skipping the restart because
-// the settings did not change would answer that with success while /healthz
-// stayed at 503.
+// ドライバは自力で止まることがあります。404 を返す MJPEG の上流や、まだディスクに
+// 無い ffmpeg のように、再試行では直らないものに対して Run は FatalError を返します。
+// それを再起動するものは無く、それを生んだ設定は b.cfg にそのまま残っています。原因に
+// 対処したうえで同じソースを選び直すのが、明らかな復帰の手順です。設定が変わって
+// いないからと再起動を省けば、/healthz が 503 のままなのに成功を返すことになります。
 //
-// Paused, stopped and not-yet-started all count as expected: nothing is meant
-// to be running, so there is nothing to put right.
+// 一時停止中・停止済み・未起動は、いずれも「想定どおり」に数えます。動いているべき
+// ものが無いのだから、正すべきものも無いからです。
 func (b *Bridge) captureAsExpectedLocked() bool {
 	if b.root == nil || b.paused || b.root.Err() != nil {
 		return true
@@ -375,61 +360,57 @@ func (b *Bridge) captureAsExpectedLocked() bool {
 	}
 	select {
 	case <-b.stopped:
-		// Both capture goroutines have exited.
+		// キャプチャの goroutine が両方とも終了している。
 		return false
 	default:
 		return true
 	}
 }
 
-// holdUnsavedLocked records a change that could not be written, so a later
-// save can still make it.
+// holdUnsavedLocked は、書けなかった変更を記録します。後の保存がそれを果たせる
+// ようにするためです。
 //
-// A pending write already in hand is extended in place rather than rebuilt
-// from the file. Its basis has to stay where it was: it is what separates the
-// bridge's own changes from the file contents that happen to be sitting in
-// want, and moving it forward would fold anything the user edited in the
-// meantime into the set of values the bridge intends to write back.
+// 既に手元にある保留中の書き込みは、ファイルから作り直さずその場で拡張します。その
+// 基点は動かしてはいけません。それこそが、ブリッジ自身の変更と、たまたま want に
+// 入っているファイルの内容とを分けているものであり、前へ動かせば、その間にユーザーが
+// 編集したものまで、ブリッジが書き戻すつもりの値の集合に畳み込んでしまいます。
 func (b *Bridge) holdUnsavedLocked(base, previous, cfg config.Config) {
 	if b.unsaved != nil {
 		b.unsaved.want = mergeChanges(b.unsaved.want, previous, cfg)
 		return
 	}
-	// base is the file as it was just read, so the difference between it and
-	// what this change produces is exactly what the bridge is asking for. When
-	// the read failed it is the last known contents instead, which is the best
-	// guess available and no worse than the alternative of writing nothing.
+	// base は今読んだままのファイルなので、それとこの変更が生むものとの差が、
+	// そのままブリッジの求めているもの。読み取りに失敗した場合は最後に判明して
+	// いる内容が入る。得られる中では最善の推測であり、何も書かないという代案より
+	// 悪くはない。
 	b.unsaved = &pendingSave{want: mergeChanges(base, previous, cfg), from: base}
 }
 
-// saveBaseLocked returns what the next save should build on: the settings file
-// as it stands right now, plus anything an earlier save failed to write.
+// saveBaseLocked は、次の保存が土台にすべきものを返します。今この瞬間の設定
+// ファイルと、以前の保存が書き損ねたものを合わせたものです。
 //
-// Re-reading matters because the file is not only written from here. The tray
-// offers "Edit settings", and the settings that need a restart can only be
-// changed that way, so a user who edits server.listen and then touches
-// anything in the tray before restarting would have had that edit written back
-// over from a base captured at startup.
+// 読み直しが効いてくるのは、ファイルを書くのがここだけではないからです。トレイには
+// 「設定を編集」があり、再起動を要する設定はその方法でしか変えられません。つまり
+// server.listen を編集した後、再起動する前にトレイで何かを触ったユーザーは、起動時に
+// 捉えた基点によってその編集を上書きされてしまいます。
 //
-// A file that exists but cannot be read or parsed is an error rather than a
-// reason to fall back: the likeliest way to get one is the user part way
-// through editing it, and writing over that would destroy the edit to save a
-// change that is already in effect and can be written later.
+// 存在するのに読めない、あるいは解析できないファイルは、フォールバックの理由では
+// なくエラーです。そうなる最もありがちな経緯はユーザーが編集の途中であることで、
+// その上に書けば、既に有効になっていて後からでも書ける変更を保存するために、編集を
+// 破壊することになります。
 //
-// A file that is not there at all is different. Nothing is being lost, so the
-// last known contents are the right base and Save recreates the file from
-// them.
-// A read failure is reported but does not skip the pending write: the caller
-// builds the next pending write from what comes back, and a base without the
-// earlier changes in it would quietly drop them. Two changes made while the
-// file is unparsable would otherwise leave only the second one to be written
-// when it can be read again, because the first is already in the running
-// configuration and so no longer shows up as a difference.
+// そもそもファイルが無い場合は話が違います。失われるものは無いので、最後に判明して
+// いる内容が正しい基点であり、Save はそこからファイルを作り直します。
+// 読み取りの失敗は報告しますが、保留中の書き込みを飛ばしはしません。呼び出し側は
+// 返ってきたものから次の保留中の書き込みを組み立てるので、以前の変更を含まない
+// 基点はそれらを黙って落とします。そうしないと、ファイルが解析できない間に行われた
+// 2 つの変更は、再び読めるようになったとき 2 つ目しか書かれません。1 つ目は既に
+// 動作中の設定に入っており、もはや差分として現れないからです。
 func (b *Bridge) saveBaseLocked() (config.Config, error) {
-	// The last thing known about the file, in order of freshness. A pending
-	// write recorded what the file held when it was built, which is newer than
-	// the startup snapshot -- and it is what a recreated file has to be built
-	// from, or an edit made before the file went missing comes back undone.
+	// ファイルについて分かっている最後のもの。新しい順。保留中の書き込みは、それが
+	// 組み立てられた時点でファイルが持っていた内容を記録しており、起動時の写しより
+	// 新しい。そして作り直すファイルはそこから組み立てなければならない。さもないと、
+	// ファイルが消える前に行われた編集が取り消された形で戻ってくる。
 	base := b.persistBase
 	if b.unsaved != nil {
 		base = b.unsaved.from
@@ -444,28 +425,27 @@ func (b *Bridge) saveBaseLocked() (config.Config, error) {
 		}
 	}
 	if b.unsaved != nil {
-		// Lay the pending write back on top of whatever the file says now.
-		// Only the leaves it actually meant to change are copied; the rest of
-		// want is a snapshot of the file from back then, and writing that back
-		// would undo anything edited since.
+		// 保留中の書き込みを、今ファイルが述べている内容の上に敷き直す。写すのは
+		// 実際に変えるつもりだった葉だけ。want の残りは当時のファイルの写しであり、
+		// それを書き戻せば、その後の編集を取り消すことになる。
 		base = mergeChanges(base, b.unsaved.from, b.unsaved.want)
 	}
 	return base, readErr
 }
 
-// mergeChanges returns base with every value this change actually touched
-// taken from next.
+// mergeChanges は、この変更が実際に触れた値を next から取って base に反映した
+// ものを返します。
 //
-// The point is what it leaves alone: a field the caller did not change keeps
-// whatever the settings file had, so an override that only applies to this run
-// is not written back by an unrelated change somewhere else in the tree.
+// 要点は、何に触れないかです。呼び出し側が変更しなかったフィールドは設定ファイルが
+// 持っていた値のまま残るので、この実行にだけ適用される上書きが、ツリーの別の場所の
+// 無関係な変更によって書き戻されることはありません。
 func mergeChanges(base, previous, next config.Config) config.Config {
 	out := base
 	mergeChanged(reflect.ValueOf(&out).Elem(), reflect.ValueOf(previous), reflect.ValueOf(next))
 	return out
 }
 
-// mergeChanged walks the settings tree and copies the leaves that differ.
+// mergeChanged は設定ツリーを歩き、異なる葉を写します。
 func mergeChanged(out, previous, next reflect.Value) {
 	switch out.Kind() {
 	case reflect.Struct:
@@ -482,18 +462,17 @@ func mergeChanged(out, previous, next reflect.Value) {
 	}
 }
 
-// mergeChangedMap copies the entries this change actually touched.
+// mergeChangedMap は、この変更が実際に触れた項目を写します。
 //
-// A map is not one value. server.extra_headers is a set of independent
-// settings that happens to be written as one table, and it is edited by hand
-// at least as often as it is changed through the API -- adjusting the wire
-// format for a PaperTracker release is what it exists for. Replacing it whole
-// would take a header the user added to the file and drop it because the
-// bridge changed a different one, which is the very thing merging by leaf is
-// meant to prevent.
+// map は 1 つの値ではありません。server.extra_headers は独立した設定の集まりが
+// たまたま 1 つのテーブルとして書かれているもので、API 越しに変更されるのと同じか
+// それ以上に手で編集されます。PaperTracker のリリースに合わせてワイヤ形式を調整
+// することこそが、その存在理由だからです。丸ごと置き換えると、ユーザーがファイルに
+// 足したヘッダーを、ブリッジが別のヘッダーを変えたという理由で落とすことになります。
+// 葉ごとに併合するのは、まさにそれを防ぐためです。
 //
-// A key removed by the change is removed here too: that is a change to that
-// key like any other.
+// 変更によって取り除かれたキーは、ここでも取り除きます。それも他と同じく、その
+// キーに対する変更だからです。
 func mergeChangedMap(out, previous, next reflect.Value) {
 	touched := make(map[any]reflect.Value)
 	for _, key := range next.MapKeys() {
@@ -505,7 +484,7 @@ func mergeChangedMap(out, previous, next reflect.Value) {
 	}
 	for _, key := range previous.MapKeys() {
 		if !next.MapIndex(key).IsValid() {
-			// An invalid value stands for "this key is gone".
+			// 無効な値は「このキーは無くなった」を表す。
 			touched[key.Interface()] = reflect.Value{}
 		}
 	}
@@ -513,10 +492,10 @@ func mergeChangedMap(out, previous, next reflect.Value) {
 		return
 	}
 
-	// Built fresh rather than written into: the map in out is the same one the
-	// base configuration holds, and the base is somebody else's copy -- the
-	// last known file contents, or a pending write. Editing it in place would
-	// change their idea of the file as a side effect of building this one.
+	// 書き込むのではなく新しく作る。out の map は base の設定が持っているものと
+	// 同一であり、base は他人の写し — 最後に判明しているファイルの内容か、保留中の
+	// 書き込み — だから。その場で編集すると、こちらを組み立てた副作用として、
+	// 向こうのファイル観を変えてしまう。
 	merged := reflect.MakeMap(out.Type())
 	if !out.IsNil() {
 		for _, key := range out.MapKeys() {
@@ -529,17 +508,15 @@ func mergeChangedMap(out, previous, next reflect.Value) {
 	out.Set(merged)
 }
 
-// captureUnchanged reports whether two settings would build and run the same
-// source, which is what decides if a change has to interrupt the camera.
+// captureUnchanged は、2 つの設定が同じソースを組み立てて動かすかどうかを返します。
+// 変更がカメラを中断させなければならないかは、これで決まります。
 //
-// Only the selected source's own settings count. Comparing the whole Source
-// tree would restart a working camera because the user filled in the MJPEG URL
-// they intend to switch to later, and while that camera was reconnecting the
-// change would be rejected outright.
+// 数に入るのは、選択されているソース自身の設定だけです。Source ツリー全体を比べると、
+// ユーザーが後で切り替えるつもりの MJPEG URL を書き入れただけで動いているカメラが
+// 再起動され、そのカメラが再接続している間、変更は丸ごと拒否されることになります。
 //
-// A source type added later falls through to the default and restarts, which
-// is the safe answer; a new field inside an existing source is caught by the
-// struct comparisons.
+// 後から追加されたソース種別は default に落ちて再起動します。それが安全な答えです。
+// 既存のソースの中に増えたフィールドは、構造体の比較が捕まえます。
 func captureUnchanged(previous, next config.Config) bool {
 	if previous.Source.Type != next.Source.Type ||
 		previous.Source.MaxFrameSize != next.Source.MaxFrameSize ||
@@ -560,9 +537,9 @@ func captureUnchanged(previous, next config.Config) bool {
 	}
 }
 
-// restartRequired rejects changes to settings that are only read while the
-// process starts. Accepting them would report success and persist the value
-// while the running bridge kept using the old one.
+// restartRequired は、プロセスの起動時にしか読まれない設定への変更を拒否します。
+// 受け入れれば成功を報告して値を保存する一方、動作中のブリッジは古い値を使い続ける
+// ことになります。
 func restartRequired(previous, next config.Config) error {
 	switch {
 	case previous.Server.Listen != next.Server.Listen:
@@ -574,21 +551,19 @@ func restartRequired(previous, next config.Config) error {
 	case previous.PaperTracker != next.PaperTracker:
 		return errors.New("papertracker settings are only read at startup: edit the settings file and restart")
 	case previous.UI != next.UI:
-		// The tray builds its menu once, with the labels the language gave it.
-		// Accepting the change would save it and report success while every
-		// word on screen stayed as it was, so the API would disagree with the
-		// interface until the next start.
+		// トレイはメニューを一度だけ、その言語が与えたラベルで組み立てる。変更を
+		// 受け入れれば保存して成功を報告する一方、画面上の言葉は一つも変わらない
+		// ので、次の起動まで API と画面が食い違うことになる。
 		return errors.New("ui.language cannot be changed while running: edit the settings file and restart")
 	}
 	return nil
 }
 
-// Switch changes the active source type, leaving everything else alone.
+// Switch は、稼働中のソース種別だけを変更し、他はそのままにします。
 //
-// Reading the current settings and applying the modified copy is one exclusive
-// operation. Split in two, a settings change that lands in the gap is undone:
-// Switch would go on to apply a whole configuration it read before that
-// change, and save it.
+// 現在の設定を読み、書き換えた写しを適用するまでが 1 つの排他的な操作です。2 つに
+// 分けると、その隙間に入った設定変更が取り消されます。Switch はその変更より前に
+// 読んだ設定全体をそのまま適用し、保存してしまうからです。
 func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -602,16 +577,15 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 	return b.applyLocked(ctx, cfg)
 }
 
-// Devices lists the cameras and serial ports available right now.
+// Devices は、今使えるカメラとシリアルポートを列挙します。
 //
-// The two are gathered independently and reported that way. They fail
-// independently -- a machine with no ffmpeg still has serial ports -- and one
-// error is not a reason to withhold the other list.
+// 2 つは独立に集め、そのまま独立に報告します。失敗の仕方が独立しているからです —
+// ffmpeg の無い機械にもシリアルポートはあります — し、片方のエラーはもう片方の
+// リストを差し止める理由になりません。
 //
-// Enumeration failing is also not the same as finding nothing, and the caller
-// is the only one that can tell the user which it was. Swallowing it here
-// leaves the tray and the API showing an empty list as if the machine had no
-// camera at all.
+// 列挙の失敗は「何も見つからなかった」とも違いますし、どちらだったかをユーザーに
+// 伝えられるのは呼び出し側だけです。ここで飲み込むと、トレイと API は、その機械に
+// カメラが 1 台も無いかのように空のリストを見せることになります。
 func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	var devices server.Devices
 
@@ -632,9 +606,9 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	return devices
 }
 
-// SetPaused stops or resumes capture. Pausing releases the camera, which
-// matters for UVC: the device is exclusive, and Baballonia cannot open it
-// while the bridge holds it.
+// SetPaused はキャプチャを停止または再開します。一時停止はカメラを解放します。
+// これは UVC で意味を持ちます。デバイスは排他的で、ブリッジが握っている間
+// Baballonia はそれを開けないからです。
 func (b *Bridge) SetPaused(paused bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -653,44 +627,42 @@ func (b *Bridge) SetPaused(paused bool) error {
 	}
 	b.log.Info("capture resumed")
 	if err := b.startLocked(); err != nil {
-		// Resuming is not a claim that the source works, any more than
-		// starting up is: both leave a driver retrying so that a camera
-		// plugged in later is picked up. Failing the resume instead left the
-		// bridge paused, and a paused bridge is one that cannot be handed a
-		// different source -- the two together are a corner with no way out
-		// short of editing the settings file.
+		// 再開は、起動と同じくソースが機能するという主張ではない。どちらも、
+		// 後から挿されたカメラを拾えるようドライバに再試行させるだけ。代わりに
+		// 再開を失敗させると、ブリッジは一時停止のまま残り、一時停止したブリッジは
+		// 別のソースを渡せない。この 2 つが揃うと、設定ファイルを編集する以外に
+		// 出口の無い袋小路になる。
 		//
-		// The reason is not lost by returning nil here. Whatever could not
-		// start is on the status tracker, which is what the tray shows and
-		// what /healthz answers with.
+		// ここで nil を返しても理由は失われない。起動できなかったものは status
+		// tracker に載っており、それはトレイが表示し /healthz が答えるものだから。
 		b.log.Error("capture resumed but the source could not be started", "error", err)
 	}
 	return nil
 }
 
-// Paused reports whether capture is currently paused. Like Snapshot it reads
-// the lock-free copy, so the tray can redraw during a slow settings change.
+// Paused は、キャプチャが今一時停止中かを返します。Snapshot と同じくロックフリーな
+// 写しを読むので、遅い設定変更の最中でもトレイは再描画できます。
 func (b *Bridge) Paused() bool {
 	return b.view.Load().paused
 }
 
-// startLocked builds and launches the configured driver, leaving it to retry
-// in the background. That is what startup and resume want: a camera plugged in
-// after sign-in still has to be picked up. The caller holds mu.
+// startLocked は、設定されたドライバを組み立てて起動し、あとは背後で再試行させます。
+// 起動と再開が求めるのはそれです。サインイン後に挿されたカメラも拾える必要があります。
+// 呼び出し側が mu を保持します。
 func (b *Bridge) startLocked() error {
 	return b.launchLocked(nil)
 }
 
-// verifyStartLocked launches the configured driver and waits for it to deliver
-// a frame, returning an error with nothing running if it does not. That is
-// what Apply needs: only a frame proves a source works, since a driver that
-// cannot reach its camera reconnects rather than failing.
+// verifyStartLocked は、設定されたドライバを起動してフレームが届くまで待ち、届か
+// なければ何も動いていない状態でエラーを返します。Apply が必要とするのはこれです。
+// ソースが機能することを証明するのはフレームだけであり、カメラに届かないドライバは
+// 失敗せず再接続するからです。
 //
-// The wait also ends if ctx does. ctx is the request that asked for the
-// change, and once the client behind it has gone there is nobody left to tell
-// that the new source came up -- carrying on would persist a setting the
-// caller was told nothing about. The context bounds only the wait; the source
-// itself lives on the bridge's own root context.
+// 待機は ctx が終われば終わります。ctx は変更を求めたリクエストであり、その背後の
+// クライアントが居なくなれば、新しいソースが立ち上がったと伝える相手はもういません。
+// そのまま進めば、呼び出し側が何も知らされていない設定を保存することになります。
+// このコンテキストが区切るのは待機だけで、ソース自体はブリッジ自身のルートコンテキストの
+// 上で生き続けます。
 func (b *Bridge) verifyStartLocked(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -698,55 +670,51 @@ func (b *Bridge) verifyStartLocked(ctx context.Context) error {
 	return b.launchLocked(ctx)
 }
 
-// launchLocked builds and launches the configured driver. A non-nil verifyCtx
-// asks it to wait for the first published frame; nil returns as soon as the
-// driver is running. The caller holds mu.
+// launchLocked は、設定されたドライバを組み立てて起動します。verifyCtx が非 nil なら
+// 最初に配信されるフレームを待ち、nil ならドライバが動き出した時点で返ります。
+// 呼び出し側が mu を保持します。
 func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	if b.root == nil || b.paused || b.root.Err() != nil {
-		// Nothing is going to run, but the settings still have to be able to
-		// produce a driver. Accepting them unchecked while paused would save a
-		// configuration that Resume then cannot start, with the previous
-		// working one already gone.
+		// 何も動かないが、それでも設定はドライバを生み出せるものでなければならない。
+		// 一時停止中に無検査で受け入れると、Resume が起動できない設定を保存する
+		// ことになり、しかもそれまで動いていた設定は既に失われている。
 		//
-		// Constructing one is not running one, so these settings are unproven
-		// whichever way it goes. Leaving the flag as it was would credit them
-		// with what the settings they replaced had done.
+		// 構築することと動かすことは違うので、これらの設定はどちらに転んでも未検証。
+		// フラグをそのままにすると、置き換えられた側の設定が成したことを、こちらの
+		// 手柄にしてしまう。
 		b.proven = false
 		if _, err := b.newSource(); err != nil {
 			return err
 		}
-		// Nothing started, but the settings did change, and the status is
-		// where the tray and /healthz read the source from. Left alone it
-		// keeps naming the source that was replaced, complete with the error
-		// that source last had -- so a camera swapped while paused reads as
-		// the old camera still failing, until somebody resumes.
+		// 何も起動していないが、設定は確かに変わった。そしてトレイと /healthz が
+		// ソースを読むのはステータスから。放っておくと、置き換えられた側のソースを、
+		// そのソースが最後に抱えていたエラーごと名乗り続ける。一時停止中に交換した
+		// カメラが、誰かが再開するまで「古いカメラがまだ失敗している」ように見える。
 		b.status.SetSource(b.cfg.Source.Type)
 		return nil
 	}
 
 	drv, err := b.newSource()
 	if err != nil {
-		// Nothing will retry this: the settings themselves are unusable, so
-		// there is no driver to reconnect. Without recording it the tray shows
-		// "connecting..." and /healthz says only that the source is not
-		// connected, both of which describe something that is trying. The
-		// default settings have no UVC device name, so this is the first thing
-		// a new user meets.
+		// これを再試行するものは無い。設定そのものが使えないので、再接続すべき
+		// ドライバが存在しない。記録しなければトレイは "connecting..." と表示し、
+		// /healthz はソースが未接続だとしか言わない。どちらも「試している何か」を
+		// 描写している。既定の設定に UVC のデバイス名は入っていないので、これは
+		// 新しいユーザーが最初に出会うものになる。
 		b.proven = false
 		b.status.SetSource(b.cfg.Source.Type)
 		b.status.Disconnected(b.cfg.Source.Type, err)
 		return err
 	}
 
-	// Verification watches the hub, not the driver. A driver announces a
-	// frame as soon as it has parsed one, but the transform sits between
-	// there and the hub and can still drop it -- an image over the pixel
-	// limit, or one the decoder rejects. Only a frame that reached the hub
-	// means a client would see anything.
+	// 検証が見るのはドライバではなく hub。ドライバは 1 枚解析した時点でフレームを
+	// 告げるが、そこと hub の間には変換段があり、そこで落とされ得る — ピクセル上限を
+	// 超えた画像や、デコーダが拒む画像。クライアントに何かが見えると言えるのは、
+	// hub まで届いたフレームだけ。
 	//
-	// The pump decides that, and it does the same work whether anyone is
-	// waiting for the answer or not: no frame is published until one has been
-	// decoded. This is where the answer is collected when the caller needs it.
+	// それを決めるのは pump であり、答えを待つ者が居ようが居まいが同じ仕事をする。
+	// 1 枚デコードできるまで何も配信しない。呼び出し側が答えを必要とするとき、それを
+	// 受け取るのがここ。
 	published := make(chan error, 1)
 	var publishedOnce sync.Once
 	maxPixels := b.cfg.CoreTransform().MaxPixels
@@ -757,8 +725,8 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	ctx, cancel := context.WithCancel(b.root)
 	frames := make(chan core.Frame, frameQueueDepth)
 	stopped := make(chan struct{})
-	// Buffered so the driver never blocks reporting a failure nobody is
-	// waiting for any more.
+	// バッファ付きにしておく。誰も待たなくなった失敗を報告するときに、ドライバが
+	// ブロックしないようにするため。
 	failed := make(chan error, 1)
 
 	b.cancel = cancel
@@ -774,24 +742,22 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 
 	go func() {
 		defer wg.Done()
-		// The driver owns the frame channel and closes it so the pump can
-		// drain what is already in flight before exiting.
+		// フレームのチャネルはドライバが所有し、ドライバが閉じる。pump が、途中に
+		// あるものを抜き切ってから終われるようにするため。
 		defer close(frames)
-		// Run only returns on cancellation or on a failure retrying cannot
-		// fix, so any error here means this source will never produce a frame.
+		// Run が返るのはキャンセルされたときか、再試行では直らない失敗のときだけ
+		// なので、ここでのエラーはこのソースが二度とフレームを出さないことを意味する。
 		err := drv.Run(ctx, frames)
 		if err != nil {
-			// Recorded whatever the context says, because the two race: a
-			// driver that has just returned its failure and a pause that
-			// cancels before this line reads ctx.Err() would leave the
-			// settings looking proven with nothing behind them, which is the
-			// state this exists to rule out.
+			// コンテキストが何を言おうと記録する。この 2 つは競合するから。失敗を
+			// 返したばかりのドライバと、この行が ctx.Err() を読む前にキャンセルする
+			// 一時停止とが重なると、背後に何も無いのに設定が proven に見える状態が
+			// 残る。これはまさにそれを排除するために存在する。
 			//
-			// Reading it here would also be asking the wrong question. A
-			// driver returns nil when its own context is cancelled -- all
-			// three do, and being able to say "it stopped because it was
-			// told to" is the whole reason they bother -- so a non-nil error
-			// is a failure of the source, not of the cancellation.
+			// そもそもここで ctx.Err() を読むのは問い方が違う。ドライバは自身の
+			// コンテキストがキャンセルされたとき nil を返す — 3 つとも返すし、
+			// 「命じられて止まった」と言えることがそのための実装理由 — なので、
+			// 非 nil のエラーはキャンセルの失敗ではなくソースの失敗を意味する。
 			b.died.Store(true)
 		}
 		if err != nil && ctx.Err() == nil {
@@ -816,7 +782,7 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		return nil
 	}
 
-	// Everything from here to the frame is a way of not getting one.
+	// ここからフレームまでの経路は、どれもフレームが得られないやり方。
 	b.proven = false
 
 	timer := time.NewTimer(startVerifyTimeout)
@@ -831,15 +797,14 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		b.stopLocked()
 		return fmt.Errorf("bridge: %s produced no frame within %s", drv.Name(), startVerifyTimeout)
 	case <-verifyCtx.Done():
-		// The caller gave up waiting. It is going to report a failure, so
-		// finishing the change behind its back would leave the running bridge
-		// and the settings file on a source nobody was ever told about.
+		// 呼び出し側は待つのをやめた。向こうは失敗を報告するので、その背後で
+		// 変更を完了させると、動作中のブリッジと設定ファイルが、誰も知らされて
+		// いないソースの上に残ることになる。
 		b.stopLocked()
 		return fmt.Errorf("bridge: %s was still starting when the request ended: %w", drv.Name(), verifyCtx.Err())
 	case <-b.root.Done():
-		// Shutting down is not proof that anything works. Reporting success
-		// here would persist a configuration nothing ever verified, and the
-		// next run would start on it.
+		// 停止中であることは、何かが機能する証拠ではない。ここで成功を報告すると、
+		// 誰も検証していない設定が保存され、次回の実行はその上で始まる。
 		b.stopLocked()
 		return errors.New("bridge: shutting down before the new source produced a frame")
 	}
@@ -854,16 +819,16 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	return nil
 }
 
-// verifyOutcome says what a delivered frame is worth, given whether the request
-// that asked for the change and the bridge itself are still there.
+// verifyOutcome は、変更を求めたリクエストとブリッジ自身がまだ健在かを踏まえて、
+// 届いたフレームにどれだけの価値があるかを述べます。
 //
-// It is separate from the select above because a select cannot express
-// priority. When the first frame and the request's deadline land together both
-// cases are ready and either may be taken, so reading the frame case is not
-// proof that nobody has given up waiting -- and taking it at face value applies
-// the change and writes it to the settings file behind a client that was told
-// it failed. Asking again once the frame is in hand makes the answer the same
-// whichever case the select happened to pick.
+// 上の select と分けてあるのは、select が優先順位を表現できないからです。最初の
+// フレームとリクエストの期限が同時に届くと、どちらの case も準備完了になりどちらが
+// 選ばれてもおかしくないので、フレームの case を読んだことは「誰も待つのをやめて
+// いない」証拠にはなりません。それを額面どおり受け取ると、失敗を告げられた
+// クライアントの背後で変更を適用し、設定ファイルに書いてしまいます。フレームを
+// 手にしてから改めて問い直すことで、select がどちらを選んだかに関わらず答えが同じに
+// なります。
 func verifyOutcome(name string, frameErr, requestErr, shutdownErr error) error {
 	if frameErr != nil {
 		return fmt.Errorf("bridge: %s produced a frame that is not a usable JPEG: %w", name, frameErr)
@@ -872,16 +837,16 @@ func verifyOutcome(name string, frameErr, requestErr, shutdownErr error) error {
 		return fmt.Errorf("bridge: %s started as the request ended, so the change was not kept: %w", name, requestErr)
 	}
 	if shutdownErr != nil {
-		// A configuration proved a moment before the bridge stops is still one
-		// nothing has run on, and the next start would come up on it unverified.
+		// ブリッジが止まる直前に実力を示した設定も、結局その上で何も動いていない
+		// 設定であり、次の起動は未検証のままそれで立ち上がることになる。
 		return errors.New("bridge: shutting down as the new source produced its first frame")
 	}
 	return nil
 }
 
-// stopLocked cancels the running driver and waits for it to exit. Waiting is
-// what guarantees an exclusive device is free before the next driver opens it.
-// The caller holds mu.
+// stopLocked は動作中のドライバをキャンセルし、終了するまで待ちます。次のドライバが
+// 開く前に排他的なデバイスが解放されていることを保証するのは、この待機です。
+// 呼び出し側が mu を保持します。
 func (b *Bridge) stopLocked() {
 	if b.cancel == nil {
 		return
@@ -892,21 +857,18 @@ func (b *Bridge) stopLocked() {
 	b.status.SetSource("")
 }
 
-// latestOnly forwards frames and keeps only the newest one waiting while the
-// far side is busy.
+// latestOnly はフレームを転送し、向こう側が忙しい間は最新の 1 枚だけを待たせます。
 //
-// The driver hands its frames over a slot one frame deep, and it blocks when
-// that slot is taken. A transform slower than the camera -- a rotate, or a
-// re-encode -- is enough for that to happen every frame, and a blocked driver
-// is a driver that has stopped reading its socket, its pipe or its serial
-// port. The images pile up there instead, and the stream falls further behind
-// live with every one of them: the hub's latest-frame-wins only applies after
-// the transform, so it never sees them.
+// ドライバは 1 フレーム分の枠を通してフレームを渡し、その枠が埋まっているとブロック
+// します。カメラより遅い変換 — 回転や再エンコード — があれば、それは毎フレーム
+// 起こります。ブロックしたドライバとは、ソケットやパイプやシリアルポートを読むのを
+// やめたドライバのことです。画像は代わりにそちらへ積み上がり、その 1 枚ごとに
+// ストリームは実時間からさらに遅れます。hub の「最新フレーム優先」が効くのは変換の
+// 後なので、hub はそれらを目にすることさえありません。
 //
-// Reading as fast as the driver can produce, and throwing away what the
-// transform did not get to, is what keeps that queue from forming. Dropping
-// frames is the intended answer here -- for mouth tracking the newest image is
-// the only one worth having.
+// ドライバが生み出せる速さで読み、変換が手を付けられなかった分を捨てることが、その
+// 行列を作らせない方法です。ここでフレームを落とすのは意図した答えです。口の動きを
+// 追う用途では、持っている価値があるのは最新の画像だけだからです。
 func latestOnly(in <-chan core.Frame, log *slog.Logger) <-chan core.Frame {
 	out := make(chan core.Frame, 1)
 	go func() {
@@ -917,8 +879,7 @@ func latestOnly(in <-chan core.Frame, log *slog.Logger) <-chan core.Frame {
 				continue
 			default:
 			}
-			// The slot holds a frame the transform has not taken yet, and it is
-			// older than this one.
+			// 枠には変換がまだ取っていないフレームが入っていて、それはこれより古い。
 			select {
 			case <-out:
 				log.Debug("dropping a frame the transform did not keep up with")
@@ -933,24 +894,23 @@ func latestOnly(in <-chan core.Frame, log *slog.Logger) <-chan core.Frame {
 	return out
 }
 
-// pump applies the optional transform and publishes each frame, calling
-// onPublish with every frame that makes it to the hub.
+// pump は任意の変換を適用して各フレームを配信し、hub まで到達したフレームごとに
+// onPublish を呼びます。
 func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *slog.Logger, maxPixels int, firstFrame func(error)) {
-	// Nothing is published until one frame has been decoded. Everything before
-	// this point checks structure, which is all a per-frame check can afford,
-	// and a payload of SOI followed by EOI has the structure of a JPEG and no
-	// image in it. A source sending those looks healthy the whole way through
-	// -- frames counted, /healthz green, an fps in the tray -- while the
-	// tracker gets nothing it can use, so the run does not count as working
-	// until one frame proves it is.
+	// 1 枚デコードできるまで何も配信しない。ここまでの検査はすべて構造を見るもので、
+	// フレームごとの検査に許されるのはそこまで。そして SOI の直後に EOI が来る
+	// ペイロードは、JPEG の構造を備えていて中身は空。それを送るソースは最後まで
+	// 健全に見える — フレーム数は増え、/healthz は緑、トレイには fps — その間
+	// トラッカーは使えるものを何も受け取らない。だから 1 枚がそれを証明するまで、
+	// この実行は機能しているとは数えない。
 	decoded := false
-	// While nothing has decoded, frames are checked at intervals rather than
-	// one by one: a decode is the expensive thing here, and an upstream sending
-	// nothing usable at thirty frames a second should not cost thirty of them.
+	// 1 枚もデコードできていない間は、フレームを 1 枚ずつではなく間隔を置いて調べる。
+	// ここで高くつくのはデコードであり、使えないものを毎秒 30 枚送ってくる上流に
+	// 毎秒 30 回のデコードを払うべきではない。
 	var nextCheck time.Time
-	// Only the first answer is passed on. It is the one a caller waiting on a
-	// source switch asked for, and by the time a later frame decodes that
-	// caller has already been told the source failed.
+	// 伝えるのは最初の答えだけ。それがソース切替を待つ呼び出し側の求めたもので
+	// あり、後のフレームがデコードできる頃には、その呼び出し側は既にソースの失敗を
+	// 告げられている。
 	reported := false
 	report := func(err error) {
 		if !reported {
@@ -971,9 +931,9 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 
 		switch {
 		case !decoded:
-			// The decode covers the header check as well, and it has to come
-			// first: a frame with no readable header fails both, and "not a
-			// usable image" is the answer that describes it.
+			// デコードはヘッダーの検査も兼ねており、そして先に来なければならない。
+			// 読めるヘッダーを持たないフレームは両方に失敗するが、それを言い表す
+			// 答えは「使える画像ではない」の方だから。
 			now := time.Now()
 			if now.Before(nextCheck) {
 				continue
@@ -988,13 +948,12 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 			decoded = true
 
 		case transform.IsNoop():
-			// A frame forwarded untouched is never decoded on this side, so the
-			// ceiling has to be applied to the header instead. The client is the
-			// one that decodes it, and a few hundred bytes declaring 65535x65535
-			// asks it for the allocation this limit exists to refuse. Reading a
-			// header is cheap enough to do at capture rate; decoding is not.
-			// Applying a transform already checks the same thing before it
-			// decodes.
+			// そのまま流すフレームはこちら側でデコードされないので、上限は代わりに
+			// ヘッダーへ適用する。デコードするのはクライアントであり、65535x65535 を
+			// 宣言する数百バイトは、この上限が拒むために存在するその確保を、
+			// クライアントに要求する。ヘッダーを読むだけならキャプチャ速度でも
+			// 十分安いが、デコードはそうではない。変換を適用する経路では、デコードの
+			// 前に既に同じことを確認している。
 			if err := core.WithinPixelLimit(frame.Data, maxPixels); err != nil {
 				log.Warn("dropping a frame that declares an image over the pixel limit", "error", err)
 				continue
@@ -1004,7 +963,7 @@ func pump(frames <-chan core.Frame, transform core.Transform, h *hub.Hub, log *s
 	}
 }
 
-// newSource builds the driver named by the current settings.
+// newSource は、現在の設定が指すドライバを組み立てます。
 func (b *Bridge) newSource() (source.Source, error) {
 	cfg := b.cfg
 	switch cfg.Source.Type {
