@@ -94,32 +94,31 @@ type Bridge struct {
 	stopped chan struct{}
 	paused  bool
 
-	// died says the driver launched under cfg stopped on its own -- an MJPEG
-	// upstream answering 404, ffmpeg not on disk -- rather than being
-	// cancelled. It is atomic because the driver goroutine is what learns it,
-	// and that goroutine cannot take mu: a verifying Apply holds it while
-	// waiting for exactly that news.
+	// died は、cfg のもとで起動したドライバが、キャンセルされたのではなく自力で
+	// 止まったことを示します。404 を返す MJPEG の上流、ディスクに無い ffmpeg など。
+	// atomic なのは、それを知るのがドライバの goroutine であり、その goroutine が
+	// mu を取れないからです。検証中の Apply が、まさにその知らせを待ちながら mu を
+	// 保持しています。
 	//
-	// Read through provenLocked rather than on its own. Startup and resume
-	// launch without waiting for a frame, so they can only record that a
-	// driver began; this is the other half of the answer, and without it a
-	// source that died a second later still counts as working. The bridge
-	// would then refuse to be handed a different one while paused, which is
-	// the corner all of this exists to open up.
+	// 単独ではなく provenLocked を通して読んでください。起動と再開はフレームを
+	// 待たずに立ち上げるので、記録できるのは「ドライバが動き始めた」ことだけです。
+	// これは答えのもう半分であり、これが無いと、1 秒後に死んだソースも動いている
+	// ものとして数えられます。そうなるとブリッジは、一時停止中に別のソースを渡す
+	// ことを拒みます。この仕組み全体が開こうとしているのは、まさにその袋小路です。
 	died atomic.Bool
 
-	// proven says the settings in cfg got a driver running, and that nothing
-	// since has said otherwise.
+	// proven は、cfg の設定がドライバを起動させたこと、そしてそれ以降それを覆す
+	// ことが何も起きていないことを示します。
 	//
-	// Two decisions need it, and both went wrong without it. Reverting a
-	// failed change assumed the settings it went back to had been working;
-	// when they had not -- the bridge started on a source it could never
-	// build, which is what unconfigured UVC does -- the revert failed too and
-	// left nothing capturing. Refusing a change while paused assumed there was
-	// a working source to protect, and went on refusing when there was not.
+	// これを必要とする判断が 2 つあり、どちらもこれが無いために誤っていました。
+	// 失敗した変更の巻き戻しは、戻る先の設定が動いていたと決めてかかっていました。
+	// 動いていなかった場合 — ブリッジが、そもそも組み立てられないソースで起動した
+	// 場合であり、設定されていない UVC がまさにそれです — 巻き戻しも失敗し、何も
+	// キャプチャしないまま残りました。一時停止中の変更を拒む処理は、守るべき動く
+	// ソースがあると決めてかかり、無いときにも拒み続けていました。
 	//
-	// Pausing does not clear it. A source deliberately stopped is still one
-	// that works, and that is exactly what the refusal above is protecting.
+	// 一時停止はこれを下ろしません。意図的に止められたソースも依然として動く
+	// ソースであり、上の拒否が守っているのはまさにそれだからです。
 	proven bool
 }
 

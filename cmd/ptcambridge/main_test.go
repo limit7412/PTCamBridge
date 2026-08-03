@@ -10,8 +10,8 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/papertracker"
 )
 
-// A wildcard bind is a valid thing to listen on and a useless thing to write
-// into the client's address cache.
+// ワイルドカードの bind は、listen する対象としては妥当で、クライアントのアドレス
+// キャッシュに書く値としては役に立たない。
 func TestConnectAddress(t *testing.T) {
 	cases := map[string]string{
 		"[::]:18080":       "127.0.0.1:18080",
@@ -28,12 +28,11 @@ func TestConnectAddress(t *testing.T) {
 	}
 }
 
-// -restore-cache is for uninstalling, when the settings naming the folder are
-// usually already gone, so the search decides which client is put back. With
-// two installations on the machine it has to be the one the bridge changed,
-// not whichever comes first: restoring the other one reports success against a
-// folder nothing happened in and leaves the real cache pointing at a bridge
-// that is being removed.
+// -restore-cache はアンインストールのためのもので、そのときフォルダを指す設定は
+// たいてい既に無い。だからどのクライアントを戻すかは探索が決める。機械に 2 つ
+// インストールがあるなら、それはブリッジが変更した方でなければならず、先に来た方
+// ではない。もう一方を復元すれば、何も起きていないフォルダに対して成功を報告し、
+// 本物のキャッシュは撤去されつつあるブリッジを指したまま残る。
 func TestRestoreDirPicksTheFolderTheBridgeWroteTo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -55,7 +54,7 @@ func TestRestoreDirPicksTheFolderTheBridgeWroteTo(t *testing.T) {
 		t.Fatalf("WriteCache: %v", err)
 	}
 
-	// No settings file: the situation the flag exists for.
+	// 設定ファイルが無い。このフラグが存在する理由そのものの状況。
 	opts := options{configPath: filepath.Join(t.TempDir(), "gone.toml")}
 	if err := restoreCache(opts); err != nil {
 		t.Fatalf("restoreCache: %v", err)
@@ -69,17 +68,16 @@ func TestRestoreDirPicksTheFolderTheBridgeWroteTo(t *testing.T) {
 	}
 }
 
-// The settings can name a folder the bridge never wrote to: the client is
-// reinstalled elsewhere while write_cache is on, and install_dir follows it.
-// The record stays behind in the old folder, still pointing that copy of the
-// client at a bridge that is about to stop, so "no backup here" cannot be the
-// end of it.
+// 設定は、ブリッジが一度も書いていないフォルダを指し得る。write_cache が有効な
+// まま、クライアントが別の場所へ再インストールされ、install_dir がそれを追った
+// 場合。記録は古いフォルダに残り、そちらのクライアントを、間もなく止まるブリッジへ
+// 向けたままにする。だから「ここにバックアップは無い」で終わらせてはいけない。
 func TestRestoreFallsBackWhenTheNamedFolderHasNoBackup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	// Where the bridge actually wrote, and where it no longer looks.
+	// ブリッジが実際に書いた場所であり、もう見ていない場所。
 	old := filepath.Join(home, "PaperTracker")
 	if err := os.MkdirAll(old, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -91,7 +89,7 @@ func TestRestoreFallsBackWhenTheNamedFolderHasNoBackup(t *testing.T) {
 		t.Fatalf("WriteCache: %v", err)
 	}
 
-	// Where the settings point now.
+	// 設定が今指している場所。
 	moved := t.TempDir()
 	if err := os.WriteFile(papertracker.CachePath(moved), []byte("192.168.1.60"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -112,10 +110,10 @@ func TestRestoreFallsBackWhenTheNamedFolderHasNoBackup(t *testing.T) {
 	}
 }
 
-// install_dir can be changed while write_cache is on -- the client is moved or
-// reinstalled -- and the bridge then leaves a record in both folders. Stopping
-// at the first one restored leaves the other client pointing at a bridge that
-// is being removed, with nothing left that would ever look again.
+// write_cache が有効なまま install_dir は変わり得る — クライアントが移動されたり
+// 再インストールされたり — その場合ブリッジは両方のフォルダに記録を残す。最初の
+// 1 つを復元したところで止めると、もう一方のクライアントは撤去されつつあるブリッジを
+// 指したまま残り、二度と見に来るものは無い。
 func TestRestoreUndoesEveryFolderTheBridgeWroteTo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -150,10 +148,10 @@ func TestRestoreUndoesEveryFolderTheBridgeWroteTo(t *testing.T) {
 	}
 }
 
-// Undoing what the bridge did to somebody else's application must not depend on
-// the whole settings file being valid. Someone uninstalling PTCamBridge with a
-// misspelled key or an out-of-range value in it would otherwise be told nothing
-// was changed, while the client still points at the bridge they are removing.
+// 他人のアプリケーションに対してブリッジがしたことの取り消しが、設定ファイル全体の
+// 妥当性に依存してはいけない。さもないと、綴りを誤ったキーや範囲外の値を抱えたまま
+// PTCamBridge をアンインストールする人は、クライアントが撤去中のブリッジを指したまま
+// 「何も変更されていない」と告げられる。
 func TestRestoreReadsInstallDirFromAnOtherwiseUnusableSettingsFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -163,7 +161,7 @@ func TestRestoreReadsInstallDirFromAnOtherwiseUnusableSettingsFile(t *testing.T)
 	t.Setenv("ProgramFiles(x86)", t.TempDir())
 	t.Setenv("APPDATA", t.TempDir())
 
-	// Somewhere the search will not look.
+	// 探索が見に行かない場所。
 	install := filepath.Join(t.TempDir(), "PaperTracker Portable")
 	if err := os.MkdirAll(install, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -193,9 +191,9 @@ func TestRestoreReadsInstallDirFromAnOtherwiseUnusableSettingsFile(t *testing.T)
 	}
 }
 
-// The folder can be named only by the environment, and a folder the bridge
-// writes to is a folder it has to be able to undo. Reading just the file here
-// would report "nothing was changed" about the one client that was.
+// フォルダは環境変数だけで指定され得るし、ブリッジが書き込むフォルダは、ブリッジが
+// 取り消せなければならないフォルダでもある。ここでファイルだけを読むと、実際に
+// 変更された唯一のクライアントについて「何も変更されていない」と報告することになる。
 func TestRestoreHonoursTheInstallDirEnvironmentVariable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -205,7 +203,7 @@ func TestRestoreHonoursTheInstallDirEnvironmentVariable(t *testing.T) {
 	t.Setenv("ProgramFiles(x86)", t.TempDir())
 	t.Setenv("APPDATA", t.TempDir())
 
-	// Somewhere the search will not look, named only by the variable.
+	// 探索が見に行かない場所で、変数だけがそれを指している。
 	install := filepath.Join(t.TempDir(), "PaperTracker Portable")
 	if err := os.MkdirAll(install, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -218,7 +216,7 @@ func TestRestoreHonoursTheInstallDirEnvironmentVariable(t *testing.T) {
 	}
 	t.Setenv(config.EnvInstallDir, install)
 
-	// No settings file at all, as after an uninstall.
+	// 設定ファイルがまったく無い。アンインストールの後の状態。
 	opts := options{configPath: filepath.Join(t.TempDir(), "gone.toml")}
 	if got := configuredInstallDir(opts); got != install {
 		t.Fatalf("configuredInstallDir() = %q, want the folder from %s", got, config.EnvInstallDir)
@@ -231,10 +229,9 @@ func TestRestoreHonoursTheInstallDirEnvironmentVariable(t *testing.T) {
 	}
 }
 
-// Returning to the defaults means deleting the [papertracker] section, which
-// takes install_dir with it. If that named a folder the search does not cover,
-// nothing else would ever mention it again -- so the bridge keeps its own note
-// of where it has written.
+// 既定へ戻すとは [papertracker] セクションを削除することであり、それは install_dir も
+// 一緒に持っていく。それが探索の覆わないフォルダを指していた場合、それに言及する
+// ものは二度と現れない。だからブリッジは、どこへ書いたかについて自分の覚書を持つ。
 func TestRestoreFindsAFolderNoSettingNamesAnyMore(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -245,7 +242,7 @@ func TestRestoreFindsAFolderNoSettingNamesAnyMore(t *testing.T) {
 	t.Setenv("ProgramFiles(x86)", t.TempDir())
 	t.Setenv("APPDATA", filepath.Join(home, "config"))
 
-	// A portable copy of the client, somewhere the search will never look.
+	// クライアントのポータブルなコピー。探索が決して見に行かない場所にある。
 	portable := filepath.Join(t.TempDir(), "PaperTracker Portable")
 	if err := os.MkdirAll(portable, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -254,7 +251,7 @@ func TestRestoreFindsAFolderNoSettingNamesAnyMore(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	// What a run with write_cache on does.
+	// write_cache を有効にした実行がすること。
 	if err := papertracker.WriteCache(portable, "127.0.0.1:18080"); err != nil {
 		t.Fatalf("WriteCache: %v", err)
 	}
@@ -262,8 +259,8 @@ func TestRestoreFindsAFolderNoSettingNamesAnyMore(t *testing.T) {
 		t.Fatalf("rememberWrittenDir: %v", err)
 	}
 
-	// The user then removes the whole [papertracker] section, so nothing names
-	// the folder any more.
+	// その後ユーザーが [papertracker] セクションを丸ごと削除するので、そのフォルダを
+	// 指すものは無くなる。
 	restored, err := restoreEverywhereItWas("")
 	if err != nil {
 		t.Fatalf("restoreEverywhereItWas: %v", err)
@@ -276,8 +273,8 @@ func TestRestoreFindsAFolderNoSettingNamesAnyMore(t *testing.T) {
 	}
 }
 
-// Nothing anywhere is an ordinary answer, not a failure, and the command says
-// so rather than reporting an error.
+// どこにも何も無いことは失敗ではなく普通の答えであり、コマンドはエラーを報告せず
+// そう述べる。
 func TestRestoreCacheSaysThereIsNothingToUndo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
