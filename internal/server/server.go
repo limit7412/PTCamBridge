@@ -72,8 +72,9 @@ type Devices struct {
 type Controller interface {
 	// Snapshot は、現在有効な設定を返します。
 	Snapshot() config.Config
-	// Apply は新しい設定を検証し、採用します。
-	Apply(ctx context.Context, cfg config.Config) error
+	// Apply は新しい設定を検証し、採用します。起動時にしか読まれない設定は
+	// 保存はされますが動作中には適用されず、その名前が返ります。
+	Apply(ctx context.Context, cfg config.Config) ([]string, error)
 	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
@@ -184,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/ui", s.handleUI)
 		mux.HandleFunc("/ui/", s.handleUI)
 		mux.HandleFunc("/ui/state", s.handleUIState)
+		mux.HandleFunc("/ui/settings", s.handleUISettings)
 		mux.HandleFunc("/api/v1/config", s.handleConfig)
 		mux.HandleFunc("/api/v1/source", s.handleSourceSwitch)
 		mux.HandleFunc("/api/v1/devices", s.handleDevices)
@@ -520,11 +522,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.opts.Controller.Apply(r.Context(), cfg); err != nil {
+		deferred, err := s.opts.Controller.Apply(r.Context(), cfg)
+		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
 		}
-		writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
+		writeJSON(w, r, http.StatusOK, appliedConfig{
+			Config:         s.opts.Controller.Snapshot(),
+			PendingRestart: deferred,
+		})
 
 	default:
 		w.Header().Set("Allow", "GET, PUT")
@@ -567,6 +573,18 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 // applyStatus は、設定の失敗をステータスコードに対応付けます。反映はされたが
 // ディスクに書けなかった変更だけが「リクエストは正しく、こちら側が失敗した」場合
 // なので、400 にならないのはそれだけです。
+// appliedConfig は PUT /api/v1/config の応答です。
+//
+// 埋め込みなので、設定の各項目は今までどおり最上位に並びます。増えるのは 1 つ、
+// 保存はされたが動作中には効いていない設定の名前です。応答に入っている設定が
+// 動作中のものである以上、それらは要求された値ではなく古い値のまま返ります。
+// 名前がなければ、その食い違いは呼び出し側が自分で見つけるしかありません。
+type appliedConfig struct {
+	config.Config
+	// PendingRestart は、保存されたが次の起動まで効かない設定の TOML キーです。
+	PendingRestart []string `json:"pending_restart,omitempty"`
+}
+
 func applyStatus(err error) int {
 	if errors.Is(err, config.ErrNotSaved) {
 		return http.StatusInternalServerError

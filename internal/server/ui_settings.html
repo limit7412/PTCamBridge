@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>{{template "css" .}}</style>
+</head>
+<body>
+<main>
+  <h1>{{.Title}}</h1>
+  <p class="sub mono">{{.Address}}</p>
+
+  <nav>
+    <a href="/ui">{{index .Text "navStatus"}}</a>
+    <a href="/ui/settings" aria-current="page">{{index .Text "navSettings"}}</a>
+  </nav>
+
+  <p id="offline">{{index .Text "unreachable"}}</p>
+
+  <form id="settings" autocomplete="off">
+    <section class="card">
+      <h2>{{index .Text "source"}}</h2>
+      <div class="choices">
+        <label><input type="radio" name="source-type" value="uvc"> {{index .Text "sourceUVC"}}</label>
+        <label><input type="radio" name="source-type" value="serial"> {{index .Text "sourceSerial"}}</label>
+        <label><input type="radio" name="source-type" value="mjpeg"> {{index .Text "sourceMJPEG"}}</label>
+      </div>
+
+      <div data-source="uvc">
+        <div class="field">
+          <label for="uvc-device">{{index .Text "device"}}</label>
+          <input type="text" id="uvc-device" list="camera-names" class="mono">
+        </div>
+        <datalist id="camera-names"></datalist>
+        <div class="field">
+          <label for="uvc-size">{{index .Text "size"}}</label>
+          <input type="text" id="uvc-size" class="mono" placeholder="240x240">
+        </div>
+        <div class="field">
+          <label for="uvc-framerate">{{index .Text "framerate"}}</label>
+          <input type="number" id="uvc-framerate" min="1" max="240">
+        </div>
+        <div class="field">
+          <label for="uvc-ffmpeg">{{index .Text "ffmpegPath"}}</label>
+          <input type="text" id="uvc-ffmpeg" class="mono">
+        </div>
+        <div class="actions" id="ffmpeg-actions" hidden>
+          <button type="button" id="get-ffmpeg">{{index .Text "getFFmpeg"}}</button>
+          <span id="ffmpeg-state" class="hint mono"></span>
+        </div>
+      </div>
+
+      <div data-source="serial">
+        <div class="field">
+          <label for="serial-port">{{index .Text "port"}}</label>
+          <input type="text" id="serial-port" list="port-names" class="mono" placeholder="auto">
+        </div>
+        <datalist id="port-names"></datalist>
+        <div class="field">
+          <label for="serial-baud">{{index .Text "baud"}}</label>
+          <input type="number" id="serial-baud" min="1200">
+        </div>
+      </div>
+
+      <div data-source="mjpeg">
+        <div class="field">
+          <label for="mjpeg-url">{{index .Text "url"}}</label>
+          <input type="text" id="mjpeg-url" class="mono" placeholder="http://192.168.1.50/">
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "transform"}}</h2>
+      <div class="field">
+        <label for="rotate">{{index .Text "rotate"}}</label>
+        <select id="rotate">
+          <option value="0">0&deg;</option>
+          <option value="90">90&deg;</option>
+          <option value="180">180&deg;</option>
+          <option value="270">270&deg;</option>
+        </select>
+      </div>
+      <div class="check"><input type="checkbox" id="flip-h"><label for="flip-h">{{index .Text "flipH"}}</label></div>
+      <div class="check"><input type="checkbox" id="flip-v"><label for="flip-v">{{index .Text "flipV"}}</label></div>
+      <div class="check"><input type="checkbox" id="crop-square"><label for="crop-square">{{index .Text "cropSquare"}}</label></div>
+      <div class="field">
+        <label for="quality">{{index .Text "quality"}}</label>
+        <input type="number" id="quality" min="0" max="100">
+      </div>
+      <p class="hint">{{index .Text "qualityHint"}}</p>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "stream"}}</h2>
+      <div class="check"><input type="checkbox" id="hold"><label for="hold">{{index .Text "hold"}}</label></div>
+      <div class="field">
+        <label for="boundary">{{index .Text "boundary"}}</label>
+        <input type="text" id="boundary" class="mono">
+      </div>
+      <div class="field">
+        <label for="listen">{{index .Text "listen"}}<span class="badge">{{index .Text "restartBadge"}}</span></label>
+        <input type="text" id="listen" class="mono">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "papertracker"}}<span class="badge">{{index .Text "restartBadge"}}</span></h2>
+      <div class="field">
+        <label for="pt-dir">{{index .Text "installDir"}}</label>
+        <input type="text" id="pt-dir" class="mono">
+      </div>
+      <div class="check"><input type="checkbox" id="pt-write"><label for="pt-write">{{index .Text "writeCache"}}</label></div>
+      <p class="hint">{{index .Text "writeCacheHint"}}</p>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "display"}}<span class="badge">{{index .Text "restartBadge"}}</span></h2>
+      <div class="field">
+        <label for="language">{{index .Text "language"}}</label>
+        <select id="language">
+          <option value="auto">{{index .Text "langAuto"}}</option>
+          <option value="en">English</option>
+          <option value="ja">&#26085;&#26412;&#35486;</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "log"}}<span class="badge">{{index .Text "restartBadge"}}</span></h2>
+      <div class="field">
+        <label for="log-level">{{index .Text "logLevel"}}</label>
+        <select id="log-level">
+          <option value="debug">debug</option>
+          <option value="info">info</option>
+          <option value="warn">warn</option>
+          <option value="error">error</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="log-dir">{{index .Text "logDir"}}</label>
+        <input type="text" id="log-dir" class="mono">
+      </div>
+    </section>
+
+    <p class="hint">{{index .Text "restartNote"}}</p>
+
+    <div class="actions">
+      <button type="submit" id="save">{{index .Text "save"}}</button>
+      <p id="result"></p>
+    </div>
+  </form>
+</main>
+
+<script>
+"use strict";
+const TEXT = {{.TextJSON}};
+
+const el = (id) => document.getElementById(id);
+
+// 取ってきた設定をそのまま抱えておき、保存時にはフォームが持つ項目だけを
+// 上書きして丸ごと送り返す。管理 API の PUT は設定全体を受け取るので、こうしないと
+// 画面に無い項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — が既定値に
+// 戻ってしまう。画面に出していない設定を消さないための持ち方。
+let current = null;
+
+function showSource(type) {
+  for (const block of document.querySelectorAll("[data-source]")) {
+    block.hidden = block.dataset.source !== type;
+  }
+}
+
+function fill(cfg) {
+  current = cfg;
+
+  const type = cfg.source.type;
+  const radio = document.querySelector(`input[name="source-type"][value="${type}"]`);
+  if (radio) radio.checked = true;
+  showSource(type);
+
+  el("uvc-device").value = cfg.source.uvc.device || "";
+  el("uvc-size").value = cfg.source.uvc.size || "";
+  el("uvc-framerate").value = cfg.source.uvc.framerate || 0;
+  el("uvc-ffmpeg").value = cfg.source.uvc.ffmpeg_path || "";
+
+  el("serial-port").value = cfg.source.serial.port || "";
+  el("serial-baud").value = cfg.source.serial.baud || 0;
+
+  el("mjpeg-url").value = cfg.source.mjpeg.url || "";
+
+  el("rotate").value = String(cfg.transform.rotate || 0);
+  el("flip-h").checked = !!cfg.transform.flip_h;
+  el("flip-v").checked = !!cfg.transform.flip_v;
+  el("crop-square").checked = !!cfg.transform.crop_square;
+  el("quality").value = cfg.transform.reencode_quality || 0;
+
+  el("hold").checked = !!cfg.server.hold_on_source_loss;
+  el("boundary").value = cfg.server.boundary || "";
+  el("listen").value = cfg.server.listen || "";
+
+  el("pt-dir").value = cfg.papertracker.install_dir || "";
+  el("pt-write").checked = !!cfg.papertracker.write_cache;
+
+  el("language").value = cfg.ui.language || "auto";
+
+  el("log-level").value = cfg.log.level || "info";
+  el("log-dir").value = cfg.log.dir || "";
+}
+
+function collect() {
+  // 抱えている設定の写しから始める。画面に無い項目はここに入ったまま運ばれる。
+  const cfg = structuredClone(current);
+  const number = (id) => Number(el(id).value) || 0;
+
+  cfg.source.type = document.querySelector('input[name="source-type"]:checked').value;
+  cfg.source.uvc.device = el("uvc-device").value.trim();
+  cfg.source.uvc.size = el("uvc-size").value.trim();
+  cfg.source.uvc.framerate = number("uvc-framerate");
+  cfg.source.uvc.ffmpeg_path = el("uvc-ffmpeg").value.trim();
+
+  cfg.source.serial.port = el("serial-port").value.trim();
+  cfg.source.serial.baud = number("serial-baud");
+
+  cfg.source.mjpeg.url = el("mjpeg-url").value.trim();
+
+  cfg.transform.rotate = number("rotate");
+  cfg.transform.flip_h = el("flip-h").checked;
+  cfg.transform.flip_v = el("flip-v").checked;
+  cfg.transform.crop_square = el("crop-square").checked;
+  cfg.transform.reencode_quality = number("quality");
+
+  cfg.server.hold_on_source_loss = el("hold").checked;
+  cfg.server.boundary = el("boundary").value.trim();
+  cfg.server.listen = el("listen").value.trim();
+
+  cfg.papertracker.install_dir = el("pt-dir").value.trim();
+  cfg.papertracker.write_cache = el("pt-write").checked;
+
+  cfg.ui.language = el("language").value;
+
+  cfg.log.level = el("log-level").value;
+  cfg.log.dir = el("log-dir").value.trim();
+  return cfg;
+}
+
+function say(message, bad) {
+  const result = el("result");
+  result.textContent = message;
+  result.classList.toggle("bad", !!bad);
+}
+
+async function load() {
+  try {
+    const response = await fetch("/api/v1/config", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    fill(await response.json());
+    el("offline").style.display = "none";
+    el("save").disabled = false;
+  } catch (err) {
+    el("offline").style.display = "block";
+    el("save").disabled = true;
+  }
+}
+
+el("settings").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!current) return;
+
+  el("save").disabled = true;
+  say(TEXT.saving);
+  try {
+    const response = await fetch("/api/v1/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collect()),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      // ブリッジの言葉をそのまま出す。どの項目が悪いかを名指ししているのは
+      // あちらであって、こちらではない。
+      say(TEXT.saveFailed + " " + text.trim(), true);
+      return;
+    }
+    const applied = JSON.parse(text);
+    // 応答は動作中の設定なので、保留になった項目は要求した値ではなく古い値で
+    // 返ってくる。画面をそれで描き直したうえで、何が保留になったかを言う。
+    fill(applied);
+    const pending = applied.pending_restart || [];
+    say(pending.length ? TEXT.savedPending + " " + pending.join(", ") : TEXT.saved);
+  } catch (err) {
+    say(TEXT.saveFailed + " " + String(err), true);
+  } finally {
+    el("save").disabled = false;
+  }
+});
+
+for (const radio of document.querySelectorAll('input[name="source-type"]')) {
+  radio.addEventListener("change", () => showSource(radio.value));
+}
+
+// デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
+// 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
+async function loadDevices() {
+  try {
+    const response = await fetch("/api/v1/devices", { cache: "no-store" });
+    if (!response.ok) return;
+    const devices = await response.json();
+    const options = (id, names) => {
+      const list = el(id);
+      list.replaceChildren();
+      for (const name of names) {
+        const option = document.createElement("option");
+        option.value = name;
+        list.append(option);
+      }
+    };
+    options("camera-names", (devices.cameras || []).map((d) => d.name));
+    options("port-names", (devices.serial_ports || []).map((p) => p.name));
+  } catch (err) {
+    // 候補が無いだけ。入力欄はそのまま使える。
+  }
+}
+
+// ffmpeg の取得。100 メガバイトは 1 つの応答に収まらないので、開始したら状態を
+// 見に行く。診断画面と同じ数字を同じところから読んでいる。
+async function pollFFmpeg() {
+  try {
+    const response = await fetch("/ui/state", { cache: "no-store" });
+    if (!response.ok) return;
+    const state = await response.json();
+    el("ffmpeg-actions").hidden = !state.has_ffmpeg;
+    el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
+  } catch (err) {
+    // 状態が読めないだけ。取得ボタンは押せる。
+  }
+}
+
+el("get-ffmpeg").addEventListener("click", async () => {
+  el("get-ffmpeg").disabled = true;
+  try {
+    await fetch("/api/v1/ffmpeg", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  } catch (err) {
+    // 進捗は下の polling が拾う。
+  } finally {
+    el("get-ffmpeg").disabled = false;
+    pollFFmpeg();
+  }
+});
+
+load();
+loadDevices();
+pollFFmpeg();
+setInterval(pollFFmpeg, 2000);
+</script>
+</body>
+</html>

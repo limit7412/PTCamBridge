@@ -210,14 +210,15 @@ func (b *Bridge) Snapshot() config.Config {
 // いれば保存します。設定を残すのは新しいソースが起動できた場合だけなので、誤った
 // デバイス名を渡してもブリッジが何も動かない状態にはなりません。
 //
-// 起動時にしか効かない設定は、受け入れて黙って無視するのではなく拒否します。
-// restartRequired を参照。保存の失敗は config.ErrNotSaved を包んだエラーとして
+// 起動時にしか効かない設定は保存しますが、動作中のブリッジには適用しません。
+// その名前を返すので、呼び出し側は「保存したが今は効いていない」と言えます。
+// deferRestartRequired を参照。保存の失敗は config.ErrNotSaved を包んだエラーとして
 // 報告します。今変更したものが再起動を越えないことを、呼び出し側が知る必要が
 // あるからです。
-func (b *Bridge) Apply(ctx context.Context, cfg config.Config) error {
+func (b *Bridge) Apply(ctx context.Context, cfg config.Config) ([]string, error) {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 
 	b.mu.Lock()
@@ -228,24 +229,27 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config) error {
 // applyLocked は mu を保持済みの Apply です。先に現在の設定を読む必要のある
 // 呼び出し側が、読み取り・変更・適用の全体を、間に何も挟ませずに行えるようにする
 // ためのものです。cfg の正規化と検証は呼び出し側が済ませています。
-func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
+func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, error) {
 	// ロック待ちは、別の呼び出し側の検証まるごと分の長さになり得るので、ここへ
 	// 辿り着いたリクエストは既に居なくなっているかもしれない。この先で起きることは
 	// どれも、そのリクエストの代わりに勝手にやってよいものではない。サーバ設定
 	// だけを触る変更は検証に到達しないので、そうしなければ、タイムアウトを告げ
 	// られた呼び出し側のために適用され書き出されてしまう。
 	if ctx != nil && ctx.Err() != nil {
-		return fmt.Errorf("bridge: the request ended before its change was applied: %w", ctx.Err())
+		return nil, fmt.Errorf("bridge: the request ended before its change was applied: %w", ctx.Err())
 	}
 
 	previous := b.cfg
+	// 要求された内容は、これから畳む前に取っておく。保存するのはこちら。cfg の方は
+	// この後、動作中のブリッジが実際に使うものへ削られる。
+	requested := cfg
 	// 何かを畳む前に読む。ここから先このフラグは「試している設定」を追うことに
 	// なるし、置き換えられる側が動いていたかどうかだけが、巻き戻しが成功し得ると
 	// 言える根拠だから。
 	provenBefore := b.provenLocked()
-	if err := restartRequired(previous, cfg); err != nil {
-		return err
-	}
+	// 起動時にしか読まれない設定は、ここで cfg から取り除かれる。保存はされるが
+	// 動作中のブリッジは古い値のまま動き続ける。deferRestartRequired を参照。
+	deferred := deferRestartRequired(previous, &cfg)
 
 	// Apply の保証は「新しいソースが起動できた場合にのみ設定を残す」ことだが、
 	// 一時停止中は何も起動できない。確認できるのはせいぜいドライバのオブジェクトを
@@ -260,14 +264,14 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 	// 残された唯一の手 (別のソースを選ぶこと) を奪うだけになる。既に落ちている
 	// ブリッジを一時停止した人は、設定ファイルを編集しなければ戻せなくなる。
 	if b.paused && b.provenLocked() && !captureUnchanged(previous, cfg) {
-		return errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
+		return nil, errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
 	}
 
 	// 何かを畳む前にエンコーダを組み立てる。使えない boundary のせいで、今動いて
 	// いるソースをユーザーから奪うべきではない。
 	encoder, err := core.NewMultipartEncoder(cfg.Server.Boundary, cfg.StreamHeaders())
 	if err != nil {
-		return fmt.Errorf("server.boundary: %w", err)
+		return nil, fmt.Errorf("server.boundary: %w", err)
 	}
 
 	if captureUnchanged(previous, cfg) && b.captureAsExpectedLocked() {
@@ -299,11 +303,11 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 					// 新しい知らせではないし、呼び出し側が求めたこととは無関係。
 					// 2 つ並べて報告すれば、関係のある方が埋もれる。
 					b.log.Warn("nothing is capturing: the settings in place before this change had not started a source either", "error", revertErr)
-					return err
+					return nil, err
 				}
-				return fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
+				return nil, fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
 			}
-			return err
+			return nil, err
 		}
 	}
 
@@ -319,7 +323,9 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 		// 差分が無いため、そうしなければ古いファイルを書き直して成功を報告する
 		// ことになる。
 		base, baseErr := b.saveBaseLocked()
-		saved := mergeChanges(base, previous, cfg)
+		// 保存するのは要求された内容。取り除いた葉もここに含まれる。それこそが
+		// 「次の起動で反映される」ということ。
+		saved := mergeChanges(base, previous, requested)
 		err := baseErr
 		if err == nil {
 			err = config.Save(b.cfgPath, saved)
@@ -329,14 +335,17 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) error {
 			// 変更が一時的なものであると言えるようにするため。保留中の書き込みは
 			// 保持しておき、ファイルが再び書けるようになったときに、再試行か次の
 			// 変更がそれを書く。
-			b.holdUnsavedLocked(base, previous, cfg)
+			b.holdUnsavedLocked(base, previous, requested)
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
-			return fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
+			return deferred, fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
 		b.persistBase = saved
 		b.unsaved = nil
 	}
-	return nil
+	if len(deferred) > 0 {
+		b.log.Info("settings saved but not applied, they are only read at startup", "settings", deferred)
+	}
+	return deferred, nil
 }
 
 // captureAsExpectedLocked は、キャプチャが現在の設定の求める状態にあるかを返します。
@@ -536,26 +545,44 @@ func captureUnchanged(previous, next config.Config) bool {
 	}
 }
 
-// restartRequired は、プロセスの起動時にしか読まれない設定への変更を拒否します。
-// 受け入れれば成功を報告して値を保存する一方、動作中のブリッジは古い値を使い続ける
-// ことになります。
-func restartRequired(previous, next config.Config) error {
-	switch {
-	case previous.Server.Listen != next.Server.Listen:
-		return errors.New("server.listen cannot be changed while running: edit the settings file and restart")
-	case previous.Log.Level != next.Log.Level:
-		return errors.New("log.level cannot be changed while running: edit the settings file and restart")
-	case previous.Log.Dir != next.Log.Dir:
-		return errors.New("log.dir cannot be changed while running: edit the settings file and restart")
-	case previous.PaperTracker != next.PaperTracker:
-		return errors.New("papertracker settings are only read at startup: edit the settings file and restart")
-	case previous.UI != next.UI:
-		// トレイはメニューを一度だけ、その言語が与えたラベルで組み立てる。変更を
-		// 受け入れれば保存して成功を報告する一方、画面上の言葉は一つも変わらない
-		// ので、次の起動まで API と画面が食い違うことになる。
-		return errors.New("ui.language cannot be changed while running: edit the settings file and restart")
+// deferRestartRequired は、プロセスの起動時にしか読まれない設定を next から
+// 取り除き、取り除いたものの名前を返します。next は書き換えられます。
+//
+// これらは保存されますが、動作中のブリッジには適用されません。適用したように
+// 振る舞えば、値は変わったのに動きは変わらないという食い違いが、次の起動まで
+// 残り続けます。たとえばトレイはメニューを一度だけ、その時点の言語が与えたラベルで
+// 組み立てるので、ui.language を動作中に受け入れても画面上の言葉は一つも変わりません。
+//
+// 以前はここで拒否していました。変えたのは、拒否が正直である代わりに、GUI から
+// 表示言語や PaperTracker 連携を変える手段を一つも残さないからです。保存はする、
+// ただし今は効かないと言う方が、ユーザーにとって前へ進める答えになります。名前を
+// 返すのは、そう言えるようにするためです。
+//
+// 名前は TOML のキーそのものです。翻訳しません。ユーザーが設定ファイルを開いた
+// ときに探す文字列であり、この画面はそこへ案内するものだからです。
+func deferRestartRequired(previous config.Config, next *config.Config) []string {
+	var deferred []string
+	if previous.Server.Listen != next.Server.Listen {
+		next.Server.Listen = previous.Server.Listen
+		deferred = append(deferred, "server.listen")
 	}
-	return nil
+	if previous.Log.Level != next.Log.Level {
+		next.Log.Level = previous.Log.Level
+		deferred = append(deferred, "log.level")
+	}
+	if previous.Log.Dir != next.Log.Dir {
+		next.Log.Dir = previous.Log.Dir
+		deferred = append(deferred, "log.dir")
+	}
+	if previous.PaperTracker != next.PaperTracker {
+		next.PaperTracker = previous.PaperTracker
+		deferred = append(deferred, "papertracker")
+	}
+	if previous.UI != next.UI {
+		next.UI = previous.UI
+		deferred = append(deferred, "ui.language")
+	}
+	return deferred
 }
 
 // Switch は、稼働中のソース種別だけを変更し、他はそのままにします。
@@ -573,7 +600,9 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	return b.applyLocked(ctx, cfg)
+	// ソース種別は動作中に変えられるものなので、保留になる葉は生まれない。
+	_, err := b.applyLocked(ctx, cfg)
+	return err
 }
 
 // Devices は、今使えるカメラとシリアルポートを列挙します。

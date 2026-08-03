@@ -37,7 +37,30 @@ import (
 //go:embed ui.html
 var uiHTML string
 
-var uiTemplate = template.Must(template.New("ui").Parse(uiHTML))
+// 設定画面。診断画面と対になります。あちらが「今どうなっているか」なら、こちらは
+// 「どうしたいか」です。
+//
+// 書き込みは 1 本の道しかありません。この画面は /api/v1/config を GET して、
+// フォームが持つ項目だけを上書きし、設定全体を PUT で送り返します。管理 API が
+// 設定の一部ではなく全体を受け取るからで、抱えた写しに重ねる形にしないと、画面に
+// 出していない項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — が既定値へ
+// 戻ってしまいます。
+//
+//go:embed ui_settings.html
+var uiSettingsHTML string
+
+// スタイルは 2 つの画面が共有します。テンプレートとして持つのは、埋め込んだ文字列を
+// そのまま両方の <style> に流し込むためです。
+//
+//go:embed ui.css
+var uiCSS string
+
+var uiTemplates = func() *template.Template {
+	set := template.Must(template.New("css").Parse(uiCSS))
+	template.Must(set.New("ui").Parse(uiHTML))
+	template.Must(set.New("settings").Parse(uiSettingsHTML))
+	return set
+}()
 
 // uiPage は、骨格を組み立てるのに必要なものです。読み込み時に 1 度だけ描かれ、
 // 以降変わりません。
@@ -72,11 +95,23 @@ type uiState struct {
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
-	if !s.guardAdmin(w, r) {
+	if r.URL.Path != "/ui" && r.URL.Path != "/ui/" {
+		// guardAdmin より先に見ます。/ui/ で受けているのは配下すべてなので、
+		// 綴りを間違えた URL に「拒否」と答えるのは、無いものを在ると言うのと
+		// 同じことになります。
+		http.NotFound(w, r)
 		return
 	}
-	if r.URL.Path != "/ui" && r.URL.Path != "/ui/" {
-		http.NotFound(w, r)
+	s.renderUI(w, r, "ui", s.printer().S(i18n.UITitle))
+}
+
+func (s *Server) handleUISettings(w http.ResponseWriter, r *http.Request) {
+	s.renderUI(w, r, "settings", s.printer().S(i18n.UISettingsTitle))
+}
+
+// renderUI は、名前付きのテンプレートを骨格として描きます。
+func (s *Server) renderUI(w http.ResponseWriter, r *http.Request, name, title string) {
+	if !s.guardAdmin(w, r) {
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -97,7 +132,7 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 
 	page := uiPage{
 		Lang:     string(p.Lang()),
-		Title:    p.S(i18n.UITitle),
+		Title:    title,
 		Text:     text,
 		TextJSON: template.JS(encoded),
 		Address:  r.Host,
@@ -107,7 +142,7 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	}
 	// 描き始めた後に失敗すると応答が半分になるので、いったん貯めてから出します。
 	var body bytes.Buffer
-	if err := uiTemplate.Execute(&body, page); err != nil {
+	if err := uiTemplates.ExecuteTemplate(&body, name, page); err != nil {
 		http.Error(w, "render page: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -312,6 +347,52 @@ func uiText(p i18n.Printer) map[string]string {
 		"none":        i18n.UINone,
 		"waiting":     i18n.UIWaitingForFrame,
 		"previewNote": i18n.UIPreviewNote,
+
+		"navStatus":   i18n.UINavStatus,
+		"navSettings": i18n.UINavSettings,
+
+		"transform":    i18n.UITransform,
+		"stream":       i18n.UISettingsStream,
+		"papertracker": i18n.UIPaperTracker,
+		"display":      i18n.UISettingsDisplay,
+		"log":          i18n.UISettingsLog,
+
+		"sourceUVC":    i18n.MenuSourceUVC,
+		"sourceSerial": i18n.MenuSourceSerial,
+		"sourceMJPEG":  i18n.MenuSourceMJPEG,
+
+		"device":     i18n.UIFieldDevice,
+		"size":       i18n.UIFieldSize,
+		"framerate":  i18n.UIFieldFramerate,
+		"ffmpegPath": i18n.UIFieldFFmpegPath,
+		"port":       i18n.UIFieldPort,
+		"baud":       i18n.UIFieldBaud,
+		"url":        i18n.UIFieldURL,
+		"rotate":     i18n.UIFieldRotate,
+		"flipH":      i18n.UIFieldFlipH,
+		"flipV":      i18n.UIFieldFlipV,
+		"cropSquare": i18n.UIFieldCropSquare,
+		"quality":    i18n.UIFieldQuality,
+		"hold":       i18n.UIFieldHold,
+		"boundary":   i18n.UIFieldBoundary,
+		"listen":     i18n.UIFieldListen,
+		"installDir": i18n.UIFieldInstallDir,
+		"writeCache": i18n.UIFieldWriteCache,
+		"language":   i18n.UIFieldLanguage,
+		"logLevel":   i18n.UIFieldLogLevel,
+		"logDir":     i18n.UIFieldLogDir,
+
+		"langAuto":       i18n.UILangAuto,
+		"qualityHint":    i18n.UIQualityHint,
+		"writeCacheHint": i18n.UIWriteCacheHint,
+		"restartBadge":   i18n.UIRestartBadge,
+		"restartNote":    i18n.UIRestartNote,
+		"save":           i18n.UISave,
+		"saving":         i18n.UISaving,
+		"saved":          i18n.UISaved,
+		"savedPending":   i18n.UISavedPending,
+		"saveFailed":     i18n.UISaveFailed,
+		"getFFmpeg":      i18n.UIGetFFmpeg,
 	}
 	text := make(map[string]string, len(keys))
 	for name, key := range keys {
