@@ -255,9 +255,6 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 	// なるし、置き換えられる側が動いていたかどうかだけが、巻き戻しが成功し得ると
 	// 言える根拠だから。
 	provenBefore := b.provenLocked()
-	// 起動時にしか読まれない設定は、そのまま受け入れて名前だけを控える。保存はされ、
-	// 設定としても残るが、この起動の振る舞いは変わらない。restartDeferred を参照。
-	deferred := restartDeferred(b.startup, cfg)
 
 	// Apply の保証は「新しいソースが起動できた場合にのみ設定を残す」ことだが、
 	// 一時停止中は何も起動できない。確認できるのはせいぜいドライバのオブジェクトを
@@ -301,8 +298,12 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 	} else {
 		b.stopLocked()
 		b.cfg = cfg
-		b.publishView()
-
+		// view はまだ動かさない。この設定は検証を通っておらず、失敗すれば巻き戻る。
+		// 先に公開すると、最大 30 秒のあいだ Snapshot が「これから取り消されるかも
+		// しれない設定」を返します。それを読んだ管理 API のクライアントは、その値を
+		// 土台に次の変更を組み立て、巻き戻ったはずのソースを自分で復活させます。
+		// 公開するのは検証を通った後です。ドライバは view ではなく b.cfg を読むので、
+		// 起動には差し支えありません。
 		if err := b.verifyStartLocked(ctx); err != nil {
 			b.log.Error("new settings could not start a source, reverting", "error", err)
 			b.cfg = previous
@@ -332,12 +333,16 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 			}
 			return b.cfg, nil, err
 		}
+		// 検証を通った。ここで初めて外から見える。
+		b.publishView()
 	}
 
 	if b.stream != nil {
 		b.stream.SetStreamOptions(encoder, cfg.Server.HoldOnSourceLoss)
 	}
 
+	// saved は、この後ファイルに入る内容です。保存しない場合は要求そのもの。
+	saved := cfg
 	if b.cfgPath != "" {
 		// 変更を重ねる先は、ファイルの最後に判明している内容ではなく、まだ書き
 		// 込みを待っているものの方。保存に失敗した後、この 2 つは同じではないし、
@@ -346,10 +351,11 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 		// 差分が無いため、そうしなければ古いファイルを書き直して成功を報告する
 		// ことになる。
 		base, baseErr := b.saveBaseLocked()
-		saved := mergeChanges(base, previous, cfg)
+		merged := mergeChanges(base, previous, cfg)
+		saved = merged
 		err := baseErr
 		if err == nil {
-			err = config.Save(b.cfgPath, saved)
+			err = config.Save(b.cfgPath, merged)
 		}
 		if err != nil {
 			// 動作中の設定は既に正しいので何も畳まない。呼び出し側には伝える。
@@ -358,11 +364,17 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 			// 変更がそれを書く。
 			b.holdUnsavedLocked(base, previous, cfg)
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
-			return b.cfg, deferred, fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
+			return b.cfg, restartDeferred(b.startup, saved), fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
-		b.persistBase = saved
+		b.persistBase = merged
 		b.unsaved = nil
 	}
+
+	// 何が次の起動を待っているかは、保存した内容から数えます。動作中の設定から
+	// 数えると、ユーザーが設定ファイルを直接編集した分を見落とします。en で起動した
+	// 後に TOML を ja へ書き換え、API からは別の項目だけを変えると、保存の土台は
+	// ファイルを読み直すので ja が残るのに、応答は何も待っていないと言うことになります。
+	deferred := restartDeferred(b.startup, saved)
 	if len(deferred) > 0 {
 		b.log.Info("these settings differ from the ones this process started with, they are only read at startup", "settings", deferred)
 	}

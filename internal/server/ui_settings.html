@@ -316,13 +316,15 @@ el("settings").addEventListener("submit", async (event) => {
 
   freezeForm(true);
   say(TEXT.saving);
+  // dirty は catch からも要る。応答が届かなかっただけで、ブリッジは適用も保存も
+  // 済ませていることがある。
+  const dirty = new Set();
   try {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
     // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
     // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
     const cfg = await getConfig();
     const now = readForm();
-    const dirty = new Set();
     FIELDS.forEach((field, i) => {
       if (now[i] !== baseline[i]) {
         dirty.add(i);
@@ -358,6 +360,14 @@ el("settings").addEventListener("submit", async (event) => {
     say(pending.length ? TEXT.savedPending + " " + pending.join(", ") : TEXT.saved);
   } catch (err) {
     say(TEXT.saveFailed + " " + String(err), true);
+    // ここへ来るのは、要求を送った後に応答が読めなかった場合を含む。ブリッジは
+    // 適用も保存も済ませているかもしれないので、基準の扱いは HTTP のエラーと同じ。
+    // 取り直さないと、元へ戻す操作が変更として見えなくなる。rebase を参照。
+    try {
+      rebase(await getConfig(), dirty);
+    } catch (err) {
+      // 取り直せないだけ。画面の値はそのまま。
+    }
   } finally {
     freezeForm(false);
   }

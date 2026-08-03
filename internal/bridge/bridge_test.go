@@ -2516,3 +2516,99 @@ func TestApplyFlushesAnEarlierUnsavedChangeWhenTheSourceIsBroken(t *testing.T) {
 		t.Errorf("saved language = %q, want the held change %q to reach the file", saved.UI.Language, "ja")
 	}
 }
+
+// 検証を通っていない設定を外へ見せてはいけない。最大 30 秒のあいだ Snapshot が
+// 「これから取り消されるかもしれない設定」を返すと、それを読んだクライアントは
+// その値を土台に次の変更を組み立て、巻き戻ったはずのソースを自分で復活させる。
+func TestSnapshotDoesNotShowAnUnverifiedSource(t *testing.T) {
+	shortenVerify(t, 500*time.Millisecond)
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	silent := silentUpstream(t)
+
+	b := New(mjpegConfig(working.URL), "", hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitFor(t, 5*time.Second, "the first source to prove itself", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.provenLocked()
+	})
+
+	// 応答するだけでフレームを出さない上流へ切り替える。検証はタイムアウトし、
+	// 設定は巻き戻る。
+	next := mjpegConfig(silent.URL)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, _, err := b.Apply(ctx, next); err == nil {
+			t.Error("a source that never sent a frame was accepted")
+		}
+	}()
+
+	// 検証の最中に読む。要求された URL が見えてはいけない。
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := b.Snapshot().Source.MJPEG.URL; got == silent.URL {
+			t.Fatalf("Snapshot showed %q while it was still being verified", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	<-done
+
+	if got := b.Snapshot().Source.MJPEG.URL; got != working.URL {
+		t.Errorf("url = %q, want it back at %q", got, working.URL)
+	}
+}
+
+// 保留の名前は、保存した内容から数える。動作中の設定から数えると、ユーザーが
+// 設定ファイルを直接編集した分を見落とす。
+func TestDeferredNamesFollowWhatWasSaved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+	b := New(mjpegConfig(upstream.URL), path, hub.New(), status.New(), discardLogger())
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// まず 1 度保存して、ファイルを作る。
+	if _, _, err := b.Apply(context.Background(), b.Snapshot()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// ユーザーが設定ファイルを直接編集した、という状況。
+	edited, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	edited.UI.Language = "ja"
+	if err := config.Save(path, edited); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// API からは無関係な項目だけを変える。
+	cfg := b.Snapshot()
+	cfg.Server.HoldOnSourceLoss = !cfg.Server.HoldOnSourceLoss
+	_, deferred, err := b.Apply(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// ファイルには ja が残っているので、次の起動で言語は変わる。応答はそれを
+	// 言わなければならない。
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if saved.UI.Language != "ja" {
+		t.Fatalf("saved language = %q, want the hand edit %q to survive", saved.UI.Language, "ja")
+	}
+	if !slices.Contains(deferred, "ui.language") {
+		t.Errorf("deferred = %v, want it to name ui.language", deferred)
+	}
+}
