@@ -13,8 +13,8 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// autoSerial builds an AutoPort driver whose enumeration is fixed, so the
-// candidate rotation can be observed without any hardware.
+// autoSerial は、列挙結果を固定した AutoPort のドライバを作る。ハードウェア無しで
+// 候補の巡回を観察できるようにするため。
 func autoSerial(t *testing.T, ports ...SerialPort) *Serial {
 	t.Helper()
 	s, err := NewSerial(SerialConfig{Port: AutoPort}, discardLogger(), nil)
@@ -34,9 +34,9 @@ func resolve(t *testing.T, s *Serial) string {
 	return name
 }
 
-// Two boards can carry a recognised vendor ID while only one of them is the
-// camera. Handing back the same head of the list on every reconnect means the
-// wrong one is opened forever and the real board is never reached.
+// 既知のベンダー ID を持つボードが 2 つあり、そのうちカメラは片方だけ、ということが
+// ある。再接続のたびに同じ先頭を返していると、誤った方を永遠に開き続け、本物の
+// ボードには決して辿り着かない。
 func TestSerialAutoPortMovesOnAfterAFailedCandidate(t *testing.T) {
 	s := autoSerial(t,
 		SerialPort{Name: "COM3", Vendor: "Silicon Labs CP210x", VID: "10C4"},
@@ -51,8 +51,8 @@ func TestSerialAutoPortMovesOnAfterAFailedCandidate(t *testing.T) {
 	}
 }
 
-// Once every candidate has had a turn the search starts over rather than
-// giving up: a board that was unplugged a minute ago can be back.
+// すべての候補が一巡したら、諦めずに探索をやり直す。1 分前に抜かれていたボードが
+// 戻っていることはある。
 func TestSerialAutoPortRestartsTheRotationWhenExhausted(t *testing.T) {
 	s := autoSerial(t,
 		SerialPort{Name: "COM3", Vendor: "Silicon Labs CP210x", VID: "10C4"},
@@ -67,9 +67,9 @@ func TestSerialAutoPortRestartsTheRotationWhenExhausted(t *testing.T) {
 	}
 }
 
-// A port that delivered frames is the one to reopen first when it drops: a
-// tugged cable is likelier than the board having moved. It gets that one
-// attempt only, so a board that really is gone does not wedge the rotation.
+// フレームを届けたポートは、切れたときに最初に開き直す相手。ボードが移動したより
+// ケーブルが引っ張られた可能性の方が高い。試行は 1 回だけなので、本当に居なくなった
+// ボードが巡回を詰まらせることはない。
 func TestSerialAutoPortPrefersThePortThatWorked(t *testing.T) {
 	s := autoSerial(t,
 		SerialPort{Name: "COM3", Vendor: "Silicon Labs CP210x", VID: "10C4"},
@@ -79,7 +79,7 @@ func TestSerialAutoPortPrefersThePortThatWorked(t *testing.T) {
 	if got := resolve(t, s); got != "COM3" {
 		t.Fatalf("first attempt = %q, want COM3", got)
 	}
-	// COM7 is opened next and is the one that produces frames.
+	// 次に開かれるのは COM7 で、フレームを出すのはそちら。
 	if got := resolve(t, s); got != "COM7" {
 		t.Fatalf("second attempt = %q, want COM7", got)
 	}
@@ -93,7 +93,7 @@ func TestSerialAutoPortPrefersThePortThatWorked(t *testing.T) {
 	}
 }
 
-// A port that worked and has since been unplugged must not stall the search.
+// 動いていたが今は抜かれているポートが、探索を止めてはいけない。
 func TestSerialAutoPortSkipsAProvenPortThatIsGone(t *testing.T) {
 	s := autoSerial(t, SerialPort{Name: "COM7", Vendor: "Espressif", VID: "303A"})
 	s.proven = "COM4"
@@ -103,9 +103,8 @@ func TestSerialAutoPortSkipsAProvenPortThatIsGone(t *testing.T) {
 	}
 }
 
-// With nothing recognisable and nothing else it could be, the only port on the
-// machine is worth a try; several unrecognised ports are not a guess worth
-// making.
+// 見覚えのあるものが無く、他にあり得るものも無いなら、機械に 1 つしかないポートは
+// 試す価値がある。見覚えの無いポートが複数あるなら、それは行う価値のある推測ではない。
 func TestSerialAutoPortCandidates(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -117,8 +116,8 @@ func TestSerialAutoPortCandidates(t *testing.T) {
 			name:  "the lone port is the fallback",
 			ports: []SerialPort{{Name: "COM1"}},
 			want:  []string{"COM1"},
-			// Nothing about it says camera, so the caller has to be told the
-			// pick is a guess.
+			// カメラだと言える材料が何も無いので、その選択が推測であることを
+			// 呼び出し側に伝える必要がある。
 			wantGuessed: true,
 		},
 		{
@@ -157,7 +156,7 @@ func TestSerialAutoPortReportsWhenNothingMatches(t *testing.T) {
 	}
 }
 
-// An explicit port is used as written, with none of the rotation.
+// 明示されたポートは書かれたとおりに使い、巡回は一切行わない。
 func TestSerialExplicitPortIsUsedVerbatim(t *testing.T) {
 	s, err := NewSerial(SerialConfig{Port: "COM9"}, discardLogger(), nil)
 	if err != nil {
@@ -172,8 +171,8 @@ func TestSerialExplicitPortIsUsedVerbatim(t *testing.T) {
 	}
 }
 
-// fakePort feeds a session a fixed stream and then goes quiet, which is what a
-// board that talks nonsense and one that says nothing both look like from here.
+// fakePort は、決まったストリームをセッションに流したあと黙る。意味を成さないことを
+// 喋るボードと、何も言わないボードは、ここからは同じに見える。
 type fakePort struct {
 	chunks [][]byte
 	closed bool
@@ -181,7 +180,7 @@ type fakePort struct {
 
 func (p *fakePort) Read(b []byte) (int, error) {
 	if len(p.chunks) == 0 {
-		// A read timeout, the way the real driver reports one.
+		// 実際のドライバが報告するのと同じ形の読み取りタイムアウト。
 		time.Sleep(time.Millisecond)
 		return 0, nil
 	}
@@ -197,7 +196,7 @@ func (p *fakePort) Close() error {
 	return nil
 }
 
-// wiredSerial builds a driver whose port hands back the given chunks.
+// wiredSerial は、指定した chunk を返すポートを持つドライバを作る。
 func wiredSerial(t *testing.T, log *slog.Logger, cfg SerialConfig, chunks ...[]byte) *Serial {
 	t.Helper()
 	if cfg.Port == "" {
@@ -211,7 +210,7 @@ func wiredSerial(t *testing.T, log *slog.Logger, cfg SerialConfig, chunks ...[]b
 	return s
 }
 
-// runUntilStall runs one session and returns why it ended.
+// runUntilStall はセッションを 1 つ走らせ、それが終わった理由を返す。
 func runUntilStall(t *testing.T, s *Serial) error {
 	t.Helper()
 	restore := serialStallTimeout
@@ -223,8 +222,8 @@ func runUntilStall(t *testing.T, s *Serial) error {
 	return s.session(ctx, make(chan core.Frame, 8))
 }
 
-// A silent port and a port full of bytes nobody can parse need opposite fixes,
-// and the stall alone does not tell them apart. The byte count does.
+// 無言のポートと、誰にも解析できないバイトで満ちたポートは正反対の対処を要するが、
+// 停滞だけでは区別がつかない。区別するのはバイト数。
 func TestSerialStallSaysHowMuchArrived(t *testing.T) {
 	t.Run("nothing on the wire", func(t *testing.T) {
 		s := wiredSerial(t, discardLogger(), SerialConfig{})
@@ -249,14 +248,14 @@ func TestSerialStallSaysHowMuchArrived(t *testing.T) {
 	})
 }
 
-// The bytes themselves are what settles a header mismatch, so they have to
-// reach the log along with the header that was being looked for.
+// ヘッダーの不一致に決着をつけるのはバイト列そのものなので、探していたヘッダーと
+// 一緒にログまで届かなければならない。
 func TestSerialStallLogsTheUnparsableStream(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// A preamble one byte different from the configured one: the case the
-	// setting exists for, and the one a byte count alone cannot diagnose.
+	// 設定と 1 バイトだけ違う前置き。この設定が存在する理由そのものであり、
+	// バイト数だけでは診断できない場合。
 	stream := append([]byte{0xFF, 0xA0, 0xFF, 0xB1, 0x10, 0x00}, bytes.Repeat([]byte{0x42}, 32)...)
 	s := wiredSerial(t, log, SerialConfig{}, stream)
 
@@ -275,14 +274,14 @@ func TestSerialStallLogsTheUnparsableStream(t *testing.T) {
 			t.Errorf("log does not mention %q:\n%s", want, out)
 		}
 	}
-	// Only the head of the stream, not a dump of everything that arrived.
+	// ストリームの先頭だけ。届いたもの全部のダンプではない。
 	if strings.Contains(out, strings.Repeat("42 ", 20)) {
 		t.Errorf("log carries more of the stream than the preview:\n%s", out)
 	}
 }
 
-// The reconnect loop comes back every few seconds. Repeating the same warning
-// on every pass would bury the log without adding anything.
+// 再接続ループは数秒ごとに戻ってくる。毎回同じ警告を繰り返せば、何も足さないまま
+// ログを埋め尽くす。
 func TestSerialStallWarnsOncePerStream(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -299,17 +298,16 @@ func TestSerialStallWarnsOncePerStream(t *testing.T) {
 	if warns := strings.Count(logged.String(), "level=WARN"); warns != 1 {
 		t.Errorf("logged %d warnings for one unchanged stream, want 1:\n%s", warns, logged.String())
 	}
-	// The repeats are still there for anyone who turns the level up.
+	// レベルを上げた人のために、繰り返しは debug に残っている。
 	if debugs := strings.Count(logged.String(), "level=DEBUG"); debugs != 2 {
 		t.Errorf("logged %d debug lines for the repeats, want 2:\n%s", debugs, logged.String())
 	}
 }
 
-// A stream that changed is worth saying again -- a reflashed board or a
-// different device on the same COM number is a different diagnosis. But not
-// without end: a port carrying a live stream is joined at a different point
-// every time, so the bytes differ on every open and warning on each would be
-// the flooding this memory exists to prevent.
+// ストリームが変わったなら改めて言う価値がある。書き換えられたボードや、同じ COM
+// 番号に現れた別のデバイスは別の診断だから。ただし際限なくではない。流れている
+// ストリームを載せたポートは毎回違う地点で合流するので、開くたびにバイト列は異なり、
+// そのたびに警告すれば、この記憶が防ごうとしている氾濫そのものになる。
 func TestSerialStallWarnsAboutAChangedStreamButNotForever(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -331,8 +329,8 @@ func TestSerialStallWarnsAboutAChangedStreamButNotForever(t *testing.T) {
 	}
 }
 
-// A port that starts working has settled whatever was wrong with it. If it
-// breaks again later that is a new complaint, not a repeat of the old one.
+// 動き始めたポートは、何が悪かったにせよそれが解消したということ。後でまた壊れたら
+// それは新しい苦情であって、古い苦情の繰り返しではない。
 func TestSerialStallWarnsAgainAfterThePortHasWorked(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -348,8 +346,7 @@ func TestSerialStallWarnsAgainAfterThePortHasWorked(t *testing.T) {
 	junk := bytes.Repeat([]byte{0x5A}, 64)
 
 	s := wiredSerial(t, log, SerialConfig{}, junk)
-	// Unparsable, then a session that works, then unparsable again in exactly
-	// the same way as the first time.
+	// 解析できない、次に動くセッション、そして最初とまったく同じ形でまた解析できない。
 	for _, chunks := range [][][]byte{{junk}, {packet}, {junk}} {
 		s.openPort = func(string, int) (serialPort, error) { return &fakePort{chunks: chunks}, nil }
 		if err := runUntilStall(t, s); err == nil {
@@ -362,9 +359,8 @@ func TestSerialStallWarnsAgainAfterThePortHasWorked(t *testing.T) {
 	}
 }
 
-// "auto" rotates between candidates, so remembering only the last stream would
-// warn again every time the rotation came back round to a port already
-// reported.
+// "auto" は候補の間を巡回するので、最後のストリームだけを覚えていると、既に報告
+// したポートに巡回が戻ってくるたびにまた警告することになる。
 func TestSerialStallWarnsOncePerPortAcrossTheRotation(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -376,7 +372,7 @@ func TestSerialStallWarnsOncePerPortAcrossTheRotation(t *testing.T) {
 	s.listPorts = func() ([]SerialPort, error) {
 		return []SerialPort{{Name: "COM3", Vendor: "Espressif"}, {Name: "COM4", Vendor: "Espressif"}}, nil
 	}
-	// Each port carries its own unparsable stream.
+	// 各ポートがそれぞれ固有の、解析できないストリームを載せている。
 	streams := map[string][]byte{
 		"COM3": bytes.Repeat([]byte{0xAA}, 64),
 		"COM4": bytes.Repeat([]byte{0xBB}, 64),
@@ -385,7 +381,7 @@ func TestSerialStallWarnsOncePerPortAcrossTheRotation(t *testing.T) {
 		return &fakePort{chunks: [][]byte{streams[name]}}, nil
 	}
 
-	// A, B, then round to A again.
+	// A、B、そして一周して再び A。
 	for i := 0; i < 3; i++ {
 		if err := runUntilStall(t, s); err == nil {
 			t.Fatalf("session %d returned nil, want a stall", i+1)
@@ -397,9 +393,9 @@ func TestSerialStallWarnsOncePerPortAcrossTheRotation(t *testing.T) {
 	}
 }
 
-// A read can carry a frame and the beginning of the next packet together. If
-// the frame zeroed the count outright, a board that then went quiet mid-packet
-// would be reported as having sent nothing -- which points at the wrong fix.
+// 1 回の読み取りが、フレームと次のパケットの先頭を同時に運ぶことがある。フレームが
+// 数を無条件に 0 に戻していると、その後パケットの途中で黙ったボードが「何も送って
+// いない」と報告されることになり、誤った対処へ導く。
 func TestSerialStallKeepsBytesThatFollowedTheLastFrame(t *testing.T) {
 	parser, err := core.NewETVRParser(nil, 0)
 	if err != nil {
@@ -409,8 +405,7 @@ func TestSerialStallKeepsBytesThatFollowedTheLastFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodePacket: %v", err)
 	}
-	// The head of a second packet, with its payload never arriving: header and
-	// length field only.
+	// 2 つ目のパケットの先頭。ペイロードは決して届かない。ヘッダーと長さフィールドだけ。
 	partial := packet[:parser.HeaderLen()+2]
 
 	s := wiredSerial(t, discardLogger(), SerialConfig{}, append(append([]byte{}, packet...), partial...))
@@ -424,10 +419,10 @@ func TestSerialStallKeepsBytesThatFollowedTheLastFrame(t *testing.T) {
 	}
 }
 
-// The bytes after a frame are counted from what the parser skipped past, not
-// from what it kept: it keeps only what could still begin a packet, which for
-// pure rubbish is at most the header length minus one -- nothing at all when
-// the configured header is a single byte, which the settings allow.
+// フレームより後のバイトは、パーサーが保持したものではなく通り過ぎたものから数える。
+// パーサーが保持するのはまだパケットの先頭になり得る分だけで、純然たるゴミに対して
+// それはせいぜいヘッダー長 -1 バイト。設定が許すとおりヘッダーが 1 バイトなら、
+// まったく残らない。
 func TestSerialStallCountsUnparsableBytesAfterAFrame(t *testing.T) {
 	for _, header := range [][]byte{{0xFF, 0xA0, 0xFF, 0xA1}, {0xFF}} {
 		t.Run(hexPreview(header), func(t *testing.T) {
@@ -439,8 +434,8 @@ func TestSerialStallCountsUnparsableBytesAfterAFrame(t *testing.T) {
 			if err != nil {
 				t.Fatalf("EncodePacket: %v", err)
 			}
-			// Rubbish the parser cannot make anything of, and which contains
-			// no byte of the header, so none of it is kept as a candidate.
+			// パーサーが何も読み取れないゴミであり、ヘッダーのバイトを 1 つも
+			// 含まないので、候補として残る部分は無い。
 			junk := bytes.Repeat([]byte{0x5A}, 64)
 
 			s := wiredSerial(t, discardLogger(), SerialConfig{Header: header},
@@ -457,8 +452,8 @@ func TestSerialStallCountsUnparsableBytesAfterAFrame(t *testing.T) {
 	}
 }
 
-// A board that worked and then went quiet is a different situation: there is
-// no unparsable stream to show, so showing one would be misleading.
+// 動いていたボードが黙った場合は状況が違う。見せるべき「解析できないストリーム」が
+// 存在しないので、何かを見せれば誤解を招く。
 func TestSerialStallAfterWorkingSaysNothingAboutTheStream(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -481,10 +476,9 @@ func TestSerialStallAfterWorkingSaysNothingAboutTheStream(t *testing.T) {
 	}
 }
 
-// The fallback opens whatever single port exists, which may be anything at
-// all -- a VR headset, a printer. If the log does not say so, the failure that
-// follows looks like a broken camera board and sends the reader after the
-// wrong thing.
+// 最後の頼みは、存在する唯一のポートが何であれそれを開く。それは VR ヘッドセット
+// かもしれないしプリンタかもしれない。ログがそう言わなければ、続く失敗は壊れた
+// カメラボードのように見え、読み手を誤った方向へ走らせる。
 func TestSerialAutoFallbackSaysThePickIsAGuess(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, nil))
@@ -512,7 +506,7 @@ func TestSerialAutoFallbackSaysThePickIsAGuess(t *testing.T) {
 	}
 }
 
-// A recognised board is not a guess, so it must not be shouted about.
+// 既知のボードは推測ではないので、騒ぎ立ててはいけない。
 func TestSerialAutoRecognisedPortIsNotWarnedAbout(t *testing.T) {
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, nil))

@@ -14,8 +14,8 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// fakeFFmpeg writes a stand-in for ffmpeg that prints diag to stderr and exits
-// non-zero, which is what ffmpeg does when it cannot open a device.
+// fakeFFmpeg は ffmpeg の代役を書き出す。diag を標準エラー出力に印字して非ゼロで
+// 終了する。デバイスを開けなかったときの ffmpeg の振る舞いそのもの。
 func fakeFFmpeg(t *testing.T, diag string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -29,10 +29,10 @@ func fakeFFmpeg(t *testing.T, diag string) string {
 	return path
 }
 
-// A camera that is not plugged in yet reports the same thing as one that will
-// never exist, so the driver keeps retrying either way: a camera attached after
-// sign-in still has to be picked up. Deciding whether a source works is the
-// bridge's job, and it does it by waiting for a frame.
+// まだ挿さっていないだけのカメラと、永遠に存在しないカメラは同じことを報告してくる。
+// だからドライバはどちらの場合も再試行を続ける。サインイン後に繋がれたカメラも拾える
+// 必要があるから。ソースが機能しているかを判断するのはブリッジの仕事で、フレームを
+// 待つことでそれを行う。
 func TestUVCKeepsRetryingAnUnopenableDevice(t *testing.T) {
 	u, err := NewUVC(UVCConfig{
 		Device:     "not-plugged-in-yet",
@@ -48,7 +48,7 @@ func TestUVCKeepsRetryingAnUnopenableDevice(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- u.Run(ctx, make(chan core.Frame, 4)) }()
 
-	// Long enough for the first attempt, the 1s backoff and the second.
+	// 最初の試行、1 秒のバックオフ、2 回目の試行に足りる長さ。
 	select {
 	case err := <-done:
 		t.Fatalf("Run gave up on a device that may still appear: %v", err)
@@ -63,8 +63,8 @@ func TestUVCKeepsRetryingAnUnopenableDevice(t *testing.T) {
 	}
 }
 
-// A missing ffmpeg is different: no camera appearing later fixes it, and the
-// driver has nothing to retry.
+// ffmpeg が無い場合は話が違う。後からカメラが現れても直らないし、ドライバには
+// 再試行する対象が無い。
 func TestUVCTreatsAMissingFFmpegAsFatal(t *testing.T) {
 	u, err := NewUVC(UVCConfig{
 		Device:     "camera",
@@ -91,14 +91,14 @@ func TestUVCTreatsAMissingFFmpegAsFatal(t *testing.T) {
 	}
 }
 
-// A wedged camera leaves ffmpeg running and silent rather than exiting, and a
-// blocking read on its stdout never returns. Without a stall timeout the
-// reconnect loop is never reached and the bridge stays dead until restarted.
+// 詰まったカメラは ffmpeg を終了させず、動いたまま黙らせる。その標準出力に対する
+// ブロッキング読み取りは決して返らない。停滞タイムアウトが無ければ再接続ループには
+// 到達せず、ブリッジは再起動されるまで死んだままになる。
 func TestUVCRecoversFromAnFFmpegThatGoesSilent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the stand-in driver is a shell script")
 	}
-	// Produces nothing and never exits, like a stuck DirectShow filter.
+	// 何も出さず、終了もしない。固まった DirectShow フィルタのように。
 	path := filepath.Join(t.TempDir(), "ffmpeg")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
 		t.Fatalf("write the stand-in ffmpeg: %v", err)
@@ -119,16 +119,16 @@ func TestUVCRecoversFromAnFFmpegThatGoesSilent(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- u.Run(ctx, make(chan core.Frame, 4)) }()
 
-	// Long enough for the stall timeout to fire and a retry to begin.
+	// 停滞タイムアウトが発火し、再試行が始まるのに足りる長さ。
 	select {
 	case err := <-done:
 		t.Fatalf("Run returned instead of retrying: %v", err)
 	case <-time.After(2 * time.Second):
 	}
 
-	// The real proof: cancelling returns promptly. Without the stall timeout
-	// the read is still blocked on a child that never writes, and Run would
-	// sit there until the process is killed.
+	// 本当の証拠はこれ。キャンセルすれば速やかに返る。停滞タイムアウトが無ければ
+	// 読み取りは何も書かない子プロセスの上でブロックしたままで、Run はプロセスが
+	// 殺されるまでそこに居座る。
 	cancel()
 	select {
 	case <-done:
@@ -137,10 +137,10 @@ func TestUVCRecoversFromAnFFmpegThatGoesSilent(t *testing.T) {
 	}
 }
 
-// Passthrough is turned off permanently, so it must only happen when the
-// device actually opened and refused MJPEG. A camera that was merely not
-// plugged in yet fails the same way, and latching on that would cost every
-// later frame a decode and re-encode.
+// そのまま流す設定は恒久的に降ろされるので、デバイスが実際に開いたうえで MJPEG を
+// 拒否した場合に限らなければならない。まだ挿さっていないだけのカメラも同じ失敗を
+// するので、それで固定してしまうと以降すべてのフレームがデコードと再エンコードを
+// 払うことになる。
 func TestUVCKeepsPassthroughWhenTheDeviceNeverOpened(t *testing.T) {
 	u, err := NewUVC(UVCConfig{
 		Device:     "not-plugged-in-yet",
@@ -159,12 +159,12 @@ func TestUVCKeepsPassthroughWhenTheDeviceNeverOpened(t *testing.T) {
 	}
 }
 
-// Falling back is a guess being tested, not a verdict. Re-encoding asks the
-// same device for a different output format: if that works the format really
-// was the problem, and if it produces nothing either then the device was, so
-// passthrough comes back. Otherwise a camera that was merely busy at sign-in
-// costs every later frame a decode and re-encode for the life of the process,
-// on the strength of a stderr string this cannot be expected to recognise.
+// フォールバックは検証中の推測であって、判決ではない。再エンコードは同じデバイスに
+// 別の出力形式を要求する。それが動くなら問題は本当に形式の側にあったし、それでも
+// 何も出ないならデバイスの側だったということなので、そのまま流す方を復帰させる。
+// そうしないと、サインイン時にたまたま使用中だっただけのカメラのせいで、プロセスが
+// 生きている限りすべてのフレームがデコードと再エンコードを払うことになる。しかも
+// その根拠は、こちらが認識できるとは期待できない標準エラー出力の文字列だ。
 func TestUVCCodecChoice(t *testing.T) {
 	const busy = "[dshow @ 000001] I/O error"
 	const missing = `[dshow @ 000001] Could not find video device with name "camera"`
@@ -199,9 +199,10 @@ func TestUVCCodecChoice(t *testing.T) {
 		if u.copyCodec {
 			t.Fatal("re-encoding was never tried")
 		}
-		// Frames under re-encoding say the camera works, not that it has no
-		// MJPEG: the passthrough attempt before this one may have caught it
-		// busy. Passthrough gets one more try against a device known to work.
+		// 再エンコードでフレームが出たことが言うのは「カメラは動く」であって
+		// 「MJPEG を持たない」ではない。その前のそのまま流す試みは、使用中の瞬間に
+		// 当たっただけかもしれない。動くと分かったデバイスに対して、そのまま流す方に
+		// もう 1 回機会を与える。
 		u.chooseCodec(12, "", nil)
 		if !u.copyCodec {
 			t.Fatal("passthrough was written off on a single comparison")
@@ -210,13 +211,13 @@ func TestUVCCodecChoice(t *testing.T) {
 			t.Fatal("one working re-encode settled it")
 		}
 
-		// It fails again, and now the two results are about the same device in
-		// the same state.
+		// また失敗した。これで 2 つの結果は、同じ状態にある同じデバイスについての
+		// ものになった。
 		u.chooseCodec(0, noMJPEG, failed)
 		if u.copyCodec || !u.reencodeReal {
 			t.Fatal("a second passthrough failure did not settle it")
 		}
-		// The camera being unplugged later must not undo that.
+		// 後でカメラが抜かれても、その結論を覆してはいけない。
 		u.chooseCodec(0, busy, failed)
 		if u.copyCodec {
 			t.Error("passthrough came back after re-encoding had been proven necessary")
@@ -227,9 +228,9 @@ func TestUVCCodecChoice(t *testing.T) {
 		}
 	})
 
-	// The case the confirmation exists for: the camera was busy when
-	// passthrough ran and free when re-encoding did, so the comparison proves
-	// nothing. Passthrough works on the retry and stays.
+	// 確認の手順が存在する理由そのものの場合。そのまま流したときカメラは使用中で、
+	// 再エンコードのときは空いていたので、比較は何も証明していない。再試行では
+	// そのまま流せて、それが維持される。
 	t.Run("a device that was merely busy keeps passthrough", func(t *testing.T) {
 		u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger(), copyCodec: true}
 
@@ -242,7 +243,7 @@ func TestUVCCodecChoice(t *testing.T) {
 		if !u.copyCodec || u.reencodeReal {
 			t.Error("a working passthrough was given up")
 		}
-		// A later dropout must not resurrect the earlier guess.
+		// 後の切断が、以前の推測を蘇らせてはいけない。
 		u.chooseCodec(0, busy, failed)
 		u.chooseCodec(12, "", nil)
 		if !u.copyCodec {
@@ -259,8 +260,8 @@ func TestUVCCodecChoice(t *testing.T) {
 	})
 }
 
-// The other side of it: a device that opened and could not deliver MJPEG has
-// to try re-encoding, or it never works at all.
+// その裏側。開いたものの MJPEG を出せなかったデバイスは再エンコードを試さなければ
+// ならない。さもないと一度も動かない。
 func TestUVCFallsBackWhenTheDeviceRejectsMJPEG(t *testing.T) {
 	u, err := NewUVC(UVCConfig{
 		Device:     "camera",
@@ -279,9 +280,9 @@ func TestUVCFallsBackWhenTheDeviceRejectsMJPEG(t *testing.T) {
 	}
 }
 
-// A copy the bridge fetched for itself is the last place looked at, after the
-// three the user controls. Anything else and an installation deliberately
-// pointed at a particular ffmpeg would quietly stop using it.
+// ブリッジが自分で取得したコピーは、ユーザーが管理する 3 つの後、最後に見る場所。
+// そうでなければ、特定の ffmpeg を意図して指しているインストールが、それを黙って
+// 使わなくなる。
 func TestUVCPrefersTheUsersFFmpegOverTheFetchedOne(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH lookup needs an executable bit")
@@ -292,14 +293,14 @@ func TestUVCPrefersTheUsersFFmpegOverTheFetchedOne(t *testing.T) {
 	t.Setenv("APPDATA", settings)
 	fetched := writeExecutable(t, filepath.Join(settings, "PTCamBridge", "bin"), ffmpegBinaryName())
 
-	// Nothing else on offer: the fetched copy is found.
+	// 他に何も無い場合。取得したコピーが見つかる。
 	t.Setenv("PATH", t.TempDir())
 	u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger()}
 	if got, err := u.ffmpegPath(); err != nil || got != fetched {
 		t.Fatalf("ffmpegPath() = %q, %v; want the fetched copy %q", got, err, fetched)
 	}
 
-	// One on PATH outranks it.
+	// PATH 上のものはそれより優先される。
 	onPath := t.TempDir()
 	writeExecutable(t, onPath, ffmpegBinaryName())
 	t.Setenv("PATH", onPath)
@@ -311,7 +312,7 @@ func TestUVCPrefersTheUsersFFmpegOverTheFetchedOne(t *testing.T) {
 		t.Errorf("ffmpegPath() = the fetched copy, want the one on PATH")
 	}
 
-	// And the configured override outranks everything.
+	// そして設定による上書きはすべてに優先する。
 	configured := writeExecutable(t, t.TempDir(), "my-ffmpeg")
 	u.cfg.FFmpegPath = configured
 	if got, err := u.ffmpegPath(); err != nil || got != configured {
@@ -319,7 +320,7 @@ func TestUVCPrefersTheUsersFFmpegOverTheFetchedOne(t *testing.T) {
 	}
 }
 
-// With nothing anywhere, the failure has to say what the user can do about it.
+// どこにも無い場合、その失敗はユーザーに何ができるかを述べなければならない。
 func TestUVCSaysHowToGetFFmpegWhenThereIsNone(t *testing.T) {
 	settings := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", settings)
@@ -338,10 +339,10 @@ func TestUVCSaysHowToGetFFmpegWhenThereIsNone(t *testing.T) {
 	}
 }
 
-// Missing ffmpeg has to stay retryable. The tray can fetch one while the bridge
-// is running, and if the driver gave up for good the fetch would finish with
-// the camera still dead until the user restarted -- which is the whole flow the
-// download exists to serve.
+// ffmpeg が無い状態は再試行可能なままでなければならない。ブリッジが動いている間に
+// トレイから取得できるし、ドライバが完全に諦めてしまえば、取得が終わってもユーザーが
+// 再起動するまでカメラは死んだまま。それはこのダウンロード機能が支えるはずの流れ
+// そのものだ。
 func TestUVCKeepsRetryingWhenThereIsNoFFmpegYet(t *testing.T) {
 	settings := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", settings)
@@ -378,10 +379,9 @@ func writeExecutable(t *testing.T, dir, name string) string {
 	return path
 }
 
-// The first thing a new user sees from this program, most likely. Naming the
-// symptom is not enough: the remedy has to be in the line, because there is
-// nothing in the settings file for them to copy and no camera name that could
-// have been guessed for them.
+// 新しいユーザーがこのプログラムから最初に目にするものである可能性が最も高い。
+// 症状を挙げるだけでは足りない。対処が同じ行に無ければならない。設定ファイルには
+// 真似できるものが無く、推測してやれるカメラ名も無いのだから。
 func TestUVCSaysHowToNameACameraWhenNoneIsConfigured(t *testing.T) {
 	_, err := NewUVC(UVCConfig{}, discardLogger(), nil)
 	if !errors.Is(err, ErrNoDevice) {
