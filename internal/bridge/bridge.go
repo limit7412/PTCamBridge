@@ -77,7 +77,9 @@ type Bridge struct {
 	startup config.Config
 
 	// overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
-	// 読まれない設定の名前です。SetPersistBase が一度だけ決めます。
+	// 読まれない設定の葉の名前です。SetPersistBase が一度だけ決めます。名前は
+	// 上書きを重ねた側から受け取ります。設定値の差から数えると、ファイルと同じ値を
+	// 指定した上書きが見えません。
 	overridden []string
 
 	// unsaved は、ファイルまで届かなかった書き込みです。ファイルが最新である間は
@@ -171,14 +173,21 @@ func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log 
 // SetPersistBase は、ファイルが持っているとおりの設定を記録します。保存はこれを
 // 土台にします。これが無いと、実効設定がそのまま保存され、一度きりの上書きが、
 // 何かが Apply を呼んだ最初の瞬間に恒久的なものになります。
-func (b *Bridge) SetPersistBase(cfg config.Config) {
+// overridden には、環境変数やコマンドラインが実際に指定した葉の名前を渡します
+// (config.Config.ApplyEnv と applyFlags が返すもの)。値の差から推測してはいけません。
+// ファイルと同じ値を指定した上書きは差を作りませんが、上書きとしては存在します。
+func (b *Bridge) SetPersistBase(cfg config.Config, overridden []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.persistBase = cfg
-	// ファイルと起動時の実効設定の差が、そのまま「起動時に上書きされた葉」です。
-	// 環境変数とコマンドラインはここでしか効かないので、この集合はプロセスの間
-	// ずっと変わりません。overridden を参照。
-	b.overridden = restartDeferred(cfg, b.startup)
+	// 控えるのは、起動時にしか読まれない葉だけです。動作中に読み直せる葉の上書きは
+	// 保留とは関係がありません。設定画面から変えればその場で効きます。
+	b.overridden = nil
+	for _, name := range overridden {
+		if slices.Contains(restartOnlyLeaves, name) && !slices.Contains(b.overridden, name) {
+			b.overridden = append(b.overridden, name)
+		}
+	}
 }
 
 // Overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
@@ -684,6 +693,26 @@ func startupOnlyChange(previous, next config.Config) bool {
 	return reflect.DeepEqual(trimmed, previous)
 }
 
+// restartOnlyLeaves は、起動時にしか読まれない設定の葉です。restartDeferred が
+// 挙げうる名前と、ちょうど同じ集合でなければなりません
+// (TestRestartOnlyLeavesMatchWhatCanBeDeferred が見ています)。
+//
+// 別に持っているのは、上書きの側には差が無いからです。上書きされた葉は
+// ApplyEnv と applyFlags が名前で答えるので、そのうちどれが起動時専用かを
+// 選ぶには、名前だけで答えられる集合が要ります。
+var restartOnlyLeaves = []string{
+	"server.listen",
+	"log.level",
+	"log.dir",
+	"papertracker.install_dir",
+	"papertracker.write_cache",
+	"ui.language",
+}
+
+// 名前は葉ごとです。まとめると、上書きされた葉を差し引くときに、隣の正当な保留まで
+// 一緒に消えます。papertracker.install_dir を環境変数で上書きしている機械で
+// write_cache だけを保存すると、次の起動では確かに write_cache が変わるのに、
+// 「papertracker」という 1 つの名前しかなければ、それも上書き済みとして黙ります。
 func restartDeferred(startup, next config.Config) []string {
 	var deferred []string
 	if startup.Server.Listen != next.Server.Listen {
@@ -695,8 +724,11 @@ func restartDeferred(startup, next config.Config) []string {
 	if startup.Log.Dir != next.Log.Dir {
 		deferred = append(deferred, "log.dir")
 	}
-	if startup.PaperTracker != next.PaperTracker {
-		deferred = append(deferred, "papertracker")
+	if startup.PaperTracker.InstallDir != next.PaperTracker.InstallDir {
+		deferred = append(deferred, "papertracker.install_dir")
+	}
+	if startup.PaperTracker.WriteCache != next.PaperTracker.WriteCache {
+		deferred = append(deferred, "papertracker.write_cache")
 	}
 	if startup.UI != next.UI {
 		deferred = append(deferred, "ui.language")

@@ -125,10 +125,15 @@ func run() error {
 		return err
 	}
 	cfg := fileCfg
-	if err := cfg.ApplyEnv(os.Getenv); err != nil {
+	// どの葉が上書きされたかは、重ねる側にしか分かりません。ファイルと実効設定の
+	// 差から推測すると、ファイルと同じ値を指定した上書き — PTCAMBRIDGE_LANGUAGE=en
+	// をファイルの en に重ねる場合 — が見えません。それも上書きなので、ファイルを
+	// ja に書き換えても次の起動はやはり en です。
+	overridden, err := cfg.ApplyEnv(os.Getenv)
+	if err != nil {
 		return err
 	}
-	applyFlags(&cfg, opts)
+	overridden = append(overridden, applyFlags(&cfg, opts)...)
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -172,7 +177,7 @@ func run() error {
 	// 保存の起点は実効設定ではなくファイルが述べていた内容。-device や
 	// PTCAMBRIDGE_* はこの実行のためのものであり、トレイが無関係な何かを変えた
 	// 最初の瞬間に書き戻されてはいけない。fileCfg にはどちらの層も適用していない。
-	app.SetPersistBase(fileCfg)
+	app.SetPersistBase(fileCfg, overridden)
 
 	admin := cfg.IsLoopback()
 	if !admin {
@@ -334,25 +339,33 @@ func resolveConfigPath(override string) (string, error) {
 }
 
 // applyFlags はコマンドラインを重ねます。これは他のすべてに優先します。
-func applyFlags(cfg *config.Config, o options) {
-	if o.listen != "" {
-		cfg.Server.Listen = o.listen
+//
+// 返す名前は、フラグが実際に指定した設定の葉です。ApplyEnv と同じく、値が変わった
+// かどうかではなく指定されたかどうかを答えます。ファイルと同じ値を渡しても上書きは
+// 存在し、次の起動でもやはりフラグが勝ちます。
+func applyFlags(cfg *config.Config, o options) []string {
+	var set []string
+	mark := func(leaf string, applied bool) {
+		if applied {
+			set = append(set, leaf)
+		}
 	}
-	if o.sourceType != "" {
-		cfg.Source.Type = o.sourceType
+	str := func(value string, dst *string) bool {
+		if value == "" {
+			return false
+		}
+		*dst = value
+		return true
 	}
-	if o.device != "" {
-		cfg.Source.UVC.Device = o.device
-	}
-	if o.serialPort != "" {
-		cfg.Source.Serial.Port = o.serialPort
-	}
-	if o.mjpegURL != "" {
-		cfg.Source.MJPEG.URL = o.mjpegURL
-	}
-	if o.logLevel != "" {
-		cfg.Log.Level = o.logLevel
-	}
+
+	mark("server.listen", str(o.listen, &cfg.Server.Listen))
+	mark("source.type", str(o.sourceType, &cfg.Source.Type))
+	mark("source.uvc.device", str(o.device, &cfg.Source.UVC.Device))
+	mark("source.serial.port", str(o.serialPort, &cfg.Source.Serial.Port))
+	mark("source.mjpeg.url", str(o.mjpegURL, &cfg.Source.MJPEG.URL))
+	mark("log.level", str(o.logLevel, &cfg.Log.Level))
+
+	return set
 }
 
 func setupLogging(cfg config.Config, console bool) (*slog.Logger, io.Closer, error) {

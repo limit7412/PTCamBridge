@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,7 +95,8 @@ func TestApplyEnvOverridesTheFile(t *testing.T) {
 		"PTCAMBRIDGE_UVC_FRAMERATE": "60",
 	}
 	cfg := Default()
-	if err := cfg.ApplyEnv(func(k string) string { return env[k] }); err != nil {
+	set, err := cfg.ApplyEnv(func(k string) string { return env[k] })
+	if err != nil {
 		t.Fatalf("ApplyEnv: %v", err)
 	}
 
@@ -116,6 +118,59 @@ func TestApplyEnvOverridesTheFile(t *testing.T) {
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Level = %q", cfg.Log.Level)
 	}
+
+	want := []string{
+		"server.listen",
+		"source.type",
+		"source.uvc.framerate",
+		"source.serial.baud",
+		"papertracker.write_cache",
+		"log.level",
+	}
+	slices.Sort(set)
+	slices.Sort(want)
+	if !slices.Equal(set, want) {
+		t.Errorf("ApplyEnv named %v, want %v", set, want)
+	}
+}
+
+// 上書きされた葉の名前は、値が変わったかどうかではなく、指定されたかどうかを
+// 答えなければなりません。ファイルと同じ値を指定した上書きも上書きです。ファイルを
+// 書き換えても、次の起動ではやはり環境変数が勝ちます。
+func TestApplyEnvNamesOverridesThatMatchTheFile(t *testing.T) {
+	cfg := Default()
+	cfg.UI.Language = "en"
+
+	set, err := cfg.ApplyEnv(func(k string) string {
+		if k == EnvLanguage {
+			return "en" // ファイルと同じ値
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
+	if !slices.Contains(set, "ui.language") {
+		t.Errorf("ApplyEnv named %v, want ui.language; the override is there even though nothing moved", set)
+	}
+}
+
+// 解釈できなかった変数は上書きとして数えません。値が設定に入っていない以上、
+// 数えると効いていない指定を「効いている」と言うことになります。
+func TestApplyEnvDoesNotNameValuesItCouldNotRead(t *testing.T) {
+	cfg := Default()
+	set, err := cfg.ApplyEnv(func(k string) string {
+		if k == "PTCAMBRIDGE_SERIAL_BAUD" {
+			return "fast"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("ApplyEnv() = nil, want an error")
+	}
+	if slices.Contains(set, "source.serial.baud") {
+		t.Errorf("ApplyEnv named %v, want source.serial.baud left out; the value never landed", set)
+	}
 }
 
 // 壊れた変数を飛ばすと、ユーザーが選んでいない設定でブリッジが起動する。しかも
@@ -129,7 +184,7 @@ func TestApplyEnvRejectsUnparsableValues(t *testing.T) {
 	for key, value := range cases {
 		t.Run(key, func(t *testing.T) {
 			cfg := Default()
-			err := cfg.ApplyEnv(func(k string) string {
+			_, err := cfg.ApplyEnv(func(k string) string {
 				if k == key {
 					return value
 				}
@@ -148,7 +203,7 @@ func TestApplyEnvRejectsUnparsableValues(t *testing.T) {
 // 1 つの打ち間違いが次を隠してはいけない。すべての変数を試す。
 func TestApplyEnvReportsEveryBadValue(t *testing.T) {
 	cfg := Default()
-	err := cfg.ApplyEnv(func(k string) string {
+	_, err := cfg.ApplyEnv(func(k string) string {
 		switch k {
 		case "PTCAMBRIDGE_SERIAL_BAUD":
 			return "fast"
@@ -604,7 +659,7 @@ func TestValidateRejectsAnUnknownLanguage(t *testing.T) {
 
 func TestLanguageFromTheEnvironment(t *testing.T) {
 	cfg := Default()
-	if err := cfg.ApplyEnv(func(name string) string {
+	if _, err := cfg.ApplyEnv(func(name string) string {
 		if name == "PTCAMBRIDGE_LANGUAGE" {
 			return "ja"
 		}

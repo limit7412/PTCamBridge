@@ -337,7 +337,7 @@ func TestUIUnknownPathIsNotFound(t *testing.T) {
 // 応答に入っているのは動作中の設定なので、それらは要求した値ではなく古い値の
 // まま返る。名前が無ければ、その食い違いは呼び出し側が自分で見つけるしかない。
 func TestConfigPutNamesWhatWaitsForARestart(t *testing.T) {
-	ctrl := &fakeController{deferred: []string{"ui.language", "papertracker"}}
+	ctrl := &fakeController{deferred: []string{"ui.language", "papertracker.write_cache"}}
 	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
 
 	body, err := json.Marshal(config.Default())

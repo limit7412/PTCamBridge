@@ -1029,7 +1029,7 @@ func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
 	}
 
 	b := New(effective, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(fileCfg)
+	b.SetPersistBase(fileCfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1068,7 +1068,7 @@ func TestBridgeApplySavesADeliberateChangeToAnOverriddenField(t *testing.T) {
 	effective.Source.UVC.Device = "from the command line"
 
 	b := New(effective, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(fileCfg)
+	b.SetPersistBase(fileCfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1219,7 +1219,7 @@ func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 	}
 
 	b := New(fileCfg, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(fileCfg)
+	b.SetPersistBase(fileCfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1273,7 +1273,7 @@ func TestBridgeApplyKeepsHeadersAddedToTheFileByHand(t *testing.T) {
 	}
 
 	b := New(fileCfg, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(fileCfg)
+	b.SetPersistBase(fileCfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1322,7 +1322,7 @@ func TestBridgeApplyRemovesAHeaderTheCallerDropped(t *testing.T) {
 	}
 
 	b := New(fileCfg, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(fileCfg)
+	b.SetPersistBase(fileCfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1434,7 +1434,7 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 	}
 
 	b := New(cfg, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(cfg)
+	b.SetPersistBase(cfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1598,7 +1598,7 @@ func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 	}
 
 	b := New(cfg, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(cfg)
+	b.SetPersistBase(cfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1668,7 +1668,7 @@ func TestBridgeUnsavedChangesDoNotRevertLaterFileEdits(t *testing.T) {
 	}
 
 	b := New(config.Default(), path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(config.Default())
+	b.SetPersistBase(config.Default(), nil)
 	b.holdPendingForTest(whenItFailed, wanted)
 
 	base, err := b.saveBaseForTest()
@@ -1703,7 +1703,7 @@ func TestBridgeRecreatesADeletedFileFromTheNewestKnownContents(t *testing.T) {
 	wanted.Server.Boundary = "from-the-bridge"
 
 	b := New(config.Default(), path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(config.Default())
+	b.SetPersistBase(config.Default(), nil)
 	b.holdPendingForTest(whenItFailed, wanted)
 
 	base, err := b.saveBaseForTest()
@@ -2629,7 +2629,7 @@ func TestOverriddenSettingsAreNotPending(t *testing.T) {
 	effective.UI.Language = "ja"
 
 	b := New(effective, path, hub.New(), status.New(), discardLogger())
-	b.SetPersistBase(file)
+	b.SetPersistBase(file, []string{"ui.language"})
 	if err := b.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -2649,5 +2649,114 @@ func TestOverriddenSettingsAreNotPending(t *testing.T) {
 	}
 	if slices.Contains(deferred, "ui.language") {
 		t.Errorf("deferred = %v, want ui.language left out; the override wins next time too", deferred)
+	}
+}
+
+// 上書きは値の差ではなく、指定されたという事実です。ファイルと同じ値を指定した
+// 上書き — PTCAMBRIDGE_LANGUAGE=en をファイルの en に重ねる — は差を作りませんが、
+// 次の起動でもやはり環境変数が勝つので、ja を保存しても保留にはなりません。
+func TestOverriddenSettingsAreNotPendingEvenWithTheSameValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+
+	file := mjpegConfig(upstream.URL)
+	file.UI.Language = "en"
+
+	// ファイルも実効設定も en。差はどこにも無い。
+	b := New(file, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(file, []string{"ui.language"})
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	if got := b.Overridden(); !slices.Contains(got, "ui.language") {
+		t.Errorf("Overridden = %v, want it to name ui.language even though the values match", got)
+	}
+
+	cfg := b.Snapshot()
+	cfg.UI.Language = "ja"
+	_, deferred, err := b.Apply(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if slices.Contains(deferred, "ui.language") {
+		t.Errorf("deferred = %v, want ui.language left out; the override wins next time too", deferred)
+	}
+}
+
+// 上書きの差し引きは葉ごとです。papertracker.install_dir を上書きしている機械でも、
+// write_cache の保留はそのまま挙がらなければなりません。次の起動では実際に変わる
+// からです。
+func TestOverriddenLeavesDoNotHideTheirNeighbours(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+
+	file := mjpegConfig(upstream.URL)
+	file.PaperTracker.InstallDir = "A"
+	file.PaperTracker.WriteCache = false
+	effective := file
+	effective.PaperTracker.InstallDir = "B" // 環境変数で上書きした側
+
+	b := New(effective, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(file, []string{"papertracker.install_dir"})
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	cfg := b.Snapshot()
+	cfg.PaperTracker.WriteCache = true
+	_, deferred, err := b.Apply(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !slices.Contains(deferred, "papertracker.write_cache") {
+		t.Errorf("deferred = %v, want papertracker.write_cache; only install_dir is overridden", deferred)
+	}
+	if slices.Contains(deferred, "papertracker.install_dir") {
+		t.Errorf("deferred = %v, want papertracker.install_dir left out", deferred)
+	}
+}
+
+// restartOnlyLeaves と restartDeferred は同じ集合を指していなければなりません。
+// 片方だけに名前が増えると、上書きの差し引きが静かに効かなくなります。
+func TestRestartOnlyLeavesMatchWhatCanBeDeferred(t *testing.T) {
+	base := config.Default()
+
+	moved := map[string]config.Config{}
+	for name, change := range map[string]func(*config.Config){
+		"server.listen":            func(c *config.Config) { c.Server.Listen = "127.0.0.1:1" },
+		"log.level":                func(c *config.Config) { c.Log.Level = "debug" },
+		"log.dir":                  func(c *config.Config) { c.Log.Dir = "elsewhere" },
+		"papertracker.install_dir": func(c *config.Config) { c.PaperTracker.InstallDir = "elsewhere" },
+		"papertracker.write_cache": func(c *config.Config) { c.PaperTracker.WriteCache = !c.PaperTracker.WriteCache },
+		"ui.language":              func(c *config.Config) { c.UI.Language = "ja" },
+	} {
+		next := base
+		change(&next)
+		moved[name] = next
+	}
+
+	// restartOnlyLeaves の名前はすべて、実際に動かすと restartDeferred が挙げる。
+	for _, name := range restartOnlyLeaves {
+		next, ok := moved[name]
+		if !ok {
+			t.Fatalf("restartOnlyLeaves names %q but this test does not know how to move it", name)
+		}
+		if got := restartDeferred(base, next); !slices.Contains(got, name) {
+			t.Errorf("restartDeferred after moving %s = %v, want it to name %s", name, got, name)
+		}
+	}
+
+	// 逆向き。restartDeferred が挙げる名前はすべて restartOnlyLeaves にある。
+	for name, next := range moved {
+		for _, got := range restartDeferred(base, next) {
+			if !slices.Contains(restartOnlyLeaves, got) {
+				t.Errorf("restartDeferred after moving %s named %q, which restartOnlyLeaves does not have", name, got)
+			}
+		}
 	}
 }
