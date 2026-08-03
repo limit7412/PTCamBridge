@@ -150,6 +150,7 @@ const (
 	UIWriteCacheHint  Key = "ui.hint.write_cache"
 	UIRestartBadge    Key = "ui.restart.badge"
 	UIRestartNote     Key = "ui.restart.note"
+	UIOverriddenNote  Key = "ui.overridden.note"
 	UISave            Key = "ui.save"
 	UISaving          Key = "ui.saving"
 	UISaved           Key = "ui.saved"
@@ -322,6 +323,10 @@ var messages = map[Key]map[Lang]string{
 	UIRestartNote: {
 		English:  "Settings marked that way are saved, but the running bridge keeps using the old values until it is restarted.",
 		Japanese: "この印の付いた設定は保存されますが、動作中のブリッジは再起動するまで古い値を使い続けます。",
+	},
+	UIOverriddenNote: {
+		English:  "These settings were given on the command line or in the environment at startup. That wins, so changing them here has no effect, this time or the next:",
+		Japanese: "次の設定は、起動時にコマンドラインまたは環境変数で指定されています。そちらが優先されるので、ここで変えても今回も次回も反映されません:",
 	},
 	UISave:         {English: "Save", Japanese: "保存"},
 	UISaving:       {English: "Saving...", Japanese: "保存中..."},

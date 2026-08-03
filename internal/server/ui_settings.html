@@ -148,6 +148,7 @@
     </section>
 
     <p class="hint">{{index .Text "restartNote"}}</p>
+    <p class="hint warn" id="overridden" hidden></p>
 
     <div class="actions">
       <button type="submit" id="save">{{index .Text "save"}}</button>
@@ -316,9 +317,10 @@ el("settings").addEventListener("submit", async (event) => {
 
   freezeForm(true);
   say(TEXT.saving);
-  // dirty は catch からも要る。応答が届かなかっただけで、ブリッジは適用も保存も
-  // 済ませていることがある。
+  // dirty と sent は catch からも要る。応答が届かなかっただけで、ブリッジは適用も
+  // 保存も済ませていることがある。
   const dirty = new Set();
+  let sent = false;
   try {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
     // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
@@ -332,6 +334,7 @@ el("settings").addEventListener("submit", async (event) => {
       }
     });
 
+    sent = true;
     const response = await fetch("/api/v1/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -363,10 +366,16 @@ el("settings").addEventListener("submit", async (event) => {
     // ここへ来るのは、要求を送った後に応答が読めなかった場合を含む。ブリッジは
     // 適用も保存も済ませているかもしれないので、基準の扱いは HTTP のエラーと同じ。
     // 取り直さないと、元へ戻す操作が変更として見えなくなる。rebase を参照。
-    try {
-      rebase(await getConfig(), dirty);
-    } catch (err) {
-      // 取り直せないだけ。画面の値はそのまま。
+    //
+    // 送る前に落ちた場合 — 土台を取りに行った最初の GET が失敗したとき — は
+    // 取り直さない。ブリッジ側は何も変わっていないし、dirty はまだ空なので、
+    // 取り直せばユーザーの編集を 1 つ残らずサーバの値で塗り潰すことになる。
+    if (sent) {
+      try {
+        rebase(await getConfig(), dirty);
+      } catch (err) {
+        // 取り直せないだけ。画面の値はそのまま。
+      }
     }
   } finally {
     freezeForm(false);
@@ -428,6 +437,13 @@ async function pollFFmpeg() {
     const state = await response.json();
     el("ffmpeg-actions").hidden = !state.has_ffmpeg;
     el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
+    // 起動時の指定が優先される設定。ファイルに何を書いても次の起動でも変わらない
+    // ので、「次回起動で反映されます」とは別のこととして伝える。
+    const overridden = state.overridden || [];
+    const note = el("overridden");
+    note.textContent = overridden.length ? TEXT.overriddenNote + " " + overridden.join(", ") : "";
+    note.hidden = overridden.length === 0;
+
     ffmpegPrompt = state.ffmpeg_prompt || "";
     // 提示するものが無いなら押させない。取得できない状態か、状態そのものが
     // まだ読めていないかのどちらかで、後者で始めるのは黙って落とすのと同じ。

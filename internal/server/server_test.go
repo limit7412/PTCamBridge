@@ -372,9 +372,13 @@ type fakeController struct {
 	devicesCalls int
 	// deferred は Apply が「保存したが動作中には効いていない」と報告する設定名。
 	deferred []string
+	// overridden は、起動時の指定が優先される設定名。
+	overridden []string
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
+
+func (c *fakeController) Overridden() []string { return c.overridden }
 
 func (c *fakeController) Apply(_ context.Context, cfg config.Config) (config.Config, []string, error) {
 	if c.applyErr != nil {

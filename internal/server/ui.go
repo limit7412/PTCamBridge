@@ -96,6 +96,9 @@ type uiState struct {
 	// FFmpegPrompt は、取得を始める前にユーザーへ見せなければならない内容です。
 	// 配布元、URL、サイズ、ライセンス。取得できる状態のときだけ入ります。
 	FFmpegPrompt string `json:"ffmpeg_prompt,omitempty"`
+	// Overridden は、起動時の指定が優先されるため、設定ファイルに何を書いても
+	// 変わらない設定の名前です。設定画面がそう伝えるために読みます。
+	Overridden []string `json:"overridden,omitempty"`
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -177,13 +180,17 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	if s.opts.FFmpeg != nil {
 		ffmpeg = ffmpegView{state: s.opts.FFmpeg.State(), present: true}
 	}
-	writeJSON(w, r, http.StatusOK, newUIState(
+	state := newUIState(
 		s.printer(),
 		s.opts.Status.Snapshot(),
 		s.opts.Hub.Stats(),
 		ffmpeg,
 		time.Now(),
-	))
+	)
+	if s.opts.Controller != nil {
+		state.Overridden = s.opts.Controller.Overridden()
+	}
+	writeJSON(w, r, http.StatusOK, state)
 }
 
 // ffmpegView は、fetcher が組み込まれていない場合と、組み込まれていて何も
@@ -397,6 +404,7 @@ func uiText(p i18n.Printer) map[string]string {
 		"writeCacheHint": i18n.UIWriteCacheHint,
 		"restartBadge":   i18n.UIRestartBadge,
 		"restartNote":    i18n.UIRestartNote,
+		"overriddenNote": i18n.UIOverriddenNote,
 		"save":           i18n.UISave,
 		"saving":         i18n.UISaving,
 		"saved":          i18n.UISaved,

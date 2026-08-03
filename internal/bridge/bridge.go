@@ -76,6 +76,10 @@ type Bridge struct {
 	// 無くなります。restartDeferred を参照。
 	startup config.Config
 
+	// overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
+	// 読まれない設定の名前です。SetPersistBase が一度だけ決めます。
+	overridden []string
+
 	// unsaved は、ファイルまで届かなかった書き込みです。ファイルが最新である間は
 	// nil です。これを保持していれば、再試行は失われた設定を書けます。そうしないと、
 	// 既にその値を持っている動作中の設定と差分を取って「することが無い」と判断して
@@ -171,6 +175,22 @@ func (b *Bridge) SetPersistBase(cfg config.Config) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.persistBase = cfg
+	// ファイルと起動時の実効設定の差が、そのまま「起動時に上書きされた葉」です。
+	// 環境変数とコマンドラインはここでしか効かないので、この集合はプロセスの間
+	// ずっと変わりません。overridden を参照。
+	b.overridden = restartDeferred(cfg, b.startup)
+}
+
+// Overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
+// 読まれない設定の名前を返します。
+//
+// これらは「次の起動を待っている」ものとは違います。ファイルに何を書いても、
+// 次の起動でも同じ上書きが勝つからです。保留として数えると、画面は永遠に起きない
+// 変更を毎回知らせることになります。かといって黙るのも違うので、別の名前で返します。
+func (b *Bridge) Overridden() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.overridden)
 }
 
 // SetStreamConfigurator は HTTP サーバを登録し、Apply がそちらの受け持つストリーム
@@ -375,6 +395,12 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 	// 後に TOML を ja へ書き換え、API からは別の項目だけを変えると、保存の土台は
 	// ファイルを読み直すので ja が残るのに、応答は何も待っていないと言うことになります。
 	deferred := restartDeferred(b.startup, saved)
+	// 起動時に上書きされた葉は、次の起動を待っているのではありません。ファイルに
+	// 何を書いても同じ上書きが勝つので、保留として数えると、起きない変更を毎回
+	// 知らせることになります。Overridden がそちらを別に伝えます。
+	deferred = slices.DeleteFunc(deferred, func(name string) bool {
+		return slices.Contains(b.overridden, name)
+	})
 	if len(deferred) > 0 {
 		b.log.Info("these settings differ from the ones this process started with, they are only read at startup", "settings", deferred)
 	}

@@ -82,6 +82,9 @@ type Controller interface {
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
 	// 1 つのエラーにまとめず、リストごとに報告します。
 	Devices(ctx context.Context) Devices
+	// Overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
+	// 読まれない設定の名前です。プロセスの間ずっと変わりません。
+	Overridden() []string
 }
 
 // FFmpegFetcher は、管理 API が操作する ffmpeg ダウンロードの一部です。

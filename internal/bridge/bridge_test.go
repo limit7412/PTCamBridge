@@ -2612,3 +2612,42 @@ func TestDeferredNamesFollowWhatWasSaved(t *testing.T) {
 		t.Errorf("deferred = %v, want it to name ui.language", deferred)
 	}
 }
+
+// 起動時に環境変数やコマンドラインで上書きされた設定は、次の起動を待っている
+// のではない。ファイルに何を書いても同じ上書きが勝つので、保留として数えると
+// 画面は起きない変更を毎回知らせることになる。
+func TestOverriddenSettingsAreNotPending(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+
+	// ファイルは en、起動時の実効設定は ja。PTCAMBRIDGE_LANGUAGE=ja で起動した
+	// ときと同じ形。
+	file := mjpegConfig(upstream.URL)
+	file.UI.Language = "en"
+	effective := file
+	effective.UI.Language = "ja"
+
+	b := New(effective, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(file)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	if got := b.Overridden(); !slices.Contains(got, "ui.language") {
+		t.Errorf("Overridden = %v, want it to name ui.language", got)
+	}
+
+	// 無関係な項目だけを保存する。ファイルは en のままなので起動時の ja とは
+	// 食い違うが、次の起動でも環境変数が勝つので保留ではない。
+	cfg := b.Snapshot()
+	cfg.Server.HoldOnSourceLoss = !cfg.Server.HoldOnSourceLoss
+	_, deferred, err := b.Apply(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if slices.Contains(deferred, "ui.language") {
+		t.Errorf("deferred = %v, want ui.language left out; the override wins next time too", deferred)
+	}
+}
