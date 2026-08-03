@@ -59,6 +59,9 @@ var knownCameraVIDs = map[string]string{
 	"2E8A": "Raspberry Pi",
 }
 
+// ErrNoSerialPort means the search found nothing that could be a camera board.
+var ErrNoSerialPort = errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
+
 // SerialConfig configures the wired Babble board driver.
 type SerialConfig struct {
 	// Port is a port name such as "COM5", or AutoPort to search by vendor ID.
@@ -339,7 +342,7 @@ func (s *Serial) resolvePort() (string, error) {
 
 	candidates, guessed := autoCandidates(ports)
 	if len(candidates) == 0 {
-		return "", errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
+		return "", ErrNoSerialPort
 	}
 
 	// A port that has already delivered frames goes first after a drop: a

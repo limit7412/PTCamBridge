@@ -27,6 +27,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 	"github.com/limit7412/PTCamBridge/internal/logging"
 	"github.com/limit7412/PTCamBridge/internal/papertracker"
 	"github.com/limit7412/PTCamBridge/internal/server"
@@ -165,7 +166,9 @@ func run() error {
 	}
 
 	frames := hub.New()
-	tracker := status.New()
+	// The tracker names the failures the tray should translate; which ones
+	// those are is the drivers' business, so the answer comes from there.
+	tracker := status.New(status.WithErrorKeys(source.ErrorKey))
 	app := bridge.New(cfg, cfgPath, frames, tracker, log)
 	// Saving starts from what the file said, not from the effective settings:
 	// a -device or a PTCAMBRIDGE_* is for this run, and must not be written
@@ -270,6 +273,7 @@ func run() error {
 			ConfigPath: cfgPath,
 			ConfigFlag: opts.configPath,
 			FFmpeg:     trayFFmpeg(fetcher),
+			Printer:    i18n.NewPrinter(cfg.Language()),
 			OnQuit:     stop,
 		})
 	}
@@ -410,23 +414,27 @@ func listDevices(opts options) error {
 
 	// The settings are read here too: an installation that points at ffmpeg
 	// with source.uvc.ffmpeg_path rather than bundling it would otherwise get
-	// an empty list from a command whose whole job is to find the camera.
+	// an empty list from a command whose whole job is to find the camera. The
+	// language comes from the same read, falling back to the system when the
+	// file cannot be had.
 	var ffmpegPath string
+	p := i18n.NewPrinter(i18n.Detect())
 	if cfgPath, err := resolveConfigPath(opts.configPath); err != nil {
-		fmt.Fprintln(os.Stderr, "could not locate the settings file:", err)
+		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoSettingsPath), err)
 	} else if cfg, err := config.Load(cfgPath); err != nil {
-		fmt.Fprintln(os.Stderr, "could not read the settings file:", err)
+		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoSettingsRead), err)
 	} else {
 		ffmpegPath = cfg.Source.UVC.FFmpegPath
+		p = i18n.NewPrinter(cfg.Language())
 	}
 
 	cameras, err := source.ListDevices(ctx, ffmpegPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "could not list capture devices:", err)
+		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoDevices), err)
 	}
-	fmt.Println("Capture devices:")
+	fmt.Println(p.S(i18n.CLICaptureDevices))
 	if len(cameras) == 0 {
-		fmt.Println("  (none found)")
+		fmt.Println(p.S(i18n.CLINoneFound))
 	}
 	for _, d := range cameras {
 		if d.Alternative != "" {
@@ -438,11 +446,11 @@ func listDevices(opts options) error {
 
 	ports, err := source.ListSerialPorts()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "could not list serial ports:", err)
+		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoSerialPorts), err)
 	}
-	fmt.Println("\nSerial ports:")
+	fmt.Println("\n" + p.S(i18n.CLISerialPorts))
 	if len(ports) == 0 {
-		fmt.Println("  (none found)")
+		fmt.Println(p.S(i18n.CLINoneFound))
 	}
 	for _, p := range ports {
 		switch {
@@ -582,9 +590,18 @@ func rememberedWrittenDirs() ([]string, error) {
 // next start, but someone removing PTCamBridge deletes the settings file and
 // the executable together, and there is no next start to notice.
 func restoreCache(opts options) error {
+	// The settings may be unreadable -- that is half the reason this command
+	// exists -- so the language falls back to the system rather than failing.
+	p := i18n.NewPrinter(i18n.Detect())
+	if cfgPath, err := resolveConfigPath(opts.configPath); err == nil {
+		if cfg, err := config.Load(cfgPath); err == nil {
+			p = i18n.NewPrinter(cfg.Language())
+		}
+	}
+
 	restored, err := restoreEverywhereItWas(configuredInstallDir(opts))
 	for _, dir := range restored {
-		fmt.Println("PaperTracker address cache restored in", dir)
+		fmt.Println(p.F(i18n.CLIRestored, dir))
 	}
 	if err != nil {
 		return err
@@ -592,8 +609,8 @@ func restoreCache(opts options) error {
 	if len(restored) == 0 {
 		// The search covers every usual folder, so this says the bridge has not
 		// written to any of them.
-		fmt.Println("Nothing to restore: PTCamBridge has not changed the PaperTracker address cache.")
-		fmt.Println("If the client is installed somewhere unusual, set papertracker.install_dir or pass -config.")
+		fmt.Println(p.S(i18n.CLINothingToRestore))
+		fmt.Println(p.S(i18n.CLIRestoreHint))
 	}
 	return nil
 }

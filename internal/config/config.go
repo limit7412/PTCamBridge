@@ -20,6 +20,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
 
 // defaultFile is the settings file a first run gets: the same values as
@@ -55,6 +56,7 @@ type Config struct {
 	Server       Server       `toml:"server" json:"server"`
 	Source       Source       `toml:"source" json:"source"`
 	Transform    Transform    `toml:"transform" json:"transform"`
+	UI           UI           `toml:"ui" json:"ui"`
 	PaperTracker PaperTracker `toml:"papertracker" json:"papertracker"`
 	Log          Log          `toml:"log" json:"log"`
 }
@@ -126,6 +128,12 @@ type PaperTracker struct {
 	WriteCache bool `toml:"write_cache" json:"write_cache"`
 }
 
+// UI configures the parts of the program a person reads.
+type UI struct {
+	// Language is "auto", "en" or "ja". Auto follows the operating system.
+	Language string `toml:"language" json:"language"`
+}
+
 // Log configures logging.
 type Log struct {
 	Level string `toml:"level" json:"level"`
@@ -151,8 +159,20 @@ func Default() Config {
 				Header: []int{0xFF, 0xA0, 0xFF, 0xA1},
 			},
 		},
+		UI:  UI{Language: string(i18n.Auto)},
 		Log: Log{Level: "info"},
 	}
+}
+
+// Language resolves the configured interface language, falling back to what
+// the system is set to. Validate has already rejected anything unknown, so a
+// failure here can only mean the zero value, which is Auto.
+func (c Config) Language() i18n.Lang {
+	lang, err := i18n.ParseLang(c.UI.Language)
+	if err != nil {
+		return i18n.Detect()
+	}
+	return lang
 }
 
 // Dir is the per-user folder holding the settings file and the log folder.
@@ -335,6 +355,7 @@ func (c *Config) ApplyEnv(get envLookup) error {
 	setString(get, "PTCAMBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
 	setString(get, EnvInstallDir, &c.PaperTracker.InstallDir)
 	fail(setBool(get, "PTCAMBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
+	setString(get, "PTCAMBRIDGE_LANGUAGE", &c.UI.Language)
 	setString(get, "PTCAMBRIDGE_LOG_LEVEL", &c.Log.Level)
 	setString(get, "PTCAMBRIDGE_LOG_DIR", &c.Log.Dir)
 
@@ -390,6 +411,10 @@ func (c *Config) Normalise() {
 	}
 	if strings.TrimSpace(c.Source.Serial.Port) == "" {
 		c.Source.Serial.Port = "auto"
+	}
+	c.UI.Language = strings.ToLower(strings.TrimSpace(c.UI.Language))
+	if c.UI.Language == "" {
+		c.UI.Language = string(i18n.Auto)
 	}
 	// Only zero asks for the default. A negative rate is a mistake, and
 	// quietly turning it into 3000000 hides it: the user reads back a value
@@ -472,6 +497,12 @@ func (c Config) Validate() error {
 	}
 	if err := c.CoreTransform().Validate(); err != nil {
 		return fmt.Errorf("transform: %w", err)
+	}
+	// Rejected rather than quietly ignored, for the same reason a misspelled
+	// key is: someone who wrote "jp" meant Japanese, and a menu that stayed in
+	// English would look like the setting does not work.
+	if _, err := i18n.ParseLang(c.UI.Language); err != nil {
+		return fmt.Errorf("ui.language: %w", err)
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

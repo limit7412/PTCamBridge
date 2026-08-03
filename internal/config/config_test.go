@@ -10,6 +10,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/limit7412/PTCamBridge/internal/core"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
 
 func TestDefaultIsValid(t *testing.T) {
@@ -556,5 +557,65 @@ func TestLoadFileCreatesTheAnnotatedFile(t *testing.T) {
 	}
 	if string(written) != DefaultFile() {
 		t.Errorf("the created file is not the annotated default:\n%s", written)
+	}
+}
+
+func TestLanguageSetting(t *testing.T) {
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "ja_JP.UTF-8")
+
+	// Auto follows the system, which the environment above pins to Japanese.
+	cfg := Default()
+	cfg.Normalise()
+	if got := cfg.Language(); got != i18n.Japanese {
+		t.Errorf("the default language = %q, want the system's", got)
+	}
+
+	cfg.UI.Language = "en"
+	if got := cfg.Language(); got != i18n.English {
+		t.Errorf("Language() = %q, want the configured English", got)
+	}
+
+	// Blank means auto, so an older settings file without the section still
+	// picks up the system language rather than falling to English.
+	cfg.UI.Language = ""
+	cfg.Normalise()
+	if cfg.UI.Language != string(i18n.Auto) {
+		t.Errorf("Normalise left ui.language = %q, want auto", cfg.UI.Language)
+	}
+	if got := cfg.Language(); got != i18n.Japanese {
+		t.Errorf("Language() = %q, want the system's for a blank setting", got)
+	}
+}
+
+// A language nobody has text for is refused rather than ignored: a user who
+// wrote "jp" would otherwise see an English menu and no explanation.
+func TestValidateRejectsAnUnknownLanguage(t *testing.T) {
+	cfg := Default()
+	cfg.UI.Language = "jp"
+	cfg.Normalise()
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted an unknown language")
+	}
+	if !strings.Contains(err.Error(), "ui.language") {
+		t.Errorf("error = %v, want it to name the setting", err)
+	}
+}
+
+func TestLanguageFromTheEnvironment(t *testing.T) {
+	cfg := Default()
+	if err := cfg.ApplyEnv(func(name string) string {
+		if name == "PTCAMBRIDGE_LANGUAGE" {
+			return "ja"
+		}
+		return ""
+	}); err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
+	if got := cfg.Language(); got != i18n.Japanese {
+		t.Errorf("Language() = %q, want the variable to win", got)
 	}
 }

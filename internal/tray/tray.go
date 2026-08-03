@@ -9,12 +9,12 @@ package tray
 import (
 	"context"
 	_ "embed"
-	"fmt"
 	"reflect"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 	"github.com/limit7412/PTCamBridge/internal/status"
 
 	"log/slog"
@@ -23,16 +23,17 @@ import (
 //go:embed icon.ico
 var iconICO []byte
 
-// sourceChoice is one entry in the source submenu.
+// sourceChoice is one entry in the source submenu. The label is a message key
+// rather than text, so it is resolved in whatever language the user chose.
 type sourceChoice struct {
 	kind  string
-	label string
+	label i18n.Key
 }
 
 var sourceChoices = []sourceChoice{
-	{config.SourceUVC, "UVC camera (USB)"},
-	{config.SourceSerial, "Wired board (serial)"},
-	{config.SourceMJPEG, "MJPEG stream (WiFi)"},
+	{config.SourceUVC, i18n.MenuSourceUVC},
+	{config.SourceSerial, i18n.MenuSourceSerial},
+	{config.SourceMJPEG, i18n.MenuSourceMJPEG},
 }
 
 // Controller is the slice of the bridge the menu drives.
@@ -55,32 +56,24 @@ type FFmpegFetcher interface {
 // machine fetch a third party's binary. Who built it, how big it is and what
 // licence it carries are the three things somebody needs to agree to that, so
 // they are on the screen before the first byte moves rather than in the README.
-func ffmpegPrompt(build ffmpegfetch.Build) string {
-	return fmt.Sprintf(
-		"PTCamBridge does not include ffmpeg. UVC cameras need it.\n\n"+
-			"Download it now?\n\n"+
-			"From: %s\n%s\n\n"+
-			"Size: %d MB\n"+
-			"Licence: FFmpeg, %s\n\n"+
-			"It is downloaded from its publisher, not from PTCamBridge, and is\n"+
-			"installed under your PTCamBridge settings folder.",
-		build.Publisher, build.URL, build.Size/(1000*1000), build.License,
-	)
+func ffmpegPrompt(p i18n.Printer, build ffmpegfetch.Build) string {
+	return p.F(i18n.DialogFFmpegBody,
+		build.Publisher, build.URL, build.Size/(1000*1000), build.License)
 }
 
 // ffmpegStatusLine describes the download for the menu entry itself.
-func ffmpegStatusLine(state ffmpegfetch.State) string {
+func ffmpegStatusLine(p i18n.Printer, state ffmpegfetch.State) string {
 	switch {
 	case state.Downloading && state.Total > 0:
-		return fmt.Sprintf("Downloading ffmpeg... %d%%", state.Received*100/state.Total)
+		return p.F(i18n.MenuFFmpegProgress, state.Received*100/state.Total)
 	case state.Downloading:
-		return "Downloading ffmpeg..."
+		return p.S(i18n.MenuFFmpegBusy)
 	case state.Installed:
-		return "ffmpeg is installed"
+		return p.S(i18n.MenuFFmpegInstalled)
 	case state.LastError != "":
-		return "Get ffmpeg (last attempt failed)"
+		return p.S(i18n.MenuFFmpegRetry)
 	default:
-		return "Get ffmpeg (for UVC cameras)"
+		return p.S(i18n.MenuFFmpegGet)
 	}
 }
 
@@ -103,6 +96,8 @@ type Options struct {
 	// any. The autostart toggle registers it so a sign-in launch uses the same
 	// file; empty means the default location.
 	ConfigFlag string
+	// Printer renders the menu. The zero value prints English.
+	Printer i18n.Printer
 	// OnQuit is called when the user chooses Quit, before the tray exits.
 	OnQuit func()
 }
@@ -212,3 +207,41 @@ func (q *commandQueue) submit(what string, cmd func()) bool {
 }
 
 func (q *commandQueue) close() { close(q.cmds) }
+
+// statusLine is the one line of text the user reads to know whether it works.
+func statusLine(p i18n.Printer, snapshot status.Snapshot, paused bool, fps float64, clients int) string {
+	source := snapshot.Source
+	if source == "" {
+		source = p.S(i18n.StatusNoSource)
+	}
+	switch {
+	case paused:
+		return p.F(i18n.StatusPaused, source)
+	case !snapshot.Connected && snapshot.LastError != "":
+		return p.F(i18n.StatusReconnecting, source, truncate(reason(p, snapshot), 60))
+	case !snapshot.Connected:
+		return p.F(i18n.StatusConnecting, source)
+	default:
+		return p.F(i18n.StatusRunning, source, fps, clients)
+	}
+}
+
+// reason renders why a source is down.
+//
+// A translation only when the tracker recognised the failure as one of the few
+// a user can act on. Everything else is the driver's own words, which are the
+// same words the log has: a message nobody translated is more use to the
+// person reading it than a vague one that happens to be in their language.
+func reason(p i18n.Printer, snapshot status.Snapshot) string {
+	if snapshot.LastErrorKey != "" {
+		return p.S(i18n.Key(snapshot.LastErrorKey))
+	}
+	return snapshot.LastError
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}

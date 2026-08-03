@@ -92,6 +92,12 @@ reencode_quality = 0 # 0 = 再エンコードなし、1-100 で品質指定
 install_dir = ""
 write_cache = false
 
+[ui]
+# 画面に出る文字の言語。"auto" | "en" | "ja"
+# auto は OS の表示言語に従います (Windows 以外では LANG などの環境変数)。
+# ログは対象外で常に英語です。不具合報告にそのまま貼れる方が有用なためです。
+language = "auto"
+
 [log]
 level = "info"      # debug / info / warn / error
 dir = ""            # 空なら %APPDATA%\PTCamBridge\logs

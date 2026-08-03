@@ -9,9 +9,16 @@ import (
 
 // Snapshot is a consistent read of the tracker.
 type Snapshot struct {
-	Source         string    `json:"source"`
-	Connected      bool      `json:"connected"`
-	LastError      string    `json:"last_error,omitempty"`
+	Source    string `json:"source"`
+	Connected bool   `json:"connected"`
+	LastError string `json:"last_error,omitempty"`
+	// LastErrorKey names the message for LastError when it is one of the few
+	// failures a user can act on, so the tray can show it in their language.
+	// Empty for everything else, which the tray then shows as it is.
+	//
+	// Not in the JSON: /stats is read by programs, and the English text beside
+	// it is the stable thing to key on.
+	LastErrorKey   string    `json:"-"`
 	Reconnects     uint64    `json:"reconnects"`
 	ConnectedSince time.Time `json:"connected_since"`
 	StartedAt      time.Time `json:"started_at"`
@@ -27,15 +34,35 @@ type Tracker struct {
 	source         string
 	connected      bool
 	lastError      string
+	lastErrorKey   string
 	reconnects     uint64
 	connectedSince time.Time
 	startedAt      time.Time
 	paused         bool
+
+	// classify names the message for an error the interface should translate.
+	// Injected because knowing which failures those are belongs to the drivers,
+	// and this package is a leaf that the tray and the server both read.
+	classify func(error) string
+}
+
+// Option configures a Tracker.
+type Option func(*Tracker)
+
+// WithErrorKeys teaches the tracker to name the failures worth translating.
+// Without it every error is reported as its own text, which is what the log
+// carries anyway.
+func WithErrorKeys(classify func(error) string) Option {
+	return func(t *Tracker) { t.classify = classify }
 }
 
 // New returns a tracker whose uptime starts now.
-func New() *Tracker {
-	return &Tracker{startedAt: time.Now()}
+func New(opts ...Option) *Tracker {
+	t := &Tracker{startedAt: time.Now()}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // SetSource records which driver is active, clearing the previous driver's
@@ -46,6 +73,7 @@ func (t *Tracker) SetSource(name string) {
 	t.source = name
 	t.connected = false
 	t.lastError = ""
+	t.lastErrorKey = ""
 	t.connectedSince = time.Time{}
 }
 
@@ -59,6 +87,7 @@ func (t *Tracker) Connected(source string) {
 	t.source = source
 	t.connected = true
 	t.lastError = ""
+	t.lastErrorKey = ""
 	t.connectedSince = time.Now()
 }
 
@@ -74,6 +103,10 @@ func (t *Tracker) Disconnected(source string, err error) {
 	t.connectedSince = time.Time{}
 	if err != nil {
 		t.lastError = err.Error()
+		t.lastErrorKey = ""
+		if t.classify != nil {
+			t.lastErrorKey = t.classify(err)
+		}
 	}
 }
 
@@ -104,6 +137,7 @@ func (t *Tracker) Snapshot() Snapshot {
 		Source:         t.source,
 		Connected:      t.connected,
 		LastError:      t.lastError,
+		LastErrorKey:   t.lastErrorKey,
 		Reconnects:     t.reconnects,
 		ConnectedSince: t.connectedSince,
 		StartedAt:      t.startedAt,

@@ -10,6 +10,8 @@ import (
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
+	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
 func discardLogger() *slog.Logger {
@@ -220,7 +222,7 @@ func TestFFmpegPromptNamesWhatIsBeingDownloaded(t *testing.T) {
 		License:   "LGPL v2.1 or later",
 	}
 
-	prompt := ffmpegPrompt(build)
+	prompt := ffmpegPrompt(i18n.NewPrinter(i18n.English), build)
 	for _, want := range []string{build.Publisher, build.URL, build.License, "145 MB"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q:\n%s", want, prompt)
@@ -245,9 +247,67 @@ func TestFFmpegStatusLineFollowsTheDownload(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ffmpegStatusLine(tc.state); got != tc.want {
+			if got := ffmpegStatusLine(i18n.NewPrinter(i18n.English), tc.state); got != tc.want {
 				t.Errorf("ffmpegStatusLine() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The status line is the one piece of text a user reads all day, so it is
+// rendered in their language -- including the words around the source name,
+// which is itself a protocol identifier and stays as it is.
+func TestStatusLineIsTranslated(t *testing.T) {
+	jp := i18n.NewPrinter(i18n.Japanese)
+	en := i18n.NewPrinter(i18n.English)
+	running := status.Snapshot{Source: "uvc", Connected: true}
+
+	if got := statusLine(en, running, false, 29.97, 1); got != "uvc: 30.0 fps, 1 client(s)" {
+		t.Errorf("English running line = %q", got)
+	}
+	if got := statusLine(jp, running, false, 29.97, 1); got != "uvc: 30.0 fps、クライアント 1 件" {
+		t.Errorf("Japanese running line = %q", got)
+	}
+	if got := statusLine(jp, running, true, 0, 0); got != "uvc: 一時停止中" {
+		t.Errorf("Japanese paused line = %q", got)
+	}
+	if got := statusLine(jp, status.Snapshot{}, false, 0, 0); got != "ソース未選択: 接続中..." {
+		t.Errorf("Japanese line with no source = %q", got)
+	}
+}
+
+// A failure the tracker recognised is shown in the user's language. One it did
+// not is shown as the driver wrote it: those messages carry the detail that
+// makes them useful, and the log has the same words.
+func TestStatusLineTranslatesOnlyTheRecognisedFailures(t *testing.T) {
+	jp := i18n.NewPrinter(i18n.Japanese)
+
+	known := status.Snapshot{
+		Source:       "uvc",
+		LastError:    "uvc: no camera configured. Run ...",
+		LastErrorKey: string(i18n.ErrNoCamera),
+	}
+	got := statusLine(jp, known, false, 0, 0)
+	if !strings.Contains(got, "カメラが設定されていません") {
+		t.Errorf("a recognised failure was not translated: %q", got)
+	}
+	if strings.Contains(got, "no camera configured") {
+		t.Errorf("a recognised failure kept the English text: %q", got)
+	}
+
+	unknown := status.Snapshot{Source: "serial", LastError: "serial: read from COM4: access denied"}
+	got = statusLine(jp, unknown, false, 0, 0)
+	if !strings.Contains(got, "access denied") {
+		t.Errorf("an unrecognised failure lost the driver's words: %q", got)
+	}
+}
+
+// The reconnecting line has to stay short enough to be a menu entry, whichever
+// language it is in.
+func TestStatusLineTruncatesTheReason(t *testing.T) {
+	long := status.Snapshot{Source: "serial", LastError: strings.Repeat("x", 200)}
+	got := statusLine(i18n.NewPrinter(i18n.Japanese), long, false, 0, 0)
+	if strings.Count(got, "x") > 60 {
+		t.Errorf("the reason was not truncated: %q", got)
 	}
 }
