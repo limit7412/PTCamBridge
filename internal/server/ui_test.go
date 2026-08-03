@@ -393,3 +393,51 @@ func TestConfigPutOmitsPendingWhenEverythingApplied(t *testing.T) {
 		t.Errorf("the response mentions pending_restart when nothing was deferred: %s", rec.Body.String())
 	}
 }
+
+// 応答をそのまま送り返せなければならない。pending_restart を載せているのは
+// こちらであって、呼び出し側が付けた項目ではない。読み書きを繰り返すクライアントが、
+// 自分では書いていない項目のせいで 400 を受け取るのは往復として筋が通らない。
+func TestConfigPutAcceptsItsOwnResponse(t *testing.T) {
+	ctrl := &fakeController{deferred: []string{"ui.language"}}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+
+	send := func(body []byte) *httptest.ResponseRecorder {
+		req := uiRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	first, err := json.Marshal(config.Default())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := send(first)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first PUT = %d (%s)", rec.Code, rec.Body.String())
+	}
+	// 1 回目の応答をそのまま 2 回目の本体にする。設定画面が最初にやりかけたこと。
+	if !strings.Contains(rec.Body.String(), "pending_restart") {
+		t.Fatal("the response does not carry pending_restart, so this test proves nothing")
+	}
+	again := send(rec.Body.Bytes())
+	if again.Code != http.StatusOK {
+		t.Errorf("second PUT = %d (%s), want %d", again.Code, again.Body.String(), http.StatusOK)
+	}
+}
+
+// とはいえ、設定として知らない項目は今までどおり撥ねる。綴り間違いを黙って
+// 捨てると、設定したつもりの値が効かない理由が分からなくなる。
+func TestConfigPutStillRejectsUnknownFields(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: &fakeController{}})
+
+	req := uiRequest(http.MethodPut, "/api/v1/config", strings.NewReader(`{"souce":{"type":"uvc"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PUT with a misspelled section = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}

@@ -72,8 +72,8 @@ type Devices struct {
 type Controller interface {
 	// Snapshot は、現在有効な設定を返します。
 	Snapshot() config.Config
-	// Apply は新しい設定を検証し、採用します。起動時にしか読まれない設定は
-	// 保存はされますが動作中には適用されず、その名前が返ります。
+	// Apply は新しい設定を検証し、採用します。起動時にしか読まれない設定も
+	// 受け入れますが、この起動の振る舞いは変わりません。その名前が返ります。
 	Apply(ctx context.Context, cfg config.Config) ([]string, error)
 	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
@@ -511,11 +511,18 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		var cfg config.Config
-		if err := decodeStrict(bytes.NewReader(body), &cfg); err != nil {
+		// 受け取る型は応答と同じものです。設定として知らない項目は今までどおり
+		// 撥ねますが、pending_restart だけは通します。これはこちらが応答に載せて
+		// いるもので、受け取ったものをそのまま送り返す呼び出し側 — この画面が
+		// まさにそうしかけました — が、自分では付けていない項目のせいで 400 を
+		// 受け取るのは、往復として筋が通りません。値は読みません。何が次の起動を
+		// 待っているかを決めるのは要求ではなく、ブリッジだからです。
+		var received appliedConfig
+		if err := decodeStrict(bytes.NewReader(body), &received); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		cfg := received.Config
 		carryUnmentioned(&cfg, body, s.opts.Controller.Snapshot())
 		cfg.Normalise()
 		if err := cfg.Validate(); err != nil {
@@ -576,9 +583,12 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 // appliedConfig は PUT /api/v1/config の応答です。
 //
 // 埋め込みなので、設定の各項目は今までどおり最上位に並びます。増えるのは 1 つ、
-// 保存はされたが動作中には効いていない設定の名前です。応答に入っている設定が
-// 動作中のものである以上、それらは要求された値ではなく古い値のまま返ります。
-// 名前がなければ、その食い違いは呼び出し側が自分で見つけるしかありません。
+// 保存はされたが、効くのは次の起動からという設定の名前です。値そのものは要求した
+// とおりに返ります。名前がなければ、設定を変えたのに何も変わらない理由を呼び出し側が
+// 自分で突き止めるしかありません。
+//
+// 何も保留にならなければ項目ごと出ません。空の配列は、読み手に「何かが保留になった」と
+// 一瞬考えさせるからです。
 type appliedConfig struct {
 	config.Config
 	// PendingRestart は、保存されたが次の起動まで効かない設定の TOML キーです。

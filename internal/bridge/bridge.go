@@ -210,9 +210,9 @@ func (b *Bridge) Snapshot() config.Config {
 // いれば保存します。設定を残すのは新しいソースが起動できた場合だけなので、誤った
 // デバイス名を渡してもブリッジが何も動かない状態にはなりません。
 //
-// 起動時にしか効かない設定は保存しますが、動作中のブリッジには適用しません。
-// その名前を返すので、呼び出し側は「保存したが今は効いていない」と言えます。
-// deferRestartRequired を参照。保存の失敗は config.ErrNotSaved を包んだエラーとして
+// 起動時にしか効かない設定も受け入れて保存しますが、この起動の振る舞いは変わりません。
+// その名前を返すので、呼び出し側は「保存したが、効くのは次の起動から」と言えます。
+// restartDeferred を参照。保存の失敗は config.ErrNotSaved を包んだエラーとして
 // 報告します。今変更したものが再起動を越えないことを、呼び出し側が知る必要が
 // あるからです。
 func (b *Bridge) Apply(ctx context.Context, cfg config.Config) ([]string, error) {
@@ -240,16 +240,13 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 	}
 
 	previous := b.cfg
-	// 要求された内容は、これから畳む前に取っておく。保存するのはこちら。cfg の方は
-	// この後、動作中のブリッジが実際に使うものへ削られる。
-	requested := cfg
 	// 何かを畳む前に読む。ここから先このフラグは「試している設定」を追うことに
 	// なるし、置き換えられる側が動いていたかどうかだけが、巻き戻しが成功し得ると
 	// 言える根拠だから。
 	provenBefore := b.provenLocked()
-	// 起動時にしか読まれない設定は、ここで cfg から取り除かれる。保存はされるが
-	// 動作中のブリッジは古い値のまま動き続ける。deferRestartRequired を参照。
-	deferred := deferRestartRequired(previous, &cfg)
+	// 起動時にしか読まれない設定は、そのまま受け入れて名前だけを控える。保存はされ、
+	// 設定としても残るが、この起動の振る舞いは変わらない。restartDeferred を参照。
+	deferred := restartDeferred(previous, cfg)
 
 	// Apply の保証は「新しいソースが起動できた場合にのみ設定を残す」ことだが、
 	// 一時停止中は何も起動できない。確認できるのはせいぜいドライバのオブジェクトを
@@ -323,9 +320,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 		// 差分が無いため、そうしなければ古いファイルを書き直して成功を報告する
 		// ことになる。
 		base, baseErr := b.saveBaseLocked()
-		// 保存するのは要求された内容。取り除いた葉もここに含まれる。それこそが
-		// 「次の起動で反映される」ということ。
-		saved := mergeChanges(base, previous, requested)
+		saved := mergeChanges(base, previous, cfg)
 		err := baseErr
 		if err == nil {
 			err = config.Save(b.cfgPath, saved)
@@ -335,7 +330,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 			// 変更が一時的なものであると言えるようにするため。保留中の書き込みは
 			// 保持しておき、ファイルが再び書けるようになったときに、再試行か次の
 			// 変更がそれを書く。
-			b.holdUnsavedLocked(base, previous, requested)
+			b.holdUnsavedLocked(base, previous, cfg)
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
 			return deferred, fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
@@ -545,41 +540,44 @@ func captureUnchanged(previous, next config.Config) bool {
 	}
 }
 
-// deferRestartRequired は、プロセスの起動時にしか読まれない設定を next から
-// 取り除き、取り除いたものの名前を返します。next は書き換えられます。
+// restartDeferred は、プロセスの起動時にしか読まれない設定のうち、この変更で
+// 動いたものの名前を返します。設定そのものには手を触れません。
 //
-// これらは保存されますが、動作中のブリッジには適用されません。適用したように
-// 振る舞えば、値は変わったのに動きは変わらないという食い違いが、次の起動まで
-// 残り続けます。たとえばトレイはメニューを一度だけ、その時点の言語が与えたラベルで
-// 組み立てるので、ui.language を動作中に受け入れても画面上の言葉は一つも変わりません。
+// これらは保存され、設定としても受け入れられますが、動作中の振る舞いは変わりません。
+// listen 済みのソケットは動きませんし、ログのハンドラは組み立て済みですし、
+// PaperTracker の接続先を書くのは起動時の一度きりですし、トレイはメニューを一度だけ、
+// その時点の言語が与えたラベルで組み立てています。名前を返すのは、呼び出し側が
+// 「保存はされたが、効くのは次の起動から」と言えるようにするためです。
 //
 // 以前はここで拒否していました。変えたのは、拒否が正直である代わりに、GUI から
 // 表示言語や PaperTracker 連携を変える手段を一つも残さないからです。保存はする、
-// ただし今は効かないと言う方が、ユーザーにとって前へ進める答えになります。名前を
-// 返すのは、そう言えるようにするためです。
+// ただし今は効かないと言う方が、ユーザーにとって前へ進める答えになります。
+//
+// 値を古いまま据え置くことも試しましたが、そちらは別の穴を作ります。動作中の設定と
+// ファイルの中身が食い違ったまま、その差を覗く手段がどこにも無くなるからです。
+// 保存した言語を確かめることも、気が変わって元に戻すこともできません。取り消しの
+// 要求は「動作中の値」と同じなので変更として現れず、ファイルに入ったままの値が
+// 書き直されるだけになります。だから設定は素直に受け入れ、効いていないという事実を
+// 名前で伝えます。これらの葉を動作中に読む場所はどこにもないので、受け入れて困る
+// ものもありません。
 //
 // 名前は TOML のキーそのものです。翻訳しません。ユーザーが設定ファイルを開いた
-// ときに探す文字列であり、この画面はそこへ案内するものだからです。
-func deferRestartRequired(previous config.Config, next *config.Config) []string {
+// ときに探す文字列だからです。
+func restartDeferred(previous, next config.Config) []string {
 	var deferred []string
 	if previous.Server.Listen != next.Server.Listen {
-		next.Server.Listen = previous.Server.Listen
 		deferred = append(deferred, "server.listen")
 	}
 	if previous.Log.Level != next.Log.Level {
-		next.Log.Level = previous.Log.Level
 		deferred = append(deferred, "log.level")
 	}
 	if previous.Log.Dir != next.Log.Dir {
-		next.Log.Dir = previous.Log.Dir
 		deferred = append(deferred, "log.dir")
 	}
 	if previous.PaperTracker != next.PaperTracker {
-		next.PaperTracker = previous.PaperTracker
 		deferred = append(deferred, "papertracker")
 	}
 	if previous.UI != next.UI {
-		next.UI = previous.UI
 		deferred = append(deferred, "ui.language")
 	}
 	return deferred

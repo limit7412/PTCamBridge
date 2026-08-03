@@ -33,13 +33,15 @@
           <input type="text" id="uvc-device" list="camera-names" class="mono">
         </div>
         <datalist id="camera-names"></datalist>
+        <p class="hint warn" id="camera-error" hidden></p>
         <div class="field">
           <label for="uvc-size">{{index .Text "size"}}</label>
           <input type="text" id="uvc-size" class="mono" placeholder="240x240">
         </div>
         <div class="field">
           <label for="uvc-framerate">{{index .Text "framerate"}}</label>
-          <input type="number" id="uvc-framerate" min="1" max="240">
+          <input type="number" id="uvc-framerate" min="0" max="240">
+          <p class="hint">{{index .Text "framerateHint"}}</p>
         </div>
         <div class="field">
           <label for="uvc-ffmpeg">{{index .Text "ffmpegPath"}}</label>
@@ -57,9 +59,10 @@
           <input type="text" id="serial-port" list="port-names" class="mono" placeholder="auto">
         </div>
         <datalist id="port-names"></datalist>
+        <p class="hint warn" id="serial-error" hidden></p>
         <div class="field">
           <label for="serial-baud">{{index .Text "baud"}}</label>
-          <input type="number" id="serial-baud" min="1200">
+          <input type="number" id="serial-baud" min="1">
         </div>
       </div>
 
@@ -158,12 +161,70 @@
 const TEXT = {{.TextJSON}};
 
 const el = (id) => document.getElementById(id);
+const num = (id) => Number(el(id).value) || 0;
 
-// 取ってきた設定をそのまま抱えておき、保存時にはフォームが持つ項目だけを
-// 上書きして丸ごと送り返す。管理 API の PUT は設定全体を受け取るので、こうしないと
-// 画面に無い項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — が既定値に
-// 戻ってしまう。画面に出していない設定を消さないための持ち方。
-let current = null;
+// FIELDS は、この画面が持っている設定の葉ぜんぶ。path は設定の中の位置、read は
+// 今フォームに入っている値、write はフォームへ書き戻す方法。
+//
+// 表として持つのは、保存するものを「触った項目だけ」に絞るため。画面を開いた
+// 直後の値を控えておき、送る直前にもう一度読んで、違っているものだけを最新の設定に
+// 重ねる。フォーム全体を送ると、画面を開いた後にトレイや別のクライアントが変えた
+// ものまで、こちらが見ていた古い値で押し戻すことになる。ログの行だけ直したつもりが、
+// トレイで切り替えたソースを元へ返してしまう。
+const FIELDS = [
+  { path: ["source", "type"],
+    read: () => document.querySelector('input[name="source-type"]:checked').value,
+    write: (v) => {
+      const radio = document.querySelector(`input[name="source-type"][value="${v}"]`);
+      if (radio) radio.checked = true;
+      showSource(v);
+    } },
+
+  { path: ["source", "uvc", "device"], read: () => el("uvc-device").value.trim(), write: (v) => el("uvc-device").value = v || "" },
+  { path: ["source", "uvc", "size"], read: () => el("uvc-size").value.trim(), write: (v) => el("uvc-size").value = v || "" },
+  { path: ["source", "uvc", "framerate"], read: () => num("uvc-framerate"), write: (v) => el("uvc-framerate").value = v || 0 },
+  { path: ["source", "uvc", "ffmpeg_path"], read: () => el("uvc-ffmpeg").value.trim(), write: (v) => el("uvc-ffmpeg").value = v || "" },
+
+  { path: ["source", "serial", "port"], read: () => el("serial-port").value.trim(), write: (v) => el("serial-port").value = v || "" },
+  { path: ["source", "serial", "baud"], read: () => num("serial-baud"), write: (v) => el("serial-baud").value = v || 0 },
+
+  { path: ["source", "mjpeg", "url"], read: () => el("mjpeg-url").value.trim(), write: (v) => el("mjpeg-url").value = v || "" },
+
+  { path: ["transform", "rotate"], read: () => num("rotate"), write: (v) => el("rotate").value = String(v || 0) },
+  { path: ["transform", "flip_h"], read: () => el("flip-h").checked, write: (v) => el("flip-h").checked = !!v },
+  { path: ["transform", "flip_v"], read: () => el("flip-v").checked, write: (v) => el("flip-v").checked = !!v },
+  { path: ["transform", "crop_square"], read: () => el("crop-square").checked, write: (v) => el("crop-square").checked = !!v },
+  { path: ["transform", "reencode_quality"], read: () => num("quality"), write: (v) => el("quality").value = v || 0 },
+
+  { path: ["server", "hold_on_source_loss"], read: () => el("hold").checked, write: (v) => el("hold").checked = !!v },
+  { path: ["server", "boundary"], read: () => el("boundary").value.trim(), write: (v) => el("boundary").value = v || "" },
+  { path: ["server", "listen"], read: () => el("listen").value.trim(), write: (v) => el("listen").value = v || "" },
+
+  { path: ["papertracker", "install_dir"], read: () => el("pt-dir").value.trim(), write: (v) => el("pt-dir").value = v || "" },
+  { path: ["papertracker", "write_cache"], read: () => el("pt-write").checked, write: (v) => el("pt-write").checked = !!v },
+
+  { path: ["ui", "language"], read: () => el("language").value, write: (v) => el("language").value = v || "auto" },
+
+  { path: ["log", "level"], read: () => el("log-level").value, write: (v) => el("log-level").value = v || "info" },
+  { path: ["log", "dir"], read: () => el("log-dir").value.trim(), write: (v) => el("log-dir").value = v || "" },
+];
+
+// baseline は、この画面がフォームを描いたときの値。ここからの差が「ユーザーが
+// 触ったもの」になる。
+let baseline = null;
+
+const at = (cfg, path) => path.reduce((node, key) => (node == null ? node : node[key]), cfg);
+
+function put(cfg, path, value) {
+  let node = cfg;
+  for (const key of path.slice(0, -1)) {
+    if (node[key] == null) node[key] = {};
+    node = node[key];
+  }
+  node[path[path.length - 1]] = value;
+}
+
+const readForm = () => FIELDS.map((field) => field.read());
 
 function showSource(type) {
   for (const block of document.querySelectorAll("[data-source]")) {
@@ -172,76 +233,10 @@ function showSource(type) {
 }
 
 function fill(cfg) {
-  current = cfg;
-
-  const type = cfg.source.type;
-  const radio = document.querySelector(`input[name="source-type"][value="${type}"]`);
-  if (radio) radio.checked = true;
-  showSource(type);
-
-  el("uvc-device").value = cfg.source.uvc.device || "";
-  el("uvc-size").value = cfg.source.uvc.size || "";
-  el("uvc-framerate").value = cfg.source.uvc.framerate || 0;
-  el("uvc-ffmpeg").value = cfg.source.uvc.ffmpeg_path || "";
-
-  el("serial-port").value = cfg.source.serial.port || "";
-  el("serial-baud").value = cfg.source.serial.baud || 0;
-
-  el("mjpeg-url").value = cfg.source.mjpeg.url || "";
-
-  el("rotate").value = String(cfg.transform.rotate || 0);
-  el("flip-h").checked = !!cfg.transform.flip_h;
-  el("flip-v").checked = !!cfg.transform.flip_v;
-  el("crop-square").checked = !!cfg.transform.crop_square;
-  el("quality").value = cfg.transform.reencode_quality || 0;
-
-  el("hold").checked = !!cfg.server.hold_on_source_loss;
-  el("boundary").value = cfg.server.boundary || "";
-  el("listen").value = cfg.server.listen || "";
-
-  el("pt-dir").value = cfg.papertracker.install_dir || "";
-  el("pt-write").checked = !!cfg.papertracker.write_cache;
-
-  el("language").value = cfg.ui.language || "auto";
-
-  el("log-level").value = cfg.log.level || "info";
-  el("log-dir").value = cfg.log.dir || "";
-}
-
-function collect() {
-  // 抱えている設定の写しから始める。画面に無い項目はここに入ったまま運ばれる。
-  const cfg = structuredClone(current);
-  const number = (id) => Number(el(id).value) || 0;
-
-  cfg.source.type = document.querySelector('input[name="source-type"]:checked').value;
-  cfg.source.uvc.device = el("uvc-device").value.trim();
-  cfg.source.uvc.size = el("uvc-size").value.trim();
-  cfg.source.uvc.framerate = number("uvc-framerate");
-  cfg.source.uvc.ffmpeg_path = el("uvc-ffmpeg").value.trim();
-
-  cfg.source.serial.port = el("serial-port").value.trim();
-  cfg.source.serial.baud = number("serial-baud");
-
-  cfg.source.mjpeg.url = el("mjpeg-url").value.trim();
-
-  cfg.transform.rotate = number("rotate");
-  cfg.transform.flip_h = el("flip-h").checked;
-  cfg.transform.flip_v = el("flip-v").checked;
-  cfg.transform.crop_square = el("crop-square").checked;
-  cfg.transform.reencode_quality = number("quality");
-
-  cfg.server.hold_on_source_loss = el("hold").checked;
-  cfg.server.boundary = el("boundary").value.trim();
-  cfg.server.listen = el("listen").value.trim();
-
-  cfg.papertracker.install_dir = el("pt-dir").value.trim();
-  cfg.papertracker.write_cache = el("pt-write").checked;
-
-  cfg.ui.language = el("language").value;
-
-  cfg.log.level = el("log-level").value;
-  cfg.log.dir = el("log-dir").value.trim();
-  return cfg;
+  for (const field of FIELDS) {
+    field.write(at(cfg, field.path));
+  }
+  baseline = readForm();
 }
 
 function say(message, bad) {
@@ -250,11 +245,15 @@ function say(message, bad) {
   result.classList.toggle("bad", !!bad);
 }
 
+async function getConfig() {
+  const response = await fetch("/api/v1/config", { cache: "no-store" });
+  if (!response.ok) throw new Error(response.status);
+  return await response.json();
+}
+
 async function load() {
   try {
-    const response = await fetch("/api/v1/config", { cache: "no-store" });
-    if (!response.ok) throw new Error(response.status);
-    fill(await response.json());
+    fill(await getConfig());
     el("offline").style.display = "none";
     el("save").disabled = false;
   } catch (err) {
@@ -265,15 +264,24 @@ async function load() {
 
 el("settings").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!current) return;
+  if (!baseline) return;
 
   el("save").disabled = true;
   say(TEXT.saving);
   try {
+    // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
+    // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
+    // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
+    const cfg = await getConfig();
+    const now = readForm();
+    FIELDS.forEach((field, i) => {
+      if (now[i] !== baseline[i]) put(cfg, field.path, now[i]);
+    });
+
     const response = await fetch("/api/v1/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collect()),
+      body: JSON.stringify(cfg),
     });
     const text = await response.text();
     if (!response.ok) {
@@ -283,8 +291,9 @@ el("settings").addEventListener("submit", async (event) => {
       return;
     }
     const applied = JSON.parse(text);
-    // 応答は動作中の設定なので、保留になった項目は要求した値ではなく古い値で
-    // 返ってくる。画面をそれで描き直したうえで、何が保留になったかを言う。
+    // 応答は設定そのものに pending_restart が 1 つ増えた形。フォームを描き直すのに
+    // 使うだけなので、余分な項目があっても構わない。次に送る土台は、そのときまた
+    // 取り直す。
     fill(applied);
     const pending = applied.pending_restart || [];
     say(pending.length ? TEXT.savedPending + " " + pending.join(", ") : TEXT.saved);
@@ -302,23 +311,37 @@ for (const radio of document.querySelectorAll('input[name="source-type"]')) {
 // デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
 // 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
 async function loadDevices() {
+  const options = (id, names) => {
+    const list = el(id);
+    list.replaceChildren();
+    for (const name of names) {
+      const option = document.createElement("option");
+      option.value = name;
+      list.append(option);
+    }
+  };
+  // 列挙の失敗は、候補が空になることと区別して出す。ffmpeg が無いから列挙できない
+  // のか、カメラが繋がっていないのか。候補欄が空という 1 つの見た目が 2 つの意味を
+  // 持つと、ユーザーはどちらを直せばよいのか分からない。
+  const failure = (id, message) => {
+    const node = el(id);
+    node.textContent = message || "";
+    node.hidden = !message;
+  };
+
   try {
-    const response = await fetch("/api/v1/devices", { cache: "no-store" });
-    if (!response.ok) return;
-    const devices = await response.json();
-    const options = (id, names) => {
-      const list = el(id);
-      list.replaceChildren();
-      for (const name of names) {
-        const option = document.createElement("option");
-        option.value = name;
-        list.append(option);
-      }
-    };
+    const devices = await (async () => {
+      const response = await fetch("/api/v1/devices", { cache: "no-store" });
+      if (!response.ok) throw new Error(response.status);
+      return await response.json();
+    })();
     options("camera-names", (devices.cameras || []).map((d) => d.name));
     options("port-names", (devices.serial_ports || []).map((p) => p.name));
+    failure("camera-error", devices.camera_error);
+    failure("serial-error", devices.serial_error);
   } catch (err) {
-    // 候補が無いだけ。入力欄はそのまま使える。
+    failure("camera-error", String(err));
+    failure("serial-error", String(err));
   }
 }
 

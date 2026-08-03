@@ -392,7 +392,6 @@ func TestBridgeApplyRejectsSettingsThatNeedARestart(t *testing.T) {
 	}
 	defer b.Stop()
 
-	original := b.Snapshot().Server.Listen
 	moved := b.Snapshot()
 	moved.Server.Listen = "127.0.0.1:19999"
 
@@ -400,15 +399,16 @@ func TestBridgeApplyRejectsSettingsThatNeedARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	// 動作中のブリッジは古いアドレスのまま。すでに bind してあるものは動かせない。
-	if got := b.Snapshot().Server.Listen; got != original {
-		t.Errorf("listen = %q, want it left at %q", got, original)
-	}
-	// そして黙って無視してはいけない。呼び出し側が「保存はされたが今は効いて
-	// いない」と言えなければ、値が変わったのに動きが変わらない理由が誰にも
-	// 分からなくなる。
+	// 黙って受け入れてはいけない。すでに bind してあるソケットは動かないので、
+	// 呼び出し側が「効くのは次の起動から」と言えなければ、設定を変えたのに
+	// アドレスが変わらない理由が誰にも分からなくなる。
 	if !slices.Contains(deferred, "server.listen") {
 		t.Errorf("deferred = %v, want it to name server.listen", deferred)
+	}
+	// 設定としては受け入れる。据え置くと、動作中の値とファイルの中身が食い違った
+	// まま、その差を覗く手段がどこにも無くなる。
+	if got := b.Snapshot().Server.Listen; got != moved.Server.Listen {
+		t.Errorf("listen = %q, want the requested %q", got, moved.Server.Listen)
 	}
 }
 
@@ -1928,18 +1928,53 @@ func TestApplyDefersALanguageChangeWhileRunning(t *testing.T) {
 	if !slices.Contains(deferred, "ui.language") {
 		t.Errorf("deferred = %v, want it to name ui.language", deferred)
 	}
-	// 動作中の設定は変わらない。
-	if got := b.Snapshot().UI.Language; got == "ja" {
-		t.Error("the deferred language took effect while running")
-	}
-	// しかしファイルには入っていなければならない。それが「次の起動で反映される」
-	// ということであり、この変更の眼目そのもの。
+	// ファイルには入っていなければならない。それが「次の起動で反映される」という
+	// ことであり、この変更の眼目そのもの。
 	saved, err := config.LoadFile(path)
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
 	if saved.UI.Language != "ja" {
 		t.Errorf("saved language = %q, want %q", saved.UI.Language, "ja")
+	}
+}
+
+// 気が変わったら元に戻せなければならない。動作中の値を据え置くと、取り消しの要求は
+// 「今の値」と同じなので変更として現れず、ファイルに入ったままの値が書き直される
+// だけになる。保存した設定を確かめる手段も無くなる。
+func TestApplyCanTakeBackADeferredChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+	upstream := mjpegUpstream(t, testJPEG(t, 32, 32))
+	b := New(mjpegConfig(upstream.URL), path, hub.New(), status.New(), discardLogger())
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	before := b.Snapshot().UI.Language
+
+	cfg := b.Snapshot()
+	cfg.UI.Language = "ja"
+	if _, err := b.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// 保存した値は読み返せる。見えないものは取り消せない。
+	if got := b.Snapshot().UI.Language; got != "ja" {
+		t.Fatalf("language = %q, want the saved %q to be visible", got, "ja")
+	}
+
+	back := b.Snapshot()
+	back.UI.Language = before
+	if _, err := b.Apply(context.Background(), back); err != nil {
+		t.Fatalf("Apply (taking it back): %v", err)
+	}
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if saved.UI.Language != before {
+		t.Errorf("saved language = %q, want it back at %q", saved.UI.Language, before)
 	}
 }
 
@@ -1967,6 +2002,7 @@ func TestApplyDefersOnlyWhatItMust(t *testing.T) {
 	if len(deferred) != 1 || deferred[0] != "ui.language" {
 		t.Errorf("deferred = %v, want only ui.language", deferred)
 	}
+	// 保留になった設定が、隣の設定の適用を止めてはいけない。
 	if got := b.Snapshot().Server.HoldOnSourceLoss; got != want {
 		t.Errorf("hold_on_source_loss = %v, want %v; a deferred setting must not hold back the rest", got, want)
 	}

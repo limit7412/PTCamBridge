@@ -40,11 +40,12 @@ var uiHTML string
 // 設定画面。診断画面と対になります。あちらが「今どうなっているか」なら、こちらは
 // 「どうしたいか」です。
 //
-// 書き込みは 1 本の道しかありません。この画面は /api/v1/config を GET して、
-// フォームが持つ項目だけを上書きし、設定全体を PUT で送り返します。管理 API が
-// 設定の一部ではなく全体を受け取るからで、抱えた写しに重ねる形にしないと、画面に
-// 出していない項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — が既定値へ
-// 戻ってしまいます。
+// 書き込みは 1 本の道しかありません。この画面は保存の直前に /api/v1/config を
+// GET し、ユーザーが触った項目だけをそこへ重ねて、設定全体を PUT で送り返します。
+// 管理 API が設定の一部ではなく全体を受け取るからで、取り直した設定に重ねる形に
+// しないと 2 つのものを壊します。画面に出していない項目 — シリアルのヘッダ定数、
+// 追加ヘッダー、フレーム上限 — が既定値へ戻ることと、画面を開いた後にトレイや別の
+// クライアントが変えたものを、こちらが見ていた古い値で押し戻すことです。
 //
 //go:embed ui_settings.html
 var uiSettingsHTML string
@@ -384,6 +385,7 @@ func uiText(p i18n.Printer) map[string]string {
 
 		"langAuto":       i18n.UILangAuto,
 		"qualityHint":    i18n.UIQualityHint,
+		"framerateHint":  i18n.UIFramerateHint,
 		"writeCacheHint": i18n.UIWriteCacheHint,
 		"restartBadge":   i18n.UIRestartBadge,
 		"restartNote":    i18n.UIRestartNote,
