@@ -10,6 +10,7 @@ import (
 	"context"
 	_ "embed"
 	"reflect"
+	"sync"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
@@ -206,6 +207,50 @@ func (q *commandQueue) submit(what string, cmd func()) bool {
 }
 
 func (q *commandQueue) close() { close(q.cmds) }
+
+// inFlight は、同じ対象に対する操作が同時に 1 つだけ走るようにします。
+//
+// commandQueue とは反対の答えです。あちらは操作を並べて順番に実行しますが、こちらは
+// 実行中のものがある間、同じ対象への要求を捨てます。並べるのが正しいのは順序に意味が
+// ある操作、つまりブリッジの設定を変えるものだけです。開く操作はどれとも競合しないので
+// 順序を守る理由が無く、並べれば 1 つの遅い呼び出しが後続すべてを足止めします。
+//
+// 捨てる方を選ぶ理由は、対象が応答しないときに現れます。開く先が固まっていると、
+// クリックのたびに新しい goroutine が OS スレッドを固定したままタイムアウトを待ち、
+// 再クリックのぶんだけ積み上がります。そして相手が回復した瞬間、溜まっていた要求が
+// 一斉に同じものを何枚も開きます。どちらもユーザーの目には「効かないから押し直した」
+// だけの話で、その報いとしては重すぎます。
+//
+// 対象ごとに見るので、ログフォルダが固まっていても設定ファイルは開けます。同時に走る
+// 数は対象の種類だけ、つまりメニューの項目数で頭打ちになります。
+type inFlight struct {
+	mu      sync.Mutex
+	targets map[string]struct{}
+}
+
+func newInFlight() *inFlight {
+	return &inFlight{targets: make(map[string]struct{})}
+}
+
+// begin は対象を実行中として記録し、それが受け付けられたかどうかを返します。
+// false なら、その対象は既に実行中なので呼び出し側は何もしてはいけません。
+func (f *inFlight) begin(target string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, busy := f.targets[target]; busy {
+		return false
+	}
+	f.targets[target] = struct{}{}
+	return true
+}
+
+// done は対象を解放します。begin が true を返した呼び出しは、成功したか失敗したかに
+// かかわらず必ずこれを呼ばなければなりません。呼ばなければ、その対象は二度と開けません。
+func (f *inFlight) done(target string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.targets, target)
+}
 
 // statusLine は、動いているかどうかを知るためにユーザーが読む 1 行です。
 func statusLine(p i18n.Printer, snapshot status.Snapshot, paused bool, fps float64, clients int) string {

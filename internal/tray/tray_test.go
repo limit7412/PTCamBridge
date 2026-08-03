@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -343,5 +344,64 @@ func TestStatusLineStaysValidUTF8(t *testing.T) {
 	got := statusLine(i18n.NewPrinter(i18n.Japanese), snapshot, false, 0, 0)
 	if !utf8.ValidString(got) {
 		t.Errorf("status line is not valid UTF-8: %q", got)
+	}
+}
+
+// 応答しない対象を押し直したときに、実行中のものが積み上がらないこと。
+func TestInFlightDropsRepeatsOfTheSameTarget(t *testing.T) {
+	f := newInFlight()
+
+	if !f.begin("C:\\logs") {
+		t.Fatal("the first request was refused")
+	}
+	// 相手が固まっている間、押し直しは何も起こしてはならない。
+	for i := 0; i < 5; i++ {
+		if f.begin("C:\\logs") {
+			t.Fatalf("repeat %d was accepted while the target was still opening", i)
+		}
+	}
+	// 別の対象は巻き添えにしない。ログフォルダが固まっていても設定は開ける。
+	if !f.begin("C:\\config.toml") {
+		t.Error("a different target was refused")
+	}
+
+	f.done("C:\\logs")
+	if !f.begin("C:\\logs") {
+		t.Error("the target stayed locked after it finished")
+	}
+}
+
+// 失敗して抜けた場合でも解放されること。開けなかった対象が二度と開けなくなるのは、
+// 直そうとしているバグそのものに戻る。
+func TestInFlightReleasesAfterFailure(t *testing.T) {
+	f := newInFlight()
+	func() {
+		if !f.begin("target") {
+			t.Fatal("the first request was refused")
+		}
+		defer f.done("target")
+	}()
+	if !f.begin("target") {
+		t.Error("the target stayed locked after a failed attempt")
+	}
+}
+
+// begin と done は別々の goroutine から呼ばれる。前者はイベントループ、後者は
+// 開き終えたワーカー。
+func TestInFlightIsSafeForConcurrentUse(t *testing.T) {
+	f := newInFlight()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if f.begin("target") {
+				f.done("target")
+			}
+		}()
+	}
+	wg.Wait()
+	if !f.begin("target") {
+		t.Error("the target stayed locked after every attempt finished")
 	}
 }

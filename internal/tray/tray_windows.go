@@ -278,13 +278,26 @@ func toggleAutostart(opts Options, m menu) {
 // 競合もしないので、順序を守る理由が無く、代わりに 1 つの遅い呼び出しが後続の
 // クリックすべてを足止めすることになります。ffmpeg の確認ダイアログを載せていないのと
 // 同じ理由です。
+//
+// その代わり、同じ対象への 2 回目以降は実行中の間だけ捨てます。効かないと思った
+// ユーザーが押し直したぶんだけ、固まったスレッドと、回復したときに一斉に開く窓が
+// 積み上がるのを避けるためです。inFlight を参照。
 func openTarget(target string, opts Options) {
 	if target == "" {
 		return
 	}
+	if !opening.begin(target) {
+		opts.Log.Debug("ignoring a click, the target is still opening", "target", target)
+		return
+	}
 	go func() {
+		defer opening.done(target)
 		if err := openPath(target); err != nil {
 			opts.Log.Error("could not open", "target", target, "error", err)
 		}
 	}()
 }
+
+// opening は、いま開いている最中の対象です。トレイはプロセスに 1 つなので、状態も
+// 1 つで足ります。
+var opening = newInFlight()
