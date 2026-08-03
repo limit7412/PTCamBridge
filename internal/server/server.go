@@ -24,6 +24,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/i18n"
 	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
@@ -115,6 +116,13 @@ type Options struct {
 	// 差し替えます。
 	HoldOnSourceLoss bool
 	Version          string
+	// Printer は診断画面の文言を組み立てます。ゼロ値なら英語になります。
+	// /stats と /api/v1/* はこれを使いません。あちらはプログラムが読むものです。
+	Printer i18n.Printer
+	// ConfigPath と LogDir は診断画面が場所として表示します。空なら出しません。
+	// サーバがこれらを持つのは表示のためだけで、読み書きはしません。
+	ConfigPath string
+	LogDir     string
 }
 
 // streamOptions は、動作中のサーバが差し替えられる応答設定です。
@@ -171,6 +179,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/stats", s.handleStats)
 
 	if s.opts.EnableAdmin && s.opts.Controller != nil {
+		// 診断画面は管理 API と同じ扱いです。認証を持たないまま、設定ファイルの
+		// 場所と繋がっているデバイスの名前を映すからです。
+		mux.HandleFunc("/ui", s.handleUI)
+		mux.HandleFunc("/ui/", s.handleUI)
+		mux.HandleFunc("/ui/state", s.handleUIState)
 		mux.HandleFunc("/api/v1/config", s.handleConfig)
 		mux.HandleFunc("/api/v1/source", s.handleSourceSwitch)
 		mux.HandleFunc("/api/v1/devices", s.handleDevices)

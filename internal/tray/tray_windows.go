@@ -36,7 +36,11 @@ func onReady(ctx context.Context, opts Options) {
 
 	statusItem := systray.AddMenuItem(p.S(i18n.MenuStatusStarting), p.S(i18n.MenuStatusTip))
 	statusItem.Disable()
-	addressItem := systray.AddMenuItem("http://"+opts.Address, p.S(i18n.MenuAddressTip))
+	addressTip := i18n.MenuAddressTip
+	if opts.Dashboard {
+		addressTip = i18n.MenuAddressTipUI
+	}
+	addressItem := systray.AddMenuItem("http://"+opts.Address, p.S(addressTip))
 	systray.AddSeparator()
 
 	sourceMenu := systray.AddMenuItem(p.S(i18n.MenuSource), p.S(i18n.MenuSourceTip))
@@ -169,7 +173,7 @@ func run(ctx context.Context, opts Options, m menu) {
 			refresh(opts, m)
 
 		case <-m.address.ClickedCh:
-			openTarget("http://"+opts.Address+"/snapshot", opts)
+			openTarget(addressTarget(opts), opts)
 
 		case <-m.logDir.ClickedCh:
 			openTarget(opts.LogDir, opts)
@@ -263,6 +267,18 @@ func toggleAutostart(opts Options, m menu) {
 	} else {
 		m.autostart.Check()
 	}
+}
+
+// addressTarget は、アドレス項目のクリックが開く先です。
+//
+// 診断画面がある — つまりループバック待受である — ならそちらです。あそこには
+// プレビューが載っているうえ、状態もデバイス一覧も場所も一緒に見えます。管理 API を
+// 切っている場合は画面も無いので、従来どおりスナップショット 1 枚を開きます。
+func addressTarget(opts Options) string {
+	if opts.Dashboard {
+		return "http://" + opts.Address + "/ui"
+	}
+	return "http://" + opts.Address + "/snapshot"
 }
 
 // openTarget はシェルに開かせます。呼び出しはイベントループから外します。

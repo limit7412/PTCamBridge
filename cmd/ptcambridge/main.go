@@ -189,6 +189,10 @@ func run() error {
 	if ffmpegfetch.Supported() {
 		fetcher = ffmpegfetch.New(ffmpegfetch.Options{Lifetime: ctx, Log: log})
 	}
+	// ログの場所は診断画面とトレイの両方が表示する。どちらもここで解決した 1 つを
+	// 受け取るので、2 か所が違う場所を指すことはない。
+	logDir, _ := cfg.LogDir()
+
 	srv, err := server.New(server.Options{
 		Hub:              frames,
 		Status:           tracker,
@@ -199,6 +203,9 @@ func run() error {
 		FFmpeg:           ffmpegOption(fetcher),
 		HoldOnSourceLoss: cfg.Server.HoldOnSourceLoss,
 		Version:          Version,
+		Printer:          i18n.NewPrinter(cfg.Language()),
+		ConfigPath:       cfgPath,
+		LogDir:           logDir,
 	})
 	if err != nil {
 		return err
@@ -252,7 +259,6 @@ func run() error {
 		stop()
 	}()
 
-	logDir, _ := cfg.LogDir()
 	if opts.headless {
 		log.Info("running headless", "address", address)
 		<-ctx.Done()
@@ -268,6 +274,7 @@ func run() error {
 			LogDir:     logDir,
 			ConfigPath: cfgPath,
 			ConfigFlag: opts.configPath,
+			Dashboard:  admin,
 			FFmpeg:     trayFFmpeg(fetcher),
 			Printer:    i18n.NewPrinter(cfg.Language()),
 			OnQuit:     stop,
