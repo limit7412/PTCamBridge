@@ -1,10 +1,11 @@
-// Package hub distributes frames from the single active source to every
-// connected stream client.
+// Package hub は、唯一のアクティブなソースから届いたフレームを、接続中の
+// すべてのストリームクライアントへ配ります。
 //
-// Delivery is latest-frame-wins: each subscriber holds a one-frame slot and a
-// frame that arrives while the previous one is still queued replaces it. For
-// mouth tracking, a client that has fallen behind wants the current frame, not
-// the backlog, and a slow client must never stall the source read loop.
+// 配信は「最新フレーム優先」です。購読者はそれぞれ 1 フレーム分の枠を持ち、
+// 前のフレームがまだ枠にあるうちに次が届いた場合は置き換えます。口の動きを
+// 追う用途では、遅れたクライアントが欲しいのは現在のフレームであって溜まった
+// 分ではなく、また遅いクライアントがソースの読み取りループを止めてしまっては
+// なりません。
 package hub
 
 import (
@@ -14,14 +15,14 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// fpsAlpha weights the newest interval in the input rate estimate.
+// fpsAlpha は、入力レートの推定において最新の間隔に与える重みです。
 const fpsAlpha = 0.1
 
-// fpsGapReset is the arrival gap past which the rate estimate is discarded
-// rather than smoothed, so a reconnect does not average across the outage.
+// fpsGapReset は、これを超える到着間隔が空いたらレート推定を平滑化ではなく
+// 破棄する閾値です。再接続の前後が平均されて途切れがならされるのを防ぎます。
 const fpsGapReset = 2 * time.Second
 
-// Stats is a snapshot of hub activity, surfaced by the /stats endpoint.
+// Stats は hub の活動のスナップショットで、/stats エンドポイントが返します。
 type Stats struct {
 	Published     uint64    `json:"published"`
 	Dropped       uint64    `json:"dropped"`
@@ -31,7 +32,7 @@ type Stats struct {
 	LastFrameAt   time.Time `json:"last_frame_at"`
 }
 
-// Hub is a one-producer, many-consumer frame broadcaster.
+// Hub は、生産者 1 に対し消費者が多数のフレーム配信器です。
 type Hub struct {
 	mu        sync.Mutex
 	subs      map[uint64]chan core.Frame
@@ -46,14 +47,14 @@ type Hub struct {
 	lastAt    time.Time
 }
 
-// New returns an empty hub.
+// New は空の hub を返します。
 func New() *Hub {
 	return &Hub{subs: make(map[uint64]chan core.Frame)}
 }
 
-// Publish broadcasts a frame. The hub stamps the sequence number and, when the
-// caller left it zero, the arrival time. Data must not be modified afterwards:
-// every subscriber shares the slice.
+// Publish はフレームを配信します。連番は hub が振り、到着時刻も呼び出し側が
+// ゼロ値のままにしていれば hub が入れます。Data はこれ以降変更してはいけません。
+// スライスはすべての購読者で共有されます。
 func (h *Hub) Publish(f core.Frame) {
 	now := time.Now()
 	if f.RecvedAt.IsZero() {
@@ -88,9 +89,9 @@ func (h *Hub) Publish(f core.Frame) {
 			continue
 		default:
 		}
-		// The slot is occupied by a frame this subscriber has not read yet.
-		// Discard it and try once more; if the subscriber grabbed it in the
-		// meantime the send succeeds, and if it is truly wedged we drop.
+		// この購読者がまだ読んでいないフレームが枠を占めている。捨ててもう一度
+		// 試す。その間に購読者が取っていれば送信は成功し、本当に詰まっていれば
+		// 落とすことになる。
 		select {
 		case <-ch:
 			h.dropped++
@@ -104,9 +105,9 @@ func (h *Hub) Publish(f core.Frame) {
 	}
 }
 
-// Subscribe returns a channel of frames and a function that unsubscribes and
-// closes it. The cancel function is idempotent and must be called exactly once
-// per subscription for the hub to forget the client.
+// Subscribe は、フレームのチャネルと、購読を解除してそれを閉じる関数を返します。
+// 解除関数は冪等ですが、hub がそのクライアントを忘れるためには購読ごとに必ず
+// 一度は呼ぶ必要があります。
 func (h *Hub) Subscribe() (<-chan core.Frame, func()) {
 	ch := make(chan core.Frame, 1)
 
@@ -130,21 +131,22 @@ func (h *Hub) Subscribe() (<-chan core.Frame, func()) {
 	return ch, cancel
 }
 
-// Latest returns the most recently published frame, if any has been published.
+// Latest は、直近に配信されたフレームを返します (何も配信されていなければ
+// 2 つ目の戻り値が false になります)。
 func (h *Hub) Latest() (core.Frame, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.latest, h.hasLatest
 }
 
-// Subscribers reports the number of connected stream clients.
+// Subscribers は、接続中のストリームクライアント数を返します。
 func (h *Hub) Subscribers() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs)
 }
 
-// Stats returns a snapshot of hub counters.
+// Stats は hub のカウンタのスナップショットを返します。
 func (h *Hub) Stats() Stats {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -159,7 +161,7 @@ func (h *Hub) Stats() Stats {
 		s.LastFrameSize = h.latest.Size()
 		s.LastFrameAt = h.latest.RecvedAt
 	}
-	// The rate estimate is only meaningful while frames keep arriving.
+	// レート推定に意味があるのは、フレームが届き続けている間だけ。
 	if !h.lastAt.IsZero() && time.Since(h.lastAt) > fpsGapReset {
 		s.InputFPS = 0
 	}

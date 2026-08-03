@@ -1,9 +1,9 @@
-// Package core holds the side-effect free logic of PTCamBridge: JPEG
-// validation, wire protocol parsing, multipart encoding and image transforms.
+// Package core は PTCamBridge の副作用を持たないロジック — JPEG の検証、
+// ワイヤプロトコルの解析、multipart のエンコード、画像変換 — を収めます。
 //
-// Nothing in this package may touch a socket, a serial port, a child process
-// or the filesystem. That restriction is what makes the protocol handling
-// testable without a camera attached.
+// このパッケージのコードは、ソケット・シリアルポート・子プロセス・ファイル
+// システムのいずれにも触れてはいけません。この制約こそが、カメラを繋がずに
+// プロトコル処理をテストできる理由です。
 package core
 
 import (
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// JPEG marker bytes used by the structural scanner.
+// 構造スキャナが使う JPEG のマーカーバイト。
 const (
 	markerPrefix = 0xFF
 	markerSOI    = 0xD8
@@ -23,15 +23,16 @@ const (
 	markerRST7   = 0xD7
 )
 
-// DefaultMaxFrameSize bounds a single JPEG frame. Mouth tracking cameras emit
-// small images (240x240 is typical), so anything past a few MiB means the
-// stream has desynchronised rather than that a huge frame really arrived.
+// DefaultMaxFrameSize は JPEG フレーム 1 枚の上限です。口の動きを追うカメラが
+// 出すのは小さな画像 (240x240 が典型) なので、数 MiB を超えたということは、
+// 巨大なフレームが本当に届いたのではなく、ストリームの同期が外れたことを
+// 意味します。
 const DefaultMaxFrameSize = 4 << 20
 
-// MinJPEGSize is SOI + EOI; anything shorter cannot be a JPEG at all.
+// MinJPEGSize は SOI + EOI の長さです。これより短いものは JPEG ではあり得ません。
 const MinJPEGSize = 4
 
-// Errors reported by ValidateJPEG.
+// ValidateJPEG が報告するエラー。
 var (
 	ErrFrameTooSmall = errors.New("frame too small to be a JPEG")
 	ErrFrameTooLarge = errors.New("frame exceeds the maximum frame size")
@@ -39,20 +40,20 @@ var (
 	ErrMissingEOI    = errors.New("frame does not end with a JPEG EOI marker")
 )
 
-// Frame is one validated JPEG image. Data is treated as immutable once the
-// frame has been published: producers must hand over a buffer they no longer
-// write to, because every subscriber shares the same backing array.
+// Frame は検証済みの JPEG 画像 1 枚です。配信された後の Data は不変として
+// 扱います。購読者全員が同じ配列を共有するので、生産者はもう書き込まない
+// バッファを渡さなければなりません。
 type Frame struct {
 	Data     []byte
 	Seq      uint64
 	RecvedAt time.Time
 }
 
-// Size reports the encoded length of the frame in bytes.
+// Size は、エンコードされたフレームの長さをバイト単位で返します。
 func (f Frame) Size() int { return len(f.Data) }
 
-// ValidateJPEG checks that data looks like a complete standalone JPEG.
-// A maxSize of zero selects DefaultMaxFrameSize.
+// ValidateJPEG は、data が単体で完結した JPEG に見えるかを確認します。
+// maxSize が 0 なら DefaultMaxFrameSize を使います。
 func ValidateJPEG(data []byte, maxSize int) error {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxFrameSize
@@ -72,5 +73,5 @@ func ValidateJPEG(data []byte, maxSize int) error {
 	return nil
 }
 
-// IsJPEG reports whether data passes ValidateJPEG with the default bound.
+// IsJPEG は、既定の上限で ValidateJPEG を通るかどうかを返します。
 func IsJPEG(data []byte) bool { return ValidateJPEG(data, 0) == nil }

@@ -1,5 +1,5 @@
-// Package status tracks the health of the active capture source so the
-// /healthz and /stats endpoints, and the tray menu, can report it.
+// Package status は、稼働中のキャプチャソースの健全性を追跡し、/healthz と
+// /stats、そしてトレイメニューがそれを報告できるようにします。
 package status
 
 import (
@@ -7,17 +7,18 @@ import (
 	"time"
 )
 
-// Snapshot is a consistent read of the tracker.
+// Snapshot は、tracker の一貫した読み取り結果です。
 type Snapshot struct {
 	Source    string `json:"source"`
 	Connected bool   `json:"connected"`
 	LastError string `json:"last_error,omitempty"`
-	// LastErrorKey names the message for LastError when it is one of the few
-	// failures a user can act on, so the tray can show it in their language.
-	// Empty for everything else, which the tray then shows as it is.
+	// LastErrorKey は、LastError が「ユーザーが対処できる数少ない失敗」の
+	// いずれかであるとき、そのメッセージを指すキーです。トレイがユーザーの
+	// 言語で表示するために使います。それ以外は空で、その場合トレイは文言を
+	// そのまま表示します。
 	//
-	// Not in the JSON: /stats is read by programs, and the English text beside
-	// it is the stable thing to key on.
+	// JSON には出しません。/stats はプログラムが読むものであり、キーにするなら
+	// 隣にある英語のテキストの方が安定しています。
 	LastErrorKey   string    `json:"-"`
 	Reconnects     uint64    `json:"reconnects"`
 	ConnectedSince time.Time `json:"connected_since"`
@@ -26,9 +27,9 @@ type Snapshot struct {
 	Paused         bool      `json:"paused"`
 }
 
-// Tracker records source connection transitions. It satisfies the Reporter
-// interface the drivers report through, without those drivers needing to know
-// anything about HTTP or the tray.
+// Tracker は、ソースの接続状態の遷移を記録します。ドライバが報告に使う
+// Reporter インターフェースを満たしており、ドライバ側は HTTP やトレイについて
+// 何も知らずに済みます。
 type Tracker struct {
 	mu             sync.RWMutex
 	source         string
@@ -40,23 +41,24 @@ type Tracker struct {
 	startedAt      time.Time
 	paused         bool
 
-	// classify names the message for an error the interface should translate.
-	// Injected because knowing which failures those are belongs to the drivers,
-	// and this package is a leaf that the tray and the server both read.
+	// classify は、画面側が翻訳すべきエラーに対応するメッセージ名を返します。
+	// 注入にしているのは、どの失敗がそれに当たるかを知っているのはドライバ側
+	// だからです。このパッケージはトレイとサーバの双方が読む葉であり、そちらを
+	// 知るべきではありません。
 	classify func(error) string
 }
 
-// Option configures a Tracker.
+// Option は Tracker を設定します。
 type Option func(*Tracker)
 
-// WithErrorKeys teaches the tracker to name the failures worth translating.
-// Without it every error is reported as its own text, which is what the log
-// carries anyway.
+// WithErrorKeys は、翻訳する価値のある失敗の名前の付け方を tracker に教えます。
+// これが無ければすべてのエラーはその文言のまま報告されますが、それはログが
+// 運んでいるものと同じです。
 func WithErrorKeys(classify func(error) string) Option {
 	return func(t *Tracker) { t.classify = classify }
 }
 
-// New returns a tracker whose uptime starts now.
+// New は、稼働時間の起点を今にした tracker を返します。
 func New(opts ...Option) *Tracker {
 	t := &Tracker{startedAt: time.Now()}
 	for _, opt := range opts {
@@ -65,8 +67,8 @@ func New(opts ...Option) *Tracker {
 	return t
 }
 
-// SetSource records which driver is active, clearing the previous driver's
-// state. Call this when a source is selected or switched.
+// SetSource は、どのドライバが稼働中かを記録し、前のドライバの状態を消します。
+// ソースを選択・切り替えたときに呼びます。
 func (t *Tracker) SetSource(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -77,7 +79,7 @@ func (t *Tracker) SetSource(name string) {
 	t.connectedSince = time.Time{}
 }
 
-// Connected marks the source as delivering frames.
+// Connected は、ソースがフレームを届けている状態として記録します。
 func (t *Tracker) Connected(source string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -91,7 +93,8 @@ func (t *Tracker) Connected(source string) {
 	t.connectedSince = time.Now()
 }
 
-// Disconnected marks the source as down. A nil error means it ended cleanly.
+// Disconnected は、ソースが落ちている状態として記録します。err が nil なら
+// 正常に終了したという意味です。
 func (t *Tracker) Disconnected(source string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -110,8 +113,8 @@ func (t *Tracker) Disconnected(source string, err error) {
 	}
 }
 
-// SetPaused records that the user paused capture from the tray menu, which is
-// deliberate downtime rather than a fault.
+// SetPaused は、ユーザーがトレイメニューからキャプチャを一時停止したことを
+// 記録します。これは障害ではなく意図的な停止です。
 func (t *Tracker) SetPaused(paused bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -122,14 +125,14 @@ func (t *Tracker) SetPaused(paused bool) {
 	}
 }
 
-// Paused reports whether capture is paused.
+// Paused は、キャプチャが一時停止中かどうかを返します。
 func (t *Tracker) Paused() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.paused
 }
 
-// Snapshot returns the current state.
+// Snapshot は現在の状態を返します。
 func (t *Tracker) Snapshot() Snapshot {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

@@ -7,36 +7,35 @@ import (
 	"fmt"
 )
 
-// DefaultETVRHeader is the packet preamble emitted by OpenIris / ETVR style
-// wired firmware: a 0xFF 0xA0 packet header followed by a 0xFF 0xA1 frame
-// marker. Firmware revisions differ here, so the value is configurable rather
-// than hard-coded into the parser.
+// DefaultETVRHeader は、OpenIris / ETVR 系の有線ファームウェアが出すパケットの
+// 前置きです。0xFF 0xA0 のパケットヘッダーに続いて 0xFF 0xA1 のフレームマーカーが
+// 来ます。ここはファームウェアの版によって異なるため、パーサーに埋め込まず
+// 設定可能にしています。
 var DefaultETVRHeader = []byte{0xFF, 0xA0, 0xFF, 0xA1}
 
-// etvrLengthBytes is the size of the little-endian payload length field that
-// follows the header.
+// etvrLengthBytes は、ヘッダーに続くリトルエンディアンのペイロード長フィールドの
+// バイト数です。
 const etvrLengthBytes = 2
 
-// ErrEmptyHeader is returned when an ETVRParser is built without a preamble to
-// search for, which would make resynchronisation impossible.
+// ErrEmptyHeader は、探すべき前置きを持たない ETVRParser を作ろうとしたときに
+// 返されます。それでは再同期が不可能になります。
 var ErrEmptyHeader = errors.New("etvr: header must not be empty")
 
-// ETVRParser extracts JPEG frames from the wired serial packet format:
+// ETVRParser は、有線シリアルのパケット形式から JPEG フレームを取り出します。
 //
-//	offset 0  len 2  header      (0xFF 0xA0)
-//	offset 2  len 2  frame mark  (0xFF 0xA1)
-//	offset 4  len 2  payload len (uint16, little-endian)
-//	offset 6  len N  JPEG data
+//	offset 0  len 2  ヘッダー        (0xFF 0xA0)
+//	offset 2  len 2  フレームマーク   (0xFF 0xA1)
+//	offset 4  len 2  ペイロード長     (uint16、リトルエンディアン)
+//	offset 6  len N  JPEG データ
 //
-// The zero value is not usable; build one with NewETVRParser.
+// ゼロ値は使えません。NewETVRParser で作ってください。
 type ETVRParser struct {
 	header     []byte
 	maxPayload int
 }
 
-// NewETVRParser returns a parser searching for the given preamble. A nil or
-// empty header falls back to DefaultETVRHeader; a maxPayload of zero selects
-// DefaultMaxFrameSize.
+// NewETVRParser は、指定した前置きを探すパーサーを返します。header が nil または
+// 空なら DefaultETVRHeader を、maxPayload が 0 なら DefaultMaxFrameSize を使います。
 func NewETVRParser(header []byte, maxPayload int) (ETVRParser, error) {
 	if header == nil {
 		header = DefaultETVRHeader
@@ -52,44 +51,43 @@ func NewETVRParser(header []byte, maxPayload int) (ETVRParser, error) {
 	return ETVRParser{header: h, maxPayload: maxPayload}, nil
 }
 
-// HeaderLen reports the length of the preamble this parser searches for.
+// HeaderLen は、このパーサーが探す前置きの長さを返します。
 func (p ETVRParser) HeaderLen() int { return len(p.header) }
 
-// Header returns a copy of the preamble this parser searches for. A driver
-// that finds nothing on the wire has to be able to say what it was looking
-// for, since the answer may be that the firmware uses something else.
+// Header は、このパーサーが探す前置きのコピーを返します。線上に何も見つからな
+// かったドライバは「何を探していたか」を言えなければなりません。答えが
+// 「ファームウェアが別のものを使っている」である場合があるからです。
 func (p ETVRParser) Header() []byte { return bytes.Clone(p.header) }
 
-// Parse consumes whole packets from buf and returns the JPEG payloads found,
-// along with the bytes that could not be consumed yet.
+// Parse は buf から完結したパケットを取り出し、見つかった JPEG ペイロードと、
+// まだ消費できなかったバイト列を返します。
 //
-// Returned frames are copies and are safe to retain. rest aliases buf, so a
-// caller reusing its read buffer must copy or compact it (the usual
-// buf = append(buf[:0], rest...) works, since copy handles overlap).
+// 返すフレームはコピーなので保持して構いません。rest は buf を指しているため、
+// 読み取りバッファを使い回す呼び出し側はコピーするか詰め直す必要があります
+// (定番の buf = append(buf[:0], rest...) で構いません。copy が重なりを扱います)。
 //
-// Bytes preceding the first header are discarded, which lets a reader join a
-// stream that is already running. A packet whose length field is implausible
-// or whose payload is not a valid JPEG is dropped, and the scan restarts one
-// byte past that header so a false positive inside image data cannot wedge the
-// parser.
+// 最初のヘッダーより前のバイトは捨てます。これにより、すでに流れている
+// ストリームの途中から読み始められます。長さフィールドがあり得ない値のパケットや、
+// ペイロードが正しい JPEG でないパケットは捨て、走査はそのヘッダーの 1 バイト先から
+// 再開します。画像データの中の偽の一致でパーサーが詰まらないようにするためです。
 //
-// tail is how much of buf lies past the end of the last packet returned, or
-// the whole of it when there was none. It is not derivable from rest: rest
-// holds only what could still become a packet, and everything else back there
-// has been discarded by the time this returns. A caller reporting what arrived
-// on the wire needs the discarded bytes counted too, since they are exactly
-// the evidence that something is arriving and not parsing.
+// tail は、返した最後のパケットの終端より後ろに buf が持っている量です。
+// 1 つも返さなかった場合は buf 全体になります。これは rest からは導けません。
+// rest はまだパケットになり得る分しか保持しておらず、それ以外はこの関数が返る
+// 時点で捨てられているからです。線上に何が届いたかを報告する側は、捨てた分も
+// 数える必要があります。それこそが「何かは届いているが解析できていない」ことの
+// 証拠だからです。
 func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte, tail int) {
 	pos := 0
-	// Where the last returned packet ended. Zero while there has been none,
-	// which makes the whole buffer the tail -- correct, since none of it is
-	// behind a frame.
+	// 最後に返したパケットが終わった位置。1 つも無いうちは 0 で、その場合は
+	// バッファ全体が tail になる。フレームの後ろに位置する部分が無いのだから、
+	// それで正しい。
 	lastEnd := 0
 	for {
 		idx := bytes.Index(buf[pos:], p.header)
 		if idx < 0 {
-			// No header in flight. Keep only the tail that could still be the
-			// beginning of a header split across two reads.
+			// 途中のヘッダーは無い。2 回の読み取りにまたがって分断された
+			// ヘッダーの先頭になり得る末尾だけを残す。
 			keep := len(p.header) - 1
 			if keep > len(buf)-pos {
 				keep = len(buf) - pos
@@ -99,7 +97,7 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte, tail int) {
 		start := pos + idx
 		lenAt := start + len(p.header)
 		if lenAt+etvrLengthBytes > len(buf) {
-			// Header seen but the length field has not arrived yet.
+			// ヘッダーは見えたが、長さフィールドがまだ届いていない。
 			return frames, buf[start:], len(buf) - lastEnd
 		}
 		payloadLen := int(binary.LittleEndian.Uint16(buf[lenAt : lenAt+etvrLengthBytes]))
@@ -110,7 +108,7 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte, tail int) {
 		payloadAt := lenAt + etvrLengthBytes
 		end := payloadAt + payloadLen
 		if end > len(buf) {
-			// Payload still in flight; wait for the rest of it.
+			// ペイロードがまだ途中。残りを待つ。
 			return frames, buf[start:], len(buf) - lastEnd
 		}
 		payload := buf[payloadAt:end]
@@ -124,8 +122,9 @@ func (p ETVRParser) Parse(buf []byte) (frames [][]byte, rest []byte, tail int) {
 	}
 }
 
-// EncodePacket builds a wire packet for the given JPEG payload. It exists so
-// tests and fixtures can produce byte-exact input for Parse.
+// EncodePacket は、渡された JPEG ペイロードのワイヤパケットを組み立てます。
+// テストやフィクスチャが Parse へバイト単位で正確な入力を作れるようにするための
+// ものです。
 func (p ETVRParser) EncodePacket(payload []byte) ([]byte, error) {
 	if len(payload) > 0xFFFF {
 		return nil, fmt.Errorf("etvr: payload of %d bytes exceeds the 16-bit length field", len(payload))

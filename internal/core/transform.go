@@ -7,43 +7,40 @@ import (
 	"image/jpeg"
 )
 
-// DefaultQuality is used when a transform is active but no explicit JPEG
-// quality was configured.
+// DefaultQuality は、変換は有効だが JPEG 品質が明示されていないときに使う値です。
 const DefaultQuality = 85
 
-// DefaultMaxPixels bounds how large an image may be before it is decoded.
+// DefaultMaxPixels は、デコードする前に許す画像の大きさの上限です。
 //
-// A JPEG states its dimensions in a header a few bytes long, so
-// source.max_frame_size -- which counts compressed bytes -- says nothing about
-// what decoding will ask for: a structurally valid frame of well under a
-// kilobyte can declare 65535x65535 and have the decoder allocate the buffers
-// for it up front. A tracking camera sends 240x240, so this ceiling is far
-// above anything real while keeping one frame from a hostile or broken
-// upstream out of memory-exhaustion range.
+// JPEG は自身の寸法を数バイトのヘッダーで宣言するので、圧縮後のバイト数を数える
+// source.max_frame_size は、デコードが要求する量について何も語りません。1 KiB にも
+// 満たない構造的に妥当なフレームが 65535x65535 を宣言し、デコーダにその分の
+// バッファを先に確保させることができます。トラッキングカメラが送るのは 240x240
+// なので、この上限は現実的な値のはるか上にありながら、悪意ある、あるいは壊れた
+// 上流からの 1 フレームがメモリを食い尽くす域に達するのを防ぎます。
 const DefaultMaxPixels = 16 << 20
 
-// Transform describes the optional geometry and re-encode step applied between
-// the source and the stream. The zero value is a no-op, and a no-op transform
-// forwards the input bytes untouched rather than decoding and re-encoding
-// them, which avoids both the CPU cost and the generation loss.
+// Transform は、ソースとストリームの間に挟む任意の幾何変換と再エンコードを
+// 表します。ゼロ値は何もしない設定で、その場合は入力バイトをデコード・再エンコード
+// せずそのまま流します。CPU コストと世代劣化の両方を避けられます。
 type Transform struct {
-	// Rotate is clockwise and must be 0, 90, 180 or 270.
+	// Rotate は時計回りで、0・90・180・270 のいずれかでなければなりません。
 	Rotate int
-	// FlipH mirrors horizontally, FlipV vertically. Both are applied after
-	// cropping and rotation.
+	// FlipH は左右反転、FlipV は上下反転です。どちらも切り抜きと回転の後に
+	// 適用されます。
 	FlipH bool
 	FlipV bool
-	// CropSquare takes the largest centred square before rotating.
+	// CropSquare は、回転の前に中央から最大の正方形を切り出します。
 	CropSquare bool
-	// Quality is the JPEG quality for the re-encode, 1-100. Zero means "do not
-	// re-encode unless a geometry change forces it".
+	// Quality は再エンコード時の JPEG 品質で、1〜100 です。0 は「幾何変換で
+	// 必要にならない限り再エンコードしない」という意味です。
 	Quality int
-	// MaxPixels rejects an image larger than this before decoding it. Zero
-	// selects DefaultMaxPixels.
+	// MaxPixels は、これより大きい画像をデコード前に拒否します。0 なら
+	// DefaultMaxPixels を使います。
 	MaxPixels int
 }
 
-// Validate reports whether the transform can be applied.
+// Validate は、この変換が適用可能かどうかを返します。
 func (t Transform) Validate() error {
 	switch t.Rotate {
 	case 0, 90, 180, 270:
@@ -56,13 +53,13 @@ func (t Transform) Validate() error {
 	return nil
 }
 
-// IsNoop reports whether Apply would return its input unchanged.
+// IsNoop は、Apply が入力をそのまま返すかどうかを返します。
 func (t Transform) IsNoop() bool {
 	return t.Rotate == 0 && !t.FlipH && !t.FlipV && !t.CropSquare && t.Quality == 0
 }
 
-// Apply runs the transform over an encoded JPEG and returns an encoded JPEG.
-// A no-op transform returns the input slice itself.
+// Apply は、エンコード済みの JPEG に変換をかけ、エンコード済みの JPEG を返します。
+// 何もしない変換の場合は入力スライスそのものを返します。
 func (t Transform) Apply(src []byte) ([]byte, error) {
 	if t.IsNoop() {
 		return src, nil
@@ -70,9 +67,8 @@ func (t Transform) Apply(src []byte) ([]byte, error) {
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
-	// Read the header first: the decoder sizes its buffers from the declared
-	// dimensions, so anything over the ceiling has to be turned away before
-	// Decode is allowed to allocate for it.
+	// 先にヘッダーを読む。デコーダは宣言された寸法からバッファの大きさを決める
+	// ので、上限を超えるものは Decode に確保させる前に追い返す必要がある。
 	if err := t.checkSize(src); err != nil {
 		return nil, err
 	}
@@ -101,21 +97,21 @@ func (t Transform) Apply(src []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// DecodableJPEG reports whether src is a JPEG a client could actually render,
-// not merely one with the right markers around it.
+// DecodableJPEG は、src がクライアントで実際に描画できる JPEG かどうかを返します。
+// 正しいマーカーで囲まれているだけのものとは違います。
 //
-// The parsers upstream check structure, which is the right thing to do per
-// frame: it is cheap, and it is all that can be afforded at capture rate. But
-// structure is a weak claim. A payload of SOI followed by EOI has the shape of
-// a JPEG and no image in it, and a source that only ever sends those looks
-// healthy the whole way through -- frames counted, /healthz green -- while the
-// tracker gets nothing it can use. Decoding is how that gets caught, so it is
-// worth doing once, on the frame that decides whether a source works.
+// 上流のパーサーは構造を確認します。フレームごとの検査としてはそれが正解で、
+// 安価であり、キャプチャ速度で許されるのはそこまでです。しかし構造という主張は
+// 弱いものです。SOI の直後に EOI が来るペイロードは JPEG の形をしていて中身は
+// 空であり、それしか送らないソースは最後まで健全に見えます — フレーム数は増え、
+// /healthz は緑 — その間トラッカーは使えるものを何も受け取りません。それを捕まえる
+// のがデコードなので、ソースが機能するかを決めるフレームに対して一度だけ行う
+// 価値があります。
 //
-// maxPixels bounds the allocation the decode is allowed to ask for; zero
-// selects DefaultMaxPixels.
+// maxPixels はデコードが要求してよい確保量の上限です。0 なら DefaultMaxPixels を
+// 使います。
 func DecodableJPEG(src []byte, maxPixels int) error {
-	// The header goes first so the ceiling is applied before Decode allocates.
+	// Decode が確保する前に上限を適用するため、ヘッダーを先に読む。
 	if err := checkImageSize(src, maxPixels); err != nil {
 		return err
 	}
@@ -125,27 +121,26 @@ func DecodableJPEG(src []byte, maxPixels int) error {
 	return nil
 }
 
-// checkSize reads only the JPEG header and reports whether the image it
-// describes is small enough to decode.
+// checkSize は JPEG のヘッダーだけを読み、そこに書かれた画像がデコードして
+// よい大きさかどうかを返します。
 func (t Transform) checkSize(src []byte) error {
 	return checkImageSize(src, t.MaxPixels)
 }
 
-// WithinPixelLimit reads only the JPEG header and reports whether the image it
-// describes is small enough to hand on. Zero selects DefaultMaxPixels.
+// WithinPixelLimit は JPEG のヘッダーだけを読み、そこに書かれた画像が
+// 渡してよい大きさかどうかを返します。0 なら DefaultMaxPixels を使います。
 //
-// A frame that is forwarded untouched is never decoded here, so nothing on this
-// side would notice a small payload declaring an enormous image -- but the
-// client that receives it has to decode it, and it is the one left asking for
-// the memory. Reading the header is cheap enough to do at capture rate, which
-// is what makes the ceiling worth applying to every frame and not only to the
-// ones this process decodes itself.
+// そのまま流すフレームはここでデコードされないので、小さなペイロードが巨大な画像を
+// 宣言していても、こちら側では誰も気づきません。しかし受け取ったクライアントは
+// それをデコードしなければならず、メモリを要求させられるのはそちらです。ヘッダーを
+// 読むだけならキャプチャ速度でも十分に安いので、この上限は自プロセスがデコードする
+// フレームだけでなく、すべてのフレームに適用する価値があります。
 func WithinPixelLimit(src []byte, maxPixels int) error {
 	return checkImageSize(src, maxPixels)
 }
 
-// checkImageSize reads only the JPEG header and reports whether the image it
-// describes is small enough to decode.
+// checkImageSize は JPEG のヘッダーだけを読み、そこに書かれた画像がデコードして
+// よい大きさかどうかを返します。
 func checkImageSize(src []byte, maxPixels int) error {
 	limit := maxPixels
 	if limit <= 0 {
@@ -158,17 +153,16 @@ func checkImageSize(src []byte, maxPixels int) error {
 	if cfg.Width <= 0 || cfg.Height <= 0 {
 		return fmt.Errorf("image declares unusable dimensions %dx%d", cfg.Width, cfg.Height)
 	}
-	// Divide rather than multiply: the product of two declared dimensions can
-	// overflow before it is ever compared.
+	// 掛けずに割る。宣言された 2 つの寸法の積は、比較される前に溢れ得る。
 	if cfg.Width > limit/cfg.Height {
 		return fmt.Errorf("image is %dx%d, over the %d pixel limit", cfg.Width, cfg.Height, limit)
 	}
 	return nil
 }
 
-// remap builds a dstW x dstH image by pulling each destination pixel from the
-// source coordinate returned by at. Every geometry operation here is a pure
-// coordinate permutation, so one helper covers all of them.
+// remap は、各出力ピクセルを at が返す入力座標から引いてきて dstW x dstH の
+// 画像を作ります。ここでの幾何操作はすべて座標の純粋な置換なので、この 1 つで
+// 全部を賄えます。
 func remap(src image.Image, dstW, dstH int, at func(dx, dy int) (int, int)) image.Image {
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	b := src.Bounds()
@@ -181,7 +175,7 @@ func remap(src image.Image, dstW, dstH int, at func(dx, dy int) (int, int)) imag
 	return dst
 }
 
-// cropCentredSquare returns the largest centred square of img.
+// cropCentredSquare は、img の中央から取れる最大の正方形を返します。
 func cropCentredSquare(img image.Image) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
@@ -198,7 +192,7 @@ func cropCentredSquare(img image.Image) image.Image {
 	})
 }
 
-// rotate turns img clockwise by 90, 180 or 270 degrees.
+// rotate は、img を時計回りに 90・180・270 度回します。
 func rotate(img image.Image, degrees int) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
@@ -214,7 +208,7 @@ func rotate(img image.Image, degrees int) image.Image {
 	}
 }
 
-// flip mirrors img on either or both axes.
+// flip は、img をいずれか、または両方の軸で反転します。
 func flip(img image.Image, horizontal, vertical bool) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
