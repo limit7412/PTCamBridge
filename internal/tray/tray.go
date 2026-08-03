@@ -1,9 +1,9 @@
-// Package tray is the system tray front end: source selection, pause, status
-// and the autostart toggle.
+// Package tray はシステムトレイの表側です。ソースの選択、一時停止、状態表示、
+// 自動起動の切り替えを担います。
 //
-// The menu is the only UI PTCamBridge has. Anything richer belongs in a
-// separate process talking to the management API, which is why the controller
-// interface here mirrors what that API exposes.
+// メニューは PTCamBridge が持つ唯一の UI です。それ以上のものは、管理 API と話す
+// 別プロセスの領分です。ここの controller インターフェースがその API の公開内容を
+// 写しているのは、そのためです。
 package tray
 
 import (
@@ -23,8 +23,8 @@ import (
 //go:embed icon.ico
 var iconICO []byte
 
-// sourceChoice is one entry in the source submenu. The label is a message key
-// rather than text, so it is resolved in whatever language the user chose.
+// sourceChoice は、ソースのサブメニューの 1 項目です。ラベルはテキストではなく
+// メッセージのキーなので、ユーザーが選んだ言語で解決されます。
 type sourceChoice struct {
 	kind  string
 	label i18n.Key
@@ -36,7 +36,7 @@ var sourceChoices = []sourceChoice{
 	{config.SourceMJPEG, i18n.MenuSourceMJPEG},
 }
 
-// Controller is the slice of the bridge the menu drives.
+// Controller は、メニューが操作するブリッジの一部です。
 type Controller interface {
 	Snapshot() config.Config
 	Switch(ctx context.Context, sourceType string) error
@@ -44,24 +44,24 @@ type Controller interface {
 	SetPaused(paused bool) error
 }
 
-// FFmpegFetcher is the slice of the ffmpeg download the menu drives.
+// FFmpegFetcher は、メニューが操作する ffmpeg ダウンロードの一部です。
 type FFmpegFetcher interface {
 	State() ffmpegfetch.State
 	Start() error
 }
 
-// ffmpegPrompt is what the user is shown before anything is downloaded.
+// ffmpegPrompt は、何かがダウンロードされる前にユーザーへ見せる内容です。
 //
-// PTCamBridge does not ship ffmpeg, so clicking the menu item makes the user's
-// machine fetch a third party's binary. Who built it, how big it is and what
-// licence it carries are the three things somebody needs to agree to that, so
-// they are on the screen before the first byte moves rather than in the README.
+// PTCamBridge は ffmpeg を同梱していないので、メニュー項目をクリックすると、
+// ユーザーの機械が第三者のバイナリを取ってくることになります。誰が作ったのか、
+// どれくらいの大きさか、どのライセンスなのか。同意するために必要なのはこの 3 つ
+// なので、README ではなく、最初の 1 バイトが動く前の画面に出します。
 func ffmpegPrompt(p i18n.Printer, build ffmpegfetch.Build) string {
 	return p.F(i18n.DialogFFmpegBody,
 		build.Publisher, build.URL, build.Size/(1000*1000), build.License)
 }
 
-// ffmpegStatusLine describes the download for the menu entry itself.
+// ffmpegStatusLine は、メニュー項目そのものに出すダウンロードの説明です。
 func ffmpegStatusLine(p i18n.Printer, state ffmpegfetch.State) string {
 	switch {
 	case state.Downloading && state.Total > 0:
@@ -77,52 +77,50 @@ func ffmpegStatusLine(p i18n.Printer, state ffmpegfetch.State) string {
 	}
 }
 
-// Options configures the tray.
+// Options はトレイを設定します。
 type Options struct {
 	Controller Controller
 	Hub        *hub.Hub
 	Status     *status.Tracker
 	Log        *slog.Logger
-	// Address is the bound listen address, shown in the menu and used for the
-	// "open snapshot" item.
+	// Address は bind した listen アドレスです。メニューに表示し、「スナップ
+	// ショットを開く」項目にも使います。
 	Address string
-	// LogDir is opened by the "open log folder" item; empty hides it.
+	// LogDir は「ログフォルダを開く」項目が開く場所です。空なら項目を隠します。
 	LogDir string
-	// ConfigPath is opened by the "edit settings" item; empty hides it.
+	// ConfigPath は「設定を編集」項目が開くファイルです。空なら項目を隠します。
 	ConfigPath string
-	// FFmpeg backs the "get ffmpeg" item; nil hides it.
+	// FFmpeg は「ffmpeg を取得」項目の実体です。nil なら項目を隠します。
 	FFmpeg FFmpegFetcher
-	// ConfigFlag is the settings path the user named on the command line, if
-	// any. The autostart toggle registers it so a sign-in launch uses the same
-	// file; empty means the default location.
+	// ConfigFlag は、ユーザーがコマンドラインで指定した設定ファイルのパスです
+	// (指定があれば)。自動起動の切り替えはこれを登録するので、サインイン時の起動も
+	// 同じファイルを使います。空なら既定の場所を意味します。
 	ConfigFlag string
-	// Printer renders the menu. The zero value prints English.
+	// Printer はメニューの文字列を組み立てます。ゼロ値なら英語になります。
 	Printer i18n.Printer
-	// OnQuit is called when the user chooses Quit, before the tray exits.
+	// OnQuit は、ユーザーが終了を選んだとき、トレイが終わる前に呼ばれます。
 	OnQuit func()
 }
 
-// actionPause is the key watchClicks reports a pause click under. It shares a
-// namespace with the source type names, which are uvc, serial and mjpeg.
+// actionPause は、watchClicks が一時停止のクリックを報告する際のキーです。ソース
+// 種別の名前 — uvc、serial、mjpeg — と名前空間を共有します。
 const actionPause = "pause"
 
-// watchClicks forwards clicks from every menu entry that changes the bridge
-// onto one channel, in the order they arrive.
+// watchClicks は、ブリッジを変更するすべてのメニュー項目からのクリックを、届いた
+// 順に 1 本のチャネルへ転送します。
 //
-// One goroutine watching every channel, rather than one per entry and a
-// separate case in the event loop. Both of those hand the order to something
-// other than the user: with a goroutine each, two clicks are received
-// independently and then race to forward; with separate select cases, Go picks
-// among the ready ones at random. Either way, choosing a source and then
-// pausing can arrive the other way round -- and since a source cannot be
-// changed while paused, that turns into the old source being paused instead of
-// the new one.
+// 項目ごとに goroutine を立ててイベントループに case を分ける代わりに、1 つの
+// goroutine がすべてのチャネルを見ます。前者はどちらも、順序をユーザー以外の何かに
+// 委ねることになります。goroutine を分ければ、2 つのクリックは独立に受け取られてから
+// 転送を競います。select の case を分ければ、Go は準備完了のものからランダムに選び
+// ます。いずれにせよ「ソースを選んでから一時停止」が逆順で届き得ます。そして一時停止中は
+// ソースを変更できないので、それは新しいソースではなく古いソースが一時停止される
+// という結果になります。
 //
-// It hands the click on without blocking and goes straight back to watching.
-// systray sends with a select and a default, so a click lands only if a
-// receiver is parked on that exact channel at that moment and is dropped
-// otherwise; anything slow here would lose clicks rather than reorder them,
-// which is the worse of the two.
+// クリックはブロックせずに渡し、すぐ監視へ戻ります。systray は select と default で
+// 送るので、クリックが届くのは、ちょうどそのチャネルで受信側が待っている瞬間だけで、
+// それ以外は捨てられます。ここで何かに手間取れば、順序が入れ替わるのではなくクリックが
+// 失われることになり、そちらの方が悪い結果です。
 func watchClicks(ctx context.Context, log *slog.Logger, entries map[string]<-chan struct{}, out chan<- string) {
 	kinds := make([]string, 0, len(entries))
 	cases := make([]reflect.SelectCase, 0, len(entries)+1)
@@ -133,7 +131,7 @@ func watchClicks(ctx context.Context, log *slog.Logger, entries map[string]<-cha
 			Chan: reflect.ValueOf(clicked),
 		})
 	}
-	// Last, so its index is len(kinds).
+	// 最後に置くので、添字は len(kinds) になる。
 	cases = append(cases, reflect.SelectCase{
 		Dir:  reflect.SelectRecv,
 		Chan: reflect.ValueOf(ctx.Done()),
@@ -142,38 +140,39 @@ func watchClicks(ctx context.Context, log *slog.Logger, entries map[string]<-cha
 	for {
 		chosen, _, ok := reflect.Select(cases)
 		if chosen == len(kinds) || !ok {
-			// Shutting down, or the menu item was removed.
+			// 終了処理中か、メニュー項目が取り除かれたか。
 			return
 		}
 		select {
 		case out <- kinds[chosen]:
 		default:
-			// Only reachable if the worker is far enough behind to fill the
-			// buffer, which takes a settings change slow enough to hit the
-			// verification timeout. Blocking instead would stop watching the
-			// other entries, and systray drops clicks nobody is waiting on.
+			// ここに来るのは、ワーカーがバッファを埋めるほど遅れている場合だけで、
+			// それには検証タイムアウトに達するほど遅い設定変更が要る。代わりに
+			// ブロックすると他の項目の監視が止まるし、systray は誰も待っていない
+			// クリックを捨てる。
 			log.Warn("ignoring a menu click, earlier ones are still being applied", "action", kinds[chosen])
 		}
 	}
 }
 
-// commandQueueDepth bounds the menu actions waiting to be applied. Clicks
-// arrive at human speed and the worker only falls behind while a switch is
-// being verified, so a handful is more than a real user produces.
+// commandQueueDepth は、適用を待つメニュー操作の上限です。クリックは人の速さで
+// 届きますし、ワーカーが遅れるのは切替の検証中だけなので、数個あれば実際のユーザーが
+// 生み出す量を上回ります。
 const commandQueueDepth = 8
 
-// commandQueue applies menu actions one at a time, in the order they were
-// submitted, on a goroutine of its own.
+// commandQueue は、メニューの操作を投入された順に 1 つずつ、専用の goroutine で
+// 適用します。
 //
-// Off the event loop, because a source that is not attached is given up to the
-// verification timeout to prove itself and running that on the loop would stop
-// the menu answering at all -- including Quit, which is exactly what the user
-// reaches for when a switch is hanging.
+// イベントループから外しているのは、繋がっていないソースには検証タイムアウトまで
+// 実力を示す機会が与えられ、それをループ上で走らせるとメニューが一切応答しなくなる
+// からです。終了も含めて。そして切替が固まっているとき、ユーザーが手を伸ばすのは
+// まさにそれです。
 //
-// One worker rather than a goroutine each, because these actions all serialise
-// on the bridge's lock and a goroutine per click leaves the order to the
-// scheduler. Picking UVC and then MJPEG would settle on whichever won the
-// race, so the menu could show one source and the bridge run the other.
+// クリックごとに goroutine を立てず 1 つのワーカーにしているのは、これらの操作が
+// すべてブリッジのロックで直列化されるため、goroutine を分けると順序をスケジューラに
+// 委ねることになるからです。UVC を選んでから MJPEG を選ぶと、競争に勝った方に
+// 落ち着くので、メニューが一方のソースを表示し、ブリッジがもう一方で動くという
+// ことが起こり得ます。
 type commandQueue struct {
 	cmds chan func()
 	log  *slog.Logger
@@ -189,13 +188,13 @@ func newCommandQueue(log *slog.Logger, depth int) *commandQueue {
 	return q
 }
 
-// submit queues an action and reports whether it was taken.
+// submit は操作をキューに入れ、受け付けられたかどうかを返します。
 //
-// The send never blocks: holding the event loop until the worker catches up is
-// the thing being avoided. A full queue means an action is dropped, which is
-// said out loud rather than left to look like a click that did nothing -- and
-// reported back, because a caller tracking what it has asked for must not
-// count a request that was never made.
+// 送信は決してブロックしません。ワーカーが追いつくまでイベントループを止めることこそ、
+// 避けたいことだからです。キューが一杯なら操作は捨てられます。それは、何も起きなかった
+// クリックのように見せるのではなく、はっきり伝えます。そして呼び出し側にも返します。
+// 自分が何を要求したかを追っている呼び出し側が、実際には行われなかった要求を数えては
+// いけないからです。
 func (q *commandQueue) submit(what string, cmd func()) bool {
 	select {
 	case q.cmds <- cmd:
@@ -208,7 +207,7 @@ func (q *commandQueue) submit(what string, cmd func()) bool {
 
 func (q *commandQueue) close() { close(q.cmds) }
 
-// statusLine is the one line of text the user reads to know whether it works.
+// statusLine は、動いているかどうかを知るためにユーザーが読む 1 行です。
 func statusLine(p i18n.Printer, snapshot status.Snapshot, paused bool, fps float64, clients int) string {
 	source := snapshot.Source
 	if source == "" {
@@ -226,12 +225,12 @@ func statusLine(p i18n.Printer, snapshot status.Snapshot, paused bool, fps float
 	}
 }
 
-// reason renders why a source is down.
+// reason は、ソースが落ちている理由を組み立てます。
 //
-// A translation only when the tracker recognised the failure as one of the few
-// a user can act on. Everything else is the driver's own words, which are the
-// same words the log has: a message nobody translated is more use to the
-// person reading it than a vague one that happens to be in their language.
+// 翻訳するのは、その失敗を tracker が「ユーザーの対処できる数少ないもの」の 1 つと
+// 認識した場合だけです。それ以外はドライバ自身の文言、つまりログにあるのと同じ言葉に
+// なります。誰も翻訳していないメッセージの方が、たまたま読み手の言語になっている
+// 曖昧なメッセージより、読む人の役に立ちます。
 func reason(p i18n.Printer, snapshot status.Snapshot) string {
 	if snapshot.LastErrorKey != "" {
 		return p.S(i18n.Key(snapshot.LastErrorKey))
@@ -239,12 +238,11 @@ func reason(p i18n.Printer, snapshot status.Snapshot) string {
 	return snapshot.LastError
 }
 
-// truncate shortens a reason to fit a menu entry.
+// truncate は、メニュー項目に収まるよう理由を短くします。
 //
-// Counted in runes, not bytes. A translated reason is comfortably over sixty
-// bytes in Japanese, and cutting there lands in the middle of a character:
-// what reaches the tray is invalid UTF-8, which draws as a replacement glyph
-// rather than as a shortened sentence.
+// 数えるのはバイトではなくルーンです。日本語に訳した理由は 60 バイトを楽に超え、
+// そこで切ると文字の途中に落ちます。トレイに届くのは不正な UTF-8 であり、短くなった
+// 文ではなく置換文字として描かれます。
 func truncate(s string, max int) string {
 	if max < 3 {
 		max = 3
