@@ -73,8 +73,10 @@ type Controller interface {
 	// Snapshot は、現在有効な設定を返します。
 	Snapshot() config.Config
 	// Apply は新しい設定を検証し、採用します。起動時にしか読まれない設定も
-	// 受け入れますが、この起動の振る舞いは変わりません。その名前が返ります。
-	Apply(ctx context.Context, cfg config.Config) ([]string, error)
+	// 受け入れますが、この起動の振る舞いは変わりません。落ち着いた設定と、
+	// それらの名前が返ります。2 つを別々に読むと、その隙間に入った別の要求の
+	// 設定と、こちらの要求について数えた名前が並ぶことになります。
+	Apply(ctx context.Context, cfg config.Config) (config.Config, []string, error)
 	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
@@ -529,13 +531,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		deferred, err := s.opts.Controller.Apply(r.Context(), cfg)
+		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg)
 		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
 		}
 		writeJSON(w, r, http.StatusOK, appliedConfig{
-			Config:         s.opts.Controller.Snapshot(),
+			Config:         applied,
 			PendingRestart: deferred,
 		})
 

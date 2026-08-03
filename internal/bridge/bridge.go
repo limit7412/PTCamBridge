@@ -220,10 +220,16 @@ func (b *Bridge) Snapshot() config.Config {
 // restartDeferred を参照。保存の失敗は config.ErrNotSaved を包んだエラーとして
 // 報告します。今変更したものが再起動を越えないことを、呼び出し側が知る必要が
 // あるからです。
-func (b *Bridge) Apply(ctx context.Context, cfg config.Config) ([]string, error) {
+//
+// 落ち着いた設定も一緒に返すのは、名前と設定が同じ瞬間のものでなければならない
+// からです。呼び出し側が後から Snapshot を読むと、その隙間に入った別の要求の設定と、
+// こちらの要求について数えた名前が並ぶことになります。en で起動して、先の要求が ja、
+// 後の要求が en を指定すれば、language=en と pending_restart=["ui.language"] が同時に
+// 返り、保留になっていない変更を保留として伝えます。
+func (b *Bridge) Apply(ctx context.Context, cfg config.Config) (config.Config, []string, error) {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
-		return nil, err
+		return config.Config{}, nil, err
 	}
 
 	b.mu.Lock()
@@ -234,14 +240,14 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config) ([]string, error)
 // applyLocked は mu を保持済みの Apply です。先に現在の設定を読む必要のある
 // 呼び出し側が、読み取り・変更・適用の全体を、間に何も挟ませずに行えるようにする
 // ためのものです。cfg の正規化と検証は呼び出し側が済ませています。
-func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, error) {
+func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Config, []string, error) {
 	// ロック待ちは、別の呼び出し側の検証まるごと分の長さになり得るので、ここへ
 	// 辿り着いたリクエストは既に居なくなっているかもしれない。この先で起きることは
 	// どれも、そのリクエストの代わりに勝手にやってよいものではない。サーバ設定
 	// だけを触る変更は検証に到達しないので、そうしなければ、タイムアウトを告げ
 	// られた呼び出し側のために適用され書き出されてしまう。
 	if ctx != nil && ctx.Err() != nil {
-		return nil, fmt.Errorf("bridge: the request ended before its change was applied: %w", ctx.Err())
+		return b.cfg, nil, fmt.Errorf("bridge: the request ended before its change was applied: %w", ctx.Err())
 	}
 
 	previous := b.cfg
@@ -266,14 +272,14 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 	// 残された唯一の手 (別のソースを選ぶこと) を奪うだけになる。既に落ちている
 	// ブリッジを一時停止した人は、設定ファイルを編集しなければ戻せなくなる。
 	if b.paused && b.provenLocked() && !captureUnchanged(previous, cfg) {
-		return nil, errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
+		return b.cfg, nil, errors.New("capture is paused, so a new source cannot be tried: resume first, then change it")
 	}
 
 	// 何かを畳む前にエンコーダを組み立てる。使えない boundary のせいで、今動いて
 	// いるソースをユーザーから奪うべきではない。
 	encoder, err := core.NewMultipartEncoder(cfg.Server.Boundary, cfg.StreamHeaders())
 	if err != nil {
-		return nil, fmt.Errorf("server.boundary: %w", err)
+		return b.cfg, nil, fmt.Errorf("server.boundary: %w", err)
 	}
 
 	if startupOnlyChange(previous, cfg) {
@@ -302,6 +308,12 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 			b.cfg = previous
 			b.publishView()
 
+			// 動作中の設定は元に戻った。書けずに残っている保存はその設定のもので、
+			// この要求の成否とは関係が無いので、ここで試せる。試さないと、ファイルが
+			// 書けるようになってもカメラが直るまで書けないままになります。保存の
+			// やり直しは同じ設定の再送で行うものであり、それがこの経路を通るからです。
+			b.flushUnsavedLocked()
+
 			// 元のソースは、改めて実力を示させることなく戻す。動いていた場合は
 			// それが正しいし、動いていなかった場合もやる価値がある。新しいソースを
 			// 畳んだ時点でステータスは消えており、古いソースと、それが動いていな
@@ -314,11 +326,11 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 					// 新しい知らせではないし、呼び出し側が求めたこととは無関係。
 					// 2 つ並べて報告すれば、関係のある方が埋もれる。
 					b.log.Warn("nothing is capturing: the settings in place before this change had not started a source either", "error", revertErr)
-					return nil, err
+					return b.cfg, nil, err
 				}
-				return nil, fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
+				return b.cfg, nil, fmt.Errorf("apply failed (%w) and the previous source could not be restored: %v", err, revertErr)
 			}
-			return nil, err
+			return b.cfg, nil, err
 		}
 	}
 
@@ -346,7 +358,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 			// 変更がそれを書く。
 			b.holdUnsavedLocked(base, previous, cfg)
 			b.log.Error("settings applied but could not be saved", "path", b.cfgPath, "error", err)
-			return deferred, fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
+			return b.cfg, deferred, fmt.Errorf("%w to %s: %w", config.ErrNotSaved, b.cfgPath, err)
 		}
 		b.persistBase = saved
 		b.unsaved = nil
@@ -354,7 +366,32 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 	if len(deferred) > 0 {
 		b.log.Info("these settings differ from the ones this process started with, they are only read at startup", "settings", deferred)
 	}
-	return deferred, nil
+	return b.cfg, deferred, nil
+}
+
+// flushUnsavedLocked は、書けずに残っている保存をもう一度試します。
+//
+// 適用そのものが失敗した経路から呼びます。書けなかった保存は、それを生んだ前の変更の
+// ものであって、今の要求の成否とは関係がありません。
+//
+// 失敗しても報告しません。呼び出し側へ返すべきなのはカメラの話で、この要求について
+// 関係があるのはそちらです。書けなければ保留のまま残るので、次の保存が拾います。
+func (b *Bridge) flushUnsavedLocked() {
+	if b.cfgPath == "" || b.unsaved == nil {
+		return
+	}
+	base, err := b.saveBaseLocked()
+	if err != nil {
+		b.log.Warn("the settings that could not be saved earlier are still waiting", "path", b.cfgPath, "error", err)
+		return
+	}
+	if err := config.Save(b.cfgPath, base); err != nil {
+		b.log.Warn("the settings that could not be saved earlier are still waiting", "path", b.cfgPath, "error", err)
+		return
+	}
+	b.persistBase = base
+	b.unsaved = nil
+	b.log.Info("the settings that could not be saved earlier are now on disk", "path", b.cfgPath)
 }
 
 // captureAsExpectedLocked は、キャプチャが現在の設定の求める状態にあるかを返します。
@@ -645,7 +682,7 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 		return err
 	}
 	// ソース種別は動作中に変えられるものなので、保留になる葉は生まれない。
-	_, err := b.applyLocked(ctx, cfg)
+	_, _, err := b.applyLocked(ctx, cfg)
 	return err
 }
 

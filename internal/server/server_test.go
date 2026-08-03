@@ -376,13 +376,13 @@ type fakeController struct {
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
 
-func (c *fakeController) Apply(_ context.Context, cfg config.Config) ([]string, error) {
+func (c *fakeController) Apply(_ context.Context, cfg config.Config) (config.Config, []string, error) {
 	if c.applyErr != nil {
-		return nil, c.applyErr
+		return config.Config{}, nil, c.applyErr
 	}
 	c.cfg = cfg
 	c.applied = true
-	return c.deferred, nil
+	return c.cfg, c.deferred, nil
 }
 
 func (c *fakeController) Switch(_ context.Context, sourceType string) error {
