@@ -15,45 +15,45 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 )
 
-// Defaults for the upstream MJPEG connection.
+// 上流 MJPEG 接続の既定値。
 const (
 	defaultConnectTimeout = 5 * time.Second
 	defaultStallTimeout   = 5 * time.Second
 )
 
-// MJPEGConfig configures the upstream MJPEG proxy driver.
+// MJPEGConfig は、上流 MJPEG を中継するドライバの設定です。
 type MJPEGConfig struct {
-	// URL is the upstream stream, for example http://192.168.1.50/.
+	// URL は上流のストリームです。たとえば http://192.168.1.50/ です。
 	URL string
-	// ConnectTimeout bounds every phase of getting connected: DNS, TCP, TLS
-	// and the wait for response headers.
-	// The stream body itself is unbounded.
+	// ConnectTimeout は、接続に至る全段階 — DNS、TCP、TLS、応答ヘッダーの待ち —
+	// に対する上限です。
+	// ストリーム本体そのものに上限はありません。
 	ConnectTimeout time.Duration
-	// StallTimeout is how long the stream may go without producing a frame
-	// before it counts as disconnected.
+	// StallTimeout は、切断とみなすまでにストリームがフレームを出さずにいられる
+	// 時間です。
 	StallTimeout time.Duration
-	// MaxFrameSize bounds a single JPEG; zero selects the core default.
+	// MaxFrameSize は JPEG 1 枚の上限です。0 なら core の既定値を使います。
 	MaxFrameSize int
 }
 
-// MJPEGProxy re-serves an existing MJPEG-over-HTTP stream.
+// MJPEGProxy は、既存の MJPEG-over-HTTP ストリームを配信し直します。
 //
-// Frames are decomposed to bare JPEGs and re-framed by our own encoder rather
-// than passed through byte for byte. The upstream's boundary string, header
-// set and Content-Length habits vary by firmware, and the PaperTracker client
-// is strict about all three.
+// フレームはバイト単位でそのまま流すのではなく、裸の JPEG に分解して自前の
+// エンコーダで framing し直します。上流の boundary 文字列、ヘッダー構成、
+// Content-Length の付け方はファームウェアによって異なり、PaperTracker
+// クライアントはその 3 つすべてに厳格だからです。
 type MJPEGProxy struct {
 	cfg      MJPEGConfig
 	client   *http.Client
 	log      *slog.Logger
 	reporter Reporter
-	// safeURL is the upstream with any password masked. Every message that
-	// names the stream uses it, because a camera behind basic auth would
-	// otherwise write its credentials into the log on each reconnect.
+	// safeURL は、パスワードを伏せた上流の URL です。ストリームに言及する
+	// メッセージはすべてこれを使います。そうしないと Basic 認証の内側にある
+	// カメラは、再接続のたびに資格情報をログに書き込むことになります。
 	safeURL string
 }
 
-// NewMJPEGProxy builds the driver and validates the upstream URL up front.
+// NewMJPEGProxy はドライバを組み立て、上流 URL を先に検証します。
 func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEGProxy, error) {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return nil, errors.New("mjpeg: no upstream URL configured")
@@ -65,9 +65,9 @@ func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEG
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("mjpeg: unsupported URL scheme %q", u.Scheme)
 	}
-	// url.Parse is happy with "http:///stream". The transport is not, and its
-	// "no Host in request URL" would arrive as an ordinary error that the
-	// reconnect loop then retries forever.
+	// url.Parse は "http:///stream" を通してしまう。transport は通さず、その
+	// "no Host in request URL" は普通のエラーとしてやって来るので、再接続ループが
+	// 永遠に再試行することになる。
 	if u.Host == "" {
 		return nil, fmt.Errorf("mjpeg: URL %q has no host", cfg.URL)
 	}
@@ -82,18 +82,18 @@ func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEG
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Every phase of getting connected, not just the wait for headers.
-	// ResponseHeaderTimeout alone leaves DNS, TCP and TLS on the transport's
-	// own much longer defaults, so an unreachable camera would hold a
-	// reconnect attempt open far past the timeout this field promises.
+	// ヘッダーの待ちだけでなく、接続に至る全段階に効かせる。
+	// ResponseHeaderTimeout だけでは DNS・TCP・TLS が transport のはるかに長い
+	// 既定値のまま残るので、到達できないカメラは、このフィールドが約束する
+	// タイムアウトをはるかに超えて再接続の試行を握り続ける。
 	transport.DialContext = (&net.Dialer{
 		Timeout:   cfg.ConnectTimeout,
 		KeepAlive: 30 * time.Second,
 	}).DialContext
 	transport.TLSHandshakeTimeout = cfg.ConnectTimeout
 	transport.ResponseHeaderTimeout = cfg.ConnectTimeout
-	// A camera serves one stream per connection; pooling gains nothing and
-	// keeps a dead socket around.
+	// カメラは 1 接続につき 1 ストリームしか出さない。プールしても得るものは無く、
+	// 死んだソケットを抱え込むだけ。
 	transport.DisableKeepAlives = true
 
 	return &MJPEGProxy{
@@ -105,20 +105,20 @@ func NewMJPEGProxy(cfg MJPEGConfig, log *slog.Logger, reporter Reporter) (*MJPEG
 	}, nil
 }
 
-// Name implements Source.
+// Name は Source を実装します。
 func (p *MJPEGProxy) Name() string { return "mjpeg" }
 
-// Run implements Source.
+// Run は Source を実装します。
 func (p *MJPEGProxy) Run(ctx context.Context, out chan<- core.Frame) error {
 	return runWithBackoff(ctx, p.log, p.Name(), p.reporter, func(ctx context.Context) error {
 		return p.session(ctx, out)
 	})
 }
 
-// session holds one upstream connection open and forwards its frames.
+// session は上流への接続を 1 本開いたまま保ち、そのフレームを転送します。
 func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
-	// A stalled stream is not a closed one, so the read is unblocked by
-	// cancelling the request rather than by a read deadline.
+	// 止まったストリームは閉じたストリームではない。だから読み取りの解除は
+	// 読み取りデッドラインではなく、リクエストのキャンセルで行う。
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -128,11 +128,10 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	}
 	req.Header.Set("Accept", "multipart/x-mixed-replace, image/jpeg")
 
-	// Getting this far is the transport's job, bounded by its own
-	// ResponseHeaderTimeout. The stall timer must not start until the
-	// response is in hand: started any earlier it spends its budget on DNS,
-	// TCP, TLS and the header wait, and a camera that takes a moment to
-	// answer would have the body cancelled out from under it.
+	// ここまで到達させるのは transport の仕事で、上限は transport 自身の
+	// ResponseHeaderTimeout。停滞タイマーは応答を手にするまで開始してはならない。
+	// それより早く始めると、持ち時間を DNS・TCP・TLS とヘッダー待ちに使ってしまい、
+	// 応答に少し時間のかかるカメラは、本体を足元からキャンセルされることになる。
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("mjpeg: connect to %s: %w", p.safeURL, err)
@@ -145,10 +144,10 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("mjpeg: %s returned %s", p.safeURL, resp.Status)
 		if permanentHTTPStatus(resp.StatusCode) {
-			// The server answered and refused us: a wrong path, or credentials
-			// it will not accept. Unlike a refused connection there is no
-			// version of this that a retry fixes, so it is reported as fatal
-			// and Apply gets to roll back to the source that was working.
+			// サーバは応答したうえで拒否した。パスが違うか、受け付けられない
+			// 資格情報か。接続拒否と違い、これは再試行で直る類のものではない。
+			// だから致命的として報告し、Apply が動いていたソースへ巻き戻せる
+			// ようにする。
 			return fatalf(err)
 		}
 		return err
@@ -162,8 +161,8 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 			return core.SplitMultipart(buf, boundary, maxSize)
 		}
 	} else {
-		// Either a bare concatenated JPEG stream or a multipart response with
-		// no usable boundary parameter. Structural scanning handles both.
+		// 裸の JPEG を連結したストリームか、使える boundary パラメータの無い
+		// multipart 応答のどちらか。構造走査はその両方を扱える。
 		p.log.Debug("upstream has no usable boundary, scanning for images", "content_type", contentType, "url", p.safeURL)
 	}
 
@@ -174,10 +173,10 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			// Frames, not bytes: an upstream dribbling malformed parts keeps
-			// the socket busy without ever producing an image, and resetting
-			// on arrival alone would hold that session open forever while
-			// /healthz reported the source as lost.
+			// バイトではなくフレームで測る。壊れたパートを少しずつ送り続ける
+			// 上流はソケットを忙しくさせるだけで画像を一枚も生まない。到着だけで
+			// タイマーを戻していると、/healthz がソースを失ったと報告している間も
+			// そのセッションを永遠に開き続けることになる。
 			for _, f := range assembler.feed(buf[:n]) {
 				stall.Reset(p.cfg.StallTimeout)
 				if count == 0 {
@@ -204,12 +203,11 @@ func (p *MJPEGProxy) session(ctx context.Context, out chan<- core.Frame) error {
 	}
 }
 
-// permanentHTTPStatus reports whether a status means the request itself is
-// wrong, rather than the server being briefly unable to serve it.
+// permanentHTTPStatus は、そのステータスが「リクエスト自体が誤っている」ことを
+// 意味するのか、「サーバが一時的に応じられない」だけなのかを返します。
 //
-// 4xx is the client's fault by definition, with the exceptions below: those
-// three ask the caller to come back later, which is exactly what the reconnect
-// loop does.
+// 4xx は定義上クライアント側の誤りですが、下記の例外があります。その 3 つは
+// 「後で来い」と言っているのであり、それはまさに再接続ループがすることです。
 func permanentHTTPStatus(code int) bool {
 	switch code {
 	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
