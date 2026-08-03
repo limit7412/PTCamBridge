@@ -56,21 +56,27 @@ API ───┘        │
 
 ## 依存の向き
 
-内部パッケージが直接 import している相手です (`go list` の出力そのもの)。
+内部パッケージが直接 import している相手です (`GOOS=windows go list` の出力そのもの。
+配布するのは Windows ビルドなので、そちらを基準にしています)。
 
-| | |
-|---|---|
-| `cmd/ptcambridge` | すべて |
-| `bridge` | `config`, `core`, `hub`, `server`, `source`, `status` |
-| `server` | `config`, `core`, `ffmpegfetch`, `hub`, `source`, `status` |
-| `tray` | `config`, `ffmpegfetch`, `hub`, `i18n`, `status` |
-| `source` | `core`, `ffmpegfetch`, `i18n` |
-| `config` | `core`, `i18n` |
-| `ffmpegfetch` | `config` |
-| `hub` | `core` |
-| `core` / `status` / `i18n` / `papertracker` / `logging` / `autostart` / `console` | 標準ライブラリのみ |
+| パッケージ | 内部パッケージ | 外部モジュール |
+|---|---|---|
+| `cmd/ptcambridge` | すべて | — |
+| `bridge` | `config`, `core`, `hub`, `server`, `source`, `status` | — |
+| `server` | `config`, `core`, `ffmpegfetch`, `hub`, `source`, `status` | — |
+| `tray` | `autostart`, `config`, `ffmpegfetch`, `hub`, `i18n`, `status` (`autostart` は Windows のみ) | `fyne.io/systray` (Windows のみ) |
+| `source` | `core`, `ffmpegfetch`, `i18n` | `go.bug.st/serial`, `go.bug.st/serial/enumerator` |
+| `config` | `core`, `i18n` | `github.com/BurntSushi/toml` |
+| `ffmpegfetch` | `config` | — |
+| `hub` | `core` | — |
+| `autostart` | — | `golang.org/x/sys/windows/registry` (Windows のみ) |
+| `core` / `status` / `i18n` / `papertracker` / `logging` / `console` | — | — |
 
-**逆流はありません。** 下の 7 つは葉で、標準ライブラリ以外に何も依存しません。特に `status` は `bridge`・`server`・`tray` の 3 つから直接読まれますが、そのどれも知りません。「どのエラーが翻訳に値するか」の判定がドライバの領分である `source.ErrorKey` に置かれ、`main` が `status.WithErrorKeys` で注入しているのはそのためです。
+**逆流はありません。** 最後の 6 つは葉で、内部パッケージにも外部モジュールにも依存しません。`autostart` も内部パッケージには依存しませんが、Windows ではレジストリを触るので葉ではありません。
+
+特に `status` は `bridge`・`server`・`tray` の 3 つから直接読まれますが、そのどれも知りません。「どのエラーが翻訳に値するか」の判定がドライバの領分である `source.ErrorKey` に置かれ、`main` が `status.WithErrorKeys` で注入しているのはそのためです。
+
+**ビルドタグ付きのファイルがあるので、この表は `GOOS` によって変わります。** Linux で `go list` すると `tray` から `autostart` と `fyne.io/systray` が、`autostart` から `golang.org/x/sys` が消えます。実際に動くビルドの依存を知りたいときは `GOOS=windows` を付けてください。
 
 ## 知っておくと読みやすい判断
 
