@@ -1,8 +1,8 @@
-// Package config loads, validates and persists the PTCamBridge settings.
+// Package config は、PTCamBridge の設定を読み込み、検証し、保存します。
 //
-// Values are resolved in the order command line, environment
-// (PTCAMBRIDGE_*), TOML file, built-in default. The file lives next to the
-// user's other application data and is written with defaults on first run.
+// 値はコマンドライン、環境変数 (PTCAMBRIDGE_*)、TOML ファイル、組み込みの既定値の
+// 順に解決します。ファイルはユーザーの他のアプリケーションデータと同じ場所に置かれ、
+// 初回起動時に既定値で書き出されます。
 package config
 
 import (
@@ -23,35 +23,35 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/i18n"
 )
 
-// defaultFile is the settings file a first run gets: the same values as
-// Default(), with the comments that say what each one is for. Kept as a file
-// rather than built from the struct because the comments are the point, and
-// held to Default() by a test so the two cannot drift.
+// defaultFile は、初回起動時に置かれる設定ファイルです。値は Default() と同じで、
+// それぞれが何のためのものかを説明するコメントが付いています。構造体から組み立てず
+// ファイルとして持っているのは、コメントこそが要点だからです。両者がずれないよう、
+// テストで Default() に縛り付けています。
 //
 //go:embed default.toml
 var defaultFile string
 
-// DefaultFile returns the annotated settings file written on first run.
+// DefaultFile は、初回起動時に書き出される注釈付きの設定ファイルを返します。
 func DefaultFile() string { return defaultFile }
 
-// AppName is the folder name used under the user's config and data directories.
+// AppName は、ユーザーの設定ディレクトリとデータディレクトリの下で使うフォルダ名です。
 const AppName = "PTCamBridge"
 
-// FileName is the settings file written inside that folder.
+// FileName は、そのフォルダ内に書く設定ファイルの名前です。
 const FileName = "ptcambridge.toml"
 
-// DefaultSerialBaud is the rate Babble wired firmware runs at, used when
-// source.serial.baud is left at zero.
+// DefaultSerialBaud は Babble の有線ファームウェアが動作する速度で、
+// source.serial.baud が 0 のときに使われます。
 const DefaultSerialBaud = 3000000
 
-// Source type identifiers accepted by source.type and by the management API.
+// source.type と管理 API が受け付けるソース種別の識別子。
 const (
 	SourceUVC    = "uvc"
 	SourceSerial = "serial"
 	SourceMJPEG  = "mjpeg"
 )
 
-// Config is the whole settings tree.
+// Config は設定ツリー全体です。
 type Config struct {
 	Server       Server       `toml:"server" json:"server"`
 	Source       Source       `toml:"source" json:"source"`
@@ -61,34 +61,34 @@ type Config struct {
 	Log          Log          `toml:"log" json:"log"`
 }
 
-// Server configures the outward-facing MJPEG endpoint.
+// Server は、外向きの MJPEG エンドポイントを設定します。
 type Server struct {
-	// Listen is the address to bind. Loopback keeps the stream off the LAN;
-	// binding anywhere else also disables the management API.
+	// Listen は bind するアドレスです。ループバックならストリームは LAN に出ません。
+	// それ以外に bind した場合は管理 API も無効になります。
 	Listen string `toml:"listen" json:"listen"`
-	// Boundary is the multipart delimiter. The PaperTracker client is closed
-	// source and has changed parsers between releases, so this and
-	// ExtraHeaders exist to adjust the wire format without a rebuild.
+	// Boundary は multipart の区切りです。PaperTracker クライアントはソースが
+	// 公開されておらず、リリースによってパーサーが変わってきたため、これと
+	// ExtraHeaders は再ビルド無しにワイヤ形式を調整するために存在します。
 	Boundary string `toml:"boundary" json:"boundary"`
-	// ExtraHeaders are added to every multipart part.
+	// ExtraHeaders は、multipart の各パートに追加されます。
 	ExtraHeaders map[string]string `toml:"extra_headers" json:"extra_headers"`
-	// HoldOnSourceLoss keeps stream connections open while the camera is
-	// reconnecting instead of closing them. The client reconnects after about
-	// a second either way; holding is faster when the outage is short.
+	// HoldOnSourceLoss は、カメラの再接続中にストリームの接続を閉じず開いたまま
+	// 保ちます。どちらにせよクライアントは 1 秒ほどで再接続しますが、断絶が短い
+	// 場合は保った方が速く復帰します。
 	HoldOnSourceLoss bool `toml:"hold_on_source_loss" json:"hold_on_source_loss"`
 }
 
-// Source selects and configures the active capture driver.
+// Source は、稼働させるキャプチャドライバを選び、設定します。
 type Source struct {
 	Type   string `toml:"type" json:"type"`
 	UVC    UVC    `toml:"uvc" json:"uvc"`
 	Serial Serial `toml:"serial" json:"serial"`
 	MJPEG  MJPEG  `toml:"mjpeg" json:"mjpeg"`
-	// MaxFrameSize bounds a single JPEG in bytes; zero uses the core default.
+	// MaxFrameSize は JPEG 1 枚の上限をバイトで指定します。0 なら core の既定値です。
 	MaxFrameSize int `toml:"max_frame_size" json:"max_frame_size"`
 }
 
-// UVC configures the ffmpeg-backed camera driver.
+// UVC は、ffmpeg を後ろに置いたカメラドライバを設定します。
 type UVC struct {
 	Device     string `toml:"device" json:"device"`
 	Size       string `toml:"size" json:"size"`
@@ -96,22 +96,22 @@ type UVC struct {
 	FFmpegPath string `toml:"ffmpeg_path" json:"ffmpeg_path"`
 }
 
-// Serial configures the wired Babble board driver.
+// Serial は、有線 Babble ボードのドライバを設定します。
 type Serial struct {
-	// Port is a port name such as "COM5", or "auto" to search by vendor ID.
+	// Port は "COM5" のようなポート名、またはベンダー ID で探させる "auto" です。
 	Port string `toml:"port" json:"port"`
 	Baud int    `toml:"baud" json:"baud"`
-	// Header is the packet preamble, overridable because firmware differs.
+	// Header はパケットの前置きです。ファームウェアによって異なるため上書きできます。
 	Header []int `toml:"header" json:"header"`
 }
 
-// MJPEG configures the upstream HTTP stream proxy.
+// MJPEG は、上流 HTTP ストリームの中継を設定します。
 type MJPEG struct {
 	URL string `toml:"url" json:"url"`
 }
 
-// Transform is the optional geometry and re-encode step. All-zero means the
-// input bytes are forwarded untouched.
+// Transform は、任意の幾何変換と再エンコードの設定です。すべて 0 なら入力バイトを
+// そのまま流します。
 type Transform struct {
 	Rotate          int  `toml:"rotate" json:"rotate"`
 	FlipH           bool `toml:"flip_h" json:"flip_h"`
@@ -120,27 +120,27 @@ type Transform struct {
 	ReencodeQuality int  `toml:"reencode_quality" json:"reencode_quality"`
 }
 
-// PaperTracker configures the client integration helper.
+// PaperTracker は、クライアント連携の補助機能を設定します。
 type PaperTracker struct {
-	// InstallDir is the PaperTracker client folder holding wifi_cache.txt.
+	// InstallDir は、wifi_cache.txt を持つ PaperTracker クライアントのフォルダです。
 	InstallDir string `toml:"install_dir" json:"install_dir"`
-	// WriteCache points that cache file at this bridge on startup.
+	// WriteCache は、起動時にそのキャッシュファイルをこのブリッジへ向けます。
 	WriteCache bool `toml:"write_cache" json:"write_cache"`
 }
 
-// UI configures the parts of the program a person reads.
+// UI は、人が読む部分の設定です。
 type UI struct {
-	// Language is "auto", "en" or "ja". Auto follows the operating system.
+	// Language は "auto"・"en"・"ja" のいずれかです。auto は OS に従います。
 	Language string `toml:"language" json:"language"`
 }
 
-// Log configures logging.
+// Log はログの設定です。
 type Log struct {
 	Level string `toml:"level" json:"level"`
 	Dir   string `toml:"dir" json:"dir"`
 }
 
-// Default returns the settings written on first run.
+// Default は、初回起動時に書き出される設定を返します。
 func Default() Config {
 	return Config{
 		Server: Server{
@@ -164,9 +164,9 @@ func Default() Config {
 	}
 }
 
-// Language resolves the configured interface language, falling back to what
-// the system is set to. Validate has already rejected anything unknown, so a
-// failure here can only mean the zero value, which is Auto.
+// Language は、設定された画面の言語を解決し、駄目ならシステムの設定に従います。
+// 未知の値は Validate が既に弾いているので、ここで失敗するのはゼロ値の場合だけで、
+// それは Auto を意味します。
 func (c Config) Language() i18n.Lang {
 	lang, err := i18n.ParseLang(c.UI.Language)
 	if err != nil {
@@ -175,7 +175,7 @@ func (c Config) Language() i18n.Lang {
 	return lang
 }
 
-// Dir is the per-user folder holding the settings file and the log folder.
+// Dir は、設定ファイルとログフォルダを収めるユーザーごとのフォルダです。
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
@@ -184,7 +184,7 @@ func Dir() (string, error) {
 	return filepath.Join(base, AppName), nil
 }
 
-// Path is the default settings file location.
+// Path は、設定ファイルの既定の場所です。
 func Path() (string, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -193,8 +193,7 @@ func Path() (string, error) {
 	return filepath.Join(dir, FileName), nil
 }
 
-// Load reads the settings file and layers the environment on top. The returned
-// config is validated.
+// Load は設定ファイルを読み、その上に環境変数を重ねます。返す設定は検証済みです。
 func Load(path string) (Config, error) {
 	cfg, err := LoadFile(path)
 	if err != nil {
@@ -207,22 +206,21 @@ func Load(path string) (Config, error) {
 	return cfg, cfg.Validate()
 }
 
-// LoadFile reads the settings file alone, creating it with defaults when
-// absent. The environment is deliberately not applied: this is the file as it
-// stands, which is what saving has to build on if a PTCAMBRIDGE_* meant for one
-// run is not to be written back as a permanent choice.
+// LoadFile は設定ファイルだけを読み、無ければ既定値で作成します。環境変数を
+// 適用しないのは意図的です。これはファイルのありのままの姿であり、一度きりの実行の
+// ために指定した PTCAMBRIDGE_* を恒久的な選択として書き戻さないためには、保存は
+// これを土台にしなければなりません。
 func LoadFile(path string) (Config, error) {
 	cfg := Default()
 
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		// The annotated template rather than an encoding of cfg. The two say
-		// the same thing -- a test holds them to it -- but only one of them
-		// tells the reader what to put in the empty fields, and this is the
-		// file the tray's "Edit settings" opens. A first run cannot start
-		// without a camera being named, so the file that appears has to be the
-		// one that says so.
+		// cfg を符号化したものではなく、注釈付きのテンプレートを置く。両者は同じ
+		// ことを述べており (テストがそう縛っている)、しかし空のフィールドに何を
+		// 書けばよいかを読み手に伝えるのは片方だけ。そしてこれは、トレイの
+		// 「設定を編集」が開くファイルでもある。初回起動はカメラが指定されない限り
+		// 始まらないのだから、現れるファイルはそう告げるものでなければならない。
 		if writeErr := writeAtomic(path, []byte(defaultFile)); writeErr != nil {
 			return cfg, fmt.Errorf("write the default settings file: %w", writeErr)
 		}
@@ -233,9 +231,9 @@ func LoadFile(path string) (Config, error) {
 		if err != nil {
 			return cfg, fmt.Errorf("parse %s: %w", path, err)
 		}
-		// A misspelled key would otherwise decode into nothing and leave the
-		// default in place, so the bridge would start on an address or a
-		// source the user did not ask for while their file looked accepted.
+		// そうしないと、綴りを誤ったキーは何にもデコードされず既定値が残るので、
+		// ファイルは受理されたように見えるのに、ブリッジはユーザーが求めていない
+		// アドレスやソースで起動することになる。
 		if unknown := md.Undecoded(); len(unknown) > 0 {
 			names := make([]string, 0, len(unknown))
 			for _, key := range unknown {
@@ -249,26 +247,26 @@ func LoadFile(path string) (Config, error) {
 	return cfg, nil
 }
 
-// EnvInstallDir overrides papertracker.install_dir.
+// EnvInstallDir は papertracker.install_dir を上書きします。
 //
-// It is exported because restoring the client's address reads that one setting
-// on its own, outside the usual layering, and has to honour the same override:
-// a folder named only by this variable is a folder the bridge writes to, so it
-// is a folder the bridge has to be able to undo.
+// 公開しているのは、クライアントのアドレスを元に戻す処理が、通常の層を通らずに
+// この設定だけを単独で読むからです。そちらも同じ上書きを尊重しなければなりません。
+// この変数だけで指定されたフォルダも、ブリッジが書き込むフォルダである以上、
+// ブリッジが元に戻せなければならないフォルダだからです。
 const EnvInstallDir = "PTCAMBRIDGE_PAPERTRACKER_DIR"
 
-// InstallDirFromFile reads papertracker.install_dir and nothing else.
+// InstallDirFromFile は papertracker.install_dir だけを読み、他は読みません。
 //
-// Restoring the client's address has to work on a settings file the bridge
-// would refuse to start on. The strict reading above rejects a file with a
-// misspelled key or an out-of-range value anywhere in it, and undoing what the
-// bridge did to somebody else's application is not the place to insist on
-// that: the folder is right there in the file, and the alternative is telling
-// the user nothing was changed while their client still points at a bridge
-// they are removing.
+// クライアントのアドレスを元に戻す処理は、ブリッジが起動を拒否するような設定
+// ファイルの上でも動かなければなりません。上の厳格な読み取りは、綴りを誤ったキーや
+// 範囲外の値がどこかに 1 つでもあればファイルを拒否しますが、他人のアプリケーションに
+// 対してブリッジがしたことを取り消す場面は、それを言い張る場所ではありません。
+// フォルダはファイルの中にちゃんと書かれているのですし、代わりに起きるのは、
+// 撤去しようとしているブリッジをクライアントがまだ指したまま、「何も変更していない」と
+// ユーザーに伝えることです。
 //
-// A file that cannot be parsed at all is still an error. There is no folder to
-// read out of it, and saying so beats guessing.
+// まったく解析できないファイルはやはりエラーです。そこから読み取れるフォルダは
+// 存在せず、推測するよりそう言う方がましです。
 func InstallDirFromFile(path string) (string, error) {
 	var doc struct {
 		PaperTracker struct {
@@ -281,26 +279,24 @@ func InstallDirFromFile(path string) (string, error) {
 	return strings.TrimSpace(doc.PaperTracker.InstallDir), nil
 }
 
-// EnvLanguage overrides ui.language, like every other PTCAMBRIDGE_*.
+// EnvLanguage は、他のすべての PTCAMBRIDGE_* と同様に ui.language を上書きします。
 //
-// Exported because reading the language outside the usual layering has to
-// honour the same order, and a second copy of the name here and in ApplyEnv
-// is a drift waiting to happen.
+// 公開しているのは、通常の層を通らずに言語を読む処理も同じ順序を守らなければならず、
+// 名前の写しがここと ApplyEnv の 2 箇所にあれば、いずれずれるからです。
 const EnvLanguage = "PTCAMBRIDGE_LANGUAGE"
 
-// LanguageWithoutLoading resolves the interface language without creating
-// anything and without validating the rest of the settings.
+// LanguageWithoutLoading は、何も作らず、設定の残りを検証もせずに画面の言語を
+// 解決します。
 //
-// The same reasoning as InstallDirFromFile: -restore-cache is what somebody
-// runs while uninstalling, when the settings may be half deleted or gone
-// altogether, and the ordinary read would write a fresh settings file and its
-// folder back onto a machine the user is clearing.
+// InstallDirFromFile と同じ理屈です。-restore-cache はアンインストールの最中に
+// 走らせるもので、そのとき設定は半分消えているか丸ごと無いかもしれません。通常の
+// 読み取りは、ユーザーが片付けている機械に新しい設定ファイルとそのフォルダを
+// 書き戻してしまいます。
 //
-// The order is the documented one -- environment, then file, then system --
-// because a variable that works for every other command and silently does not
-// for this one is worse than not offering it. Anything unreadable or unknown
-// falls through rather than failing: this is a command whose whole point is
-// running when the settings are in a bad state.
+// 順序は文書化されたとおり — 環境変数、ファイル、システム — です。他のすべての
+// コマンドで効く変数がこのコマンドだけ黙って効かないのは、変数を用意していないより
+// 悪いからです。読めない値や未知の値は失敗させずに次へ落とします。これは設定が
+// 悪い状態にあるときに走ることこそが存在理由のコマンドです。
 func LanguageWithoutLoading(path string, getenv func(string) string) i18n.Lang {
 	if getenv != nil {
 		if lang, err := i18n.ParseLang(getenv(EnvLanguage)); err == nil && strings.TrimSpace(getenv(EnvLanguage)) != "" {
@@ -323,19 +319,17 @@ func LanguageWithoutLoading(path string, getenv func(string) string) i18n.Lang {
 	return lang
 }
 
-// ErrNotSaved marks a settings change that took effect but could not be
-// written to disk, and so will be lost on the next restart. Callers wrap it so
-// that the difference from "the change was rejected" survives the trip out to
-// the management API and the tray.
+// ErrNotSaved は、反映はされたがディスクに書けなかった設定変更を表します。次の
+// 再起動で失われます。呼び出し側はこれを包んで返すので、「変更が拒否された」場合との
+// 違いが、管理 API とトレイまで届く間に失われません。
 var ErrNotSaved = errors.New("the settings are active but could not be saved")
 
-// Save writes the settings file, creating the folder if needed.
+// Save は設定ファイルを書きます。必要ならフォルダも作ります。
 //
-// This is the encoding of the settings as they stand, so the comments a
-// generated file starts with are lost the first time anything is saved. That
-// is the cost of keeping one representation of the settings rather than a
-// parser that edits TOML in place; by the time the tray or the API is writing
-// here, the file has already done its job of explaining itself.
+// これは現在の設定をそのまま符号化したものなので、生成されたファイルが最初に持って
+// いたコメントは、何かが保存された時点で失われます。TOML をその場で編集するパーサーを
+// 持つ代わりに、設定の表現を 1 つに保つことの代償です。トレイや API がここへ書く頃には、
+// ファイルは自らを説明するという役目を既に果たし終えています。
 func Save(path string, cfg Config) error {
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
@@ -344,8 +338,8 @@ func Save(path string, cfg Config) error {
 	return writeAtomic(path, buf.Bytes())
 }
 
-// writeAtomic writes the settings file through a temporary name and a rename,
-// so an interrupted write cannot leave a truncated settings file behind.
+// writeAtomic は、一時的な名前で書いてから rename することで設定ファイルを書きます。
+// 中断された書き込みが、切り詰められた設定ファイルを残さないようにするためです。
 func writeAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -366,17 +360,17 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// envLookup matches os.Getenv and is injected so the mapping can be tested.
+// envLookup は os.Getenv と同じ形で、対応付けをテストできるよう注入します。
 type envLookup func(string) string
 
-// ApplyEnv overlays PTCAMBRIDGE_* variables, which take precedence over the
-// file. Only the settings worth scripting are exposed.
+// ApplyEnv は PTCAMBRIDGE_* の変数を重ねます。これらはファイルより優先されます。
+// 公開しているのは、スクリプトから指定する価値のある設定だけです。
 //
-// A value that will not parse is an error, not something to skip. Dropping it
-// silently leaves the file's value in place and starts anyway, so someone who
-// set PTCAMBRIDGE_SERIAL_BAUD=abc gets a bridge running on a rate they did not
-// ask for, with nothing anywhere saying the variable was ignored. Every
-// variable is still attempted, so one typo does not hide the next.
+// 解釈できない値は飛ばすのではなくエラーにします。黙って捨てるとファイルの値が
+// そのまま残って起動してしまうので、PTCAMBRIDGE_SERIAL_BAUD=abc と書いた人は、
+// 求めていない速度で動くブリッジを手にすることになり、変数が無視されたことは
+// どこにも書かれません。それでも全変数を試すので、1 つの打ち間違いが次を隠すことは
+// ありません。
 func (c *Config) ApplyEnv(get envLookup) error {
 	var errs []error
 	fail := func(err error) {
@@ -436,8 +430,8 @@ func setBool(get envLookup, key string, dst *bool) error {
 	return nil
 }
 
-// Normalise fills in blanks that have an obvious answer, so validation only
-// has to reject genuinely wrong values.
+// Normalise は、答えの明らかな空欄を埋めます。検証が本当に誤った値だけを拒否
+// すれば済むようにするためです。
 func (c *Config) Normalise() {
 	c.Source.Type = strings.ToLower(strings.TrimSpace(c.Source.Type))
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
@@ -458,35 +452,33 @@ func (c *Config) Normalise() {
 	if c.UI.Language == "" {
 		c.UI.Language = string(i18n.Auto)
 	}
-	// Only zero asks for the default. A negative rate is a mistake, and
-	// quietly turning it into 3000000 hides it: the user reads back a value
-	// they never wrote, and if the board wanted a different rate the only
-	// symptom is a port that opens and never produces a frame.
+	// 既定値を求めているのは 0 だけ。負の速度は誤りであり、黙って 3000000 に
+	// してしまうとそれを隠すことになる。ユーザーは自分が書いていない値を読み
+	// 返すことになるし、ボードが別の速度を欲していた場合、症状は「開くのに
+	// フレームを 1 枚も出さないポート」だけになる。
 	if c.Source.Serial.Baud == 0 {
 		c.Source.Serial.Baud = DefaultSerialBaud
 	}
 }
 
-// Validate reports settings that would fail at runtime.
+// Validate は、実行時に失敗する設定を報告します。
 func (c Config) Validate() error {
 	_, port, err := net.SplitHostPort(c.Server.Listen)
 	if err != nil {
 		return fmt.Errorf("server.listen %q is not a host:port address: %w", c.Server.Listen, err)
 	}
-	// Port 0 asks the operating system for whichever port is free, and that is
-	// two problems at once. Binding is what stops a second copy starting -- the
-	// port is this application's identity -- and a port nobody else can take is
-	// no identity at all: a second copy binds happily, rewrites the client's
-	// cache to its own address, and whichever of the two is closed first leaves
-	// the client pointed at a port that is gone. It also means the address
-	// changes on every start, so anything that wrote it down is wrong by the
-	// next sign-in.
+	// ポート 0 は「空いているポートをどれでも」と OS に頼むことであり、それは
+	// 同時に 2 つの問題になる。2 つ目の実体が起動するのを止めているのは bind で
+	// あり、ポートはこのアプリケーションの身元そのものだが、誰にも取られ得ない
+	// ポートは身元として機能しない。2 つ目の実体は何事もなく bind し、クライアントの
+	// キャッシュを自分のアドレスに書き換え、先に閉じられた方がどちらであれ、
+	// クライアントは消えたポートを指したまま残される。加えて、アドレスは起動の
+	// たびに変わるので、それを書き留めたものは次のサインインまでに間違いになる。
 	//
-	// The number is what matters, not how it is spelt: "00", "+0" and the empty
-	// port in "127.0.0.1:" all reach net.Listen as zero. A name from the
-	// services file would resolve too, and is refused for a duller reason --
-	// the address is written into another application's settings file, so it
-	// should say the same thing there as it does here.
+	// 問題なのは数であって書き方ではない。"00"、"+0"、"127.0.0.1:" の空のポートは
+	// いずれも 0 として net.Listen に届く。services ファイルの名前も解決されるが、
+	// こちらを拒む理由はもっと退屈なもの — このアドレスは別のアプリケーションの
+	// 設定ファイルに書き込まれるので、あちらでもここと同じことを言うべきだから。
 	number, err := strconv.Atoi(port)
 	if err != nil {
 		return fmt.Errorf("server.listen %q must end in a port number", c.Server.Listen)
@@ -507,10 +499,10 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("source.type %q must be one of %q, %q or %q", c.Source.Type, SourceUVC, SourceSerial, SourceMJPEG)
 	}
-	// Zero means "use the core default". Any other value below the smallest
-	// possible JPEG would pass validation and then silently drop every frame,
-	// because the parsers use it as a hard ceiling and nothing about a source
-	// that reads happily but publishes nothing looks like a failure.
+	// 0 は「core の既定値を使う」という意味。それ以外で、あり得る最小の JPEG より
+	// 小さい値は検証を通過したうえで全フレームを黙って捨てる。パーサーはこれを
+	// 絶対的な上限として使うし、順調に読んでいるのに何も配信しないソースは、
+	// どこを見ても失敗のようには見えない。
 	if c.Source.MaxFrameSize < 0 {
 		return fmt.Errorf("source.max_frame_size must not be negative, got %d", c.Source.MaxFrameSize)
 	}
@@ -518,16 +510,15 @@ func (c Config) Validate() error {
 		return fmt.Errorf("source.max_frame_size %d is below the %d bytes of the smallest possible JPEG; use 0 for the default",
 			c.Source.MaxFrameSize, core.MinJPEGSize)
 	}
-	// Zero hands the choice to the device, which is a real answer. A negative
-	// rate is not: it makes the driver drop the -framerate argument entirely,
-	// so the camera runs at whatever it likes, Apply sees frames and calls
-	// that success, and the wrong value gets saved.
+	// 0 は選択をデバイスに委ねるということであり、それは実のある答え。負の値は
+	// 違う。ドライバは -framerate 引数を丸ごと落とすので、カメラは好きな速度で
+	// 動き、Apply はフレームを見て成功と判断し、誤った値が保存される。
 	if c.Source.UVC.Framerate < 0 {
 		return fmt.Errorf("source.uvc.framerate must not be negative, got %d; use 0 for the device default",
 			c.Source.UVC.Framerate)
 	}
-	// Normalise has already turned zero into the default, so anything left at
-	// or below zero here was written that way on purpose and is wrong.
+	// Normalise が 0 を既定値に変え終えているので、ここで 0 以下のまま残っている
+	// ものは意図してそう書かれたものであり、誤り。
 	if c.Source.Serial.Baud <= 0 {
 		return fmt.Errorf("source.serial.baud must be positive, got %d; use 0 for the default of %d",
 			c.Source.Serial.Baud, DefaultSerialBaud)
@@ -540,9 +531,9 @@ func (c Config) Validate() error {
 	if err := c.CoreTransform().Validate(); err != nil {
 		return fmt.Errorf("transform: %w", err)
 	}
-	// Rejected rather than quietly ignored, for the same reason a misspelled
-	// key is: someone who wrote "jp" meant Japanese, and a menu that stayed in
-	// English would look like the setting does not work.
+	// 綴りを誤ったキーと同じ理由で、黙って無視せず拒否する。"jp" と書いた人は
+	// 日本語のつもりであり、英語のままのメニューは「この設定は効かない」ように
+	// 見える。
 	if _, err := i18n.ParseLang(c.UI.Language); err != nil {
 		return fmt.Errorf("ui.language: %w", err)
 	}
@@ -557,7 +548,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// CoreTransform converts the settings into the transform the core applies.
+// CoreTransform は、設定を core が適用する変換に変換します。
 func (c Config) CoreTransform() core.Transform {
 	return core.Transform{
 		Rotate:     c.Transform.Rotate,
@@ -568,8 +559,8 @@ func (c Config) CoreTransform() core.Transform {
 	}
 }
 
-// SerialHeader converts the configured preamble into bytes, returning nil when
-// unset so the core default applies.
+// SerialHeader は、設定された前置きをバイト列に変換します。未設定なら nil を
+// 返し、core の既定値が使われます。
 func (c Config) SerialHeader() []byte {
 	if len(c.Source.Serial.Header) == 0 {
 		return nil
@@ -581,7 +572,7 @@ func (c Config) SerialHeader() []byte {
 	return out
 }
 
-// StreamHeaders converts the configured extra part headers into core form.
+// StreamHeaders は、設定された追加パートヘッダーを core の形式に変換します。
 func (c Config) StreamHeaders() []core.StreamHeader {
 	if len(c.Server.ExtraHeaders) == 0 {
 		return nil
@@ -590,7 +581,7 @@ func (c Config) StreamHeaders() []core.StreamHeader {
 	for name := range c.Server.ExtraHeaders {
 		names = append(names, name)
 	}
-	// Map iteration order is random; sort so the wire format is stable.
+	// map の反復順は不定なので、ワイヤ形式が安定するよう並べ替える。
 	slices.Sort(names)
 
 	out := make([]core.StreamHeader, 0, len(names))
@@ -600,8 +591,8 @@ func (c Config) StreamHeaders() []core.StreamHeader {
 	return out
 }
 
-// IsLoopback reports whether the listen address stays on the local machine.
-// The management API is only served when it does.
+// IsLoopback は、listen アドレスがローカルマシン内に留まるかを返します。管理 API を
+// 提供するのは、留まる場合だけです。
 func (c Config) IsLoopback() bool {
 	host, _, err := net.SplitHostPort(c.Server.Listen)
 	if err != nil {
@@ -611,15 +602,15 @@ func (c Config) IsLoopback() bool {
 	case "localhost":
 		return true
 	case "":
-		// An empty host means every interface.
+		// ホストが空なら全インターフェースを意味する。
 		return false
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
-// LogDir is the folder for log files, defaulting to a logs folder beside the
-// settings file.
+// LogDir はログファイルのフォルダです。既定では設定ファイルの隣の logs フォルダに
+// なります。
 func (c Config) LogDir() (string, error) {
 	if c.Log.Dir != "" {
 		return c.Log.Dir, nil
