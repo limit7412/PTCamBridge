@@ -1,0 +1,114 @@
+name: Release
+
+# タグ駆動リリース。`1.2.3` / `v1.2.3` のようなタグを push すると、build.yml で
+# 単一 exe を発行・検証し、GitHub Release へ添付する。発行の手順は build.yml と
+# 共有する (手動ビルドと食い違わせないため)。
+#
+# 接頭辞 `v` の有無はどちらも受け付ける。ここで細かく絞り込むより、バージョン形式の
+# 検証は下の version ジョブ 1 箇所に任せる方がよい: 起動しない (=何も起きず気づけない)
+# 失敗より、起動して明示的に落ちる方が扱いやすいため。
+on:
+  push:
+    tags:
+      - '[0-9]*'
+      - 'v[0-9]*'
+
+permissions:
+  contents: write # Release の作成と成果物添付に必要
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      prerelease: ${{ steps.derive.outputs.prerelease }}
+    steps:
+      - name: Derive version from tag
+        id: derive
+        run: |
+          # 1.2.3 → 1.2.3 / v1.2.3-rc.1 → 1.2.3-rc.1 (接頭辞 v は任意)
+          version="${GITHUB_REF_NAME#v}"
+          # 対応しないタグ形式は事前に拒否する。ビルドメタデータ (+build.1) を含む
+          # タグは、埋め込まれる値とタグが食い違ったまま公開され得るため受け付けない。
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "対応していないタグ形式です: $GITHUB_REF_NAME" >&2
+            echo "対応形式: [v]MAJOR.MINOR.PATCH[-プレリリース識別子] (例: 1.2.3, v1.2.3-rc.1)" >&2
+            echo "ビルドメタデータ (+build.1) を含むタグには対応していません。" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # プレリリース識別子 (1.2.3-rc.1) を含む場合は Release も prerelease にする。
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: publish
+
+      - name: Write release notes
+        env:
+          EXE: ${{ needs.build.outputs.exe }}
+        run: |
+          # 本文は展開なしのヒアドキュメントで書き、exe 名だけ後から差し込む。
+          # 本文にはコードスパンのバックティックが含まれるため、展開ありにすると
+          # コマンド置換として解釈されてしまう。
+          cat > release-notes.md <<'EOF'
+          ## インストール
+
+          `@EXE@` をダウンロードして任意のフォルダに置き、実行してください。
+          インストーラーは不要です。タスクトレイに常駐します。
+
+          UVC カメラ (USB ウェブカメラ) を使う場合は、同じフォルダに `ffmpeg.exe` を
+          置いてください (`[source.uvc] ffmpeg_path` の指定、または PATH 上でも構いません)。
+          有線 Babble ボードと WiFi MJPEG カメラだけを使う場合は不要です。
+
+          初回起動時に `%APPDATA%\PaperBridge\paperbridge.toml` が既定値で生成されます。
+          設定項目は README を参照してください。
+
+          動作環境: Windows 10 / 11 (x64)。
+
+          ## アンインストール
+
+          `@EXE@ -restore-cache` を実行してから削除してください。
+          `write_cache` で書き換えた PaperTracker の接続先が元に戻ります。
+          自動起動を登録している場合は `@EXE@ -uninstall-autostart` も実行してください。
+          EOF
+          sed -i "s|@EXE@|$EXE|g" release-notes.md
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # このジョブは checkout しない (必要なのは成果物だけ) ため、gh が対象
+          # リポジトリを推測できる Git リモートが無い。明示的に指定する。
+          GH_REPO: ${{ github.repository }}
+          EXE: ${{ needs.build.outputs.exe }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          # GitHub の UI からリリースを作ると、タグとリリースが同時にできる。
+          # その場合このワークフローが走り終える頃には既にリリースが存在するため、
+          # create は「既にある」で失敗する。既存なら成果物の添付だけを行い、
+          # ユーザーが書いたリリースノートは上書きしない。
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "リリースが既に存在するため、成果物のみ添付します: $GITHUB_REF_NAME"
+            gh release upload "$GITHUB_REF_NAME" "publish/$EXE" --clobber
+            exit 0
+          fi
+
+          flags=(--title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag)
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "publish/$EXE" "${flags[@]}"

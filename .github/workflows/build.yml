@@ -1,0 +1,181 @@
+name: Build
+
+# リリース用ビルド。バージョンを埋め込んだ単一 exe を発行し、Windows 上で実際に
+# 起動して確かめてから成果物としてアップロードする。
+#
+# 呼ばれ方は 2 通り:
+#   - workflow_dispatch — 手動実行。公開リリースを作らずに実機確認用の exe を得る
+#   - workflow_call     — release.yml から。同じ手順で作った exe を Release へ添付する
+# リリースと手動ビルドで手順が食い違わないよう、発行の実体はここ 1 箇所に置く。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'exe に埋め込むバージョン (例: 0.1.0)。省略時は 0.0.0'
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: 'exe に埋め込むバージョン'
+        required: true
+        type: string
+    outputs:
+      artifact:
+        description: '発行した exe を含む成果物の名前'
+        value: ${{ jobs.build.outputs.artifact }}
+      exe:
+        description: '成果物に含まれる exe のファイル名 (バージョン入り)'
+        value: ${{ jobs.build.outputs.exe }}
+
+permissions:
+  contents: read
+
+jobs:
+  # 発行は Linux で行う。配布する exe は CGO_ENABLED=0 のクロスコンパイル成果物で、
+  # ci.yml が全 push で作っているものと同じ経路にするため (リリースのときだけ別の
+  # 作り方をすると、CI が通っているのにリリースだけ壊れる、という食い違いが起きる)。
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.version.outputs.artifact }}
+      exe: ${{ steps.version.outputs.exe }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          check-latest: true
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          # 手動実行で未指定なら 0.0.0。常に明示的に渡すことで、スモークテストが
+          # 比較する期待値がビルド時の既定値 ("dev") に左右されないようにする。
+          version="${INPUT_VERSION:-0.0.0}"
+          # release.yml と同じ形式のみ受け付ける。手動ビルドだけ緩めると、
+          # 手元では通るのにタグを打つと落ちる、という食い違いが起きる。
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "対応していないバージョン形式です: $version" >&2
+            echo "対応形式: MAJOR.MINOR.PATCH[-プレリリース識別子] (例: 1.2.3, 1.2.3-rc.1)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # 成果物と、その中の exe に同じ名前を使う。展開したあとの exe 単体でも
+          # どのビルドか分かるようにするため。
+          echo "artifact=paperbridge-windows-amd64-$version" >> "$GITHUB_OUTPUT"
+          echo "exe=paperbridge-windows-amd64-$version.exe" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build single exe (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+          EXE: ${{ steps.version.outputs.exe }}
+          VERSION: ${{ steps.version.outputs.version }}
+        # -H=windowsgui はトレイ常駐アプリがコンソール窓を連れてこないため、
+        # -trimpath と -s -w は成果物からビルド環境のパスとデバッグ情報を落とすため。
+        run: |
+          mkdir -p publish
+          go build -trimpath \
+            -ldflags "-s -w -H=windowsgui -X main.Version=$VERSION" \
+            -o "publish/$EXE" ./cmd/paperbridge
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact }}
+          path: publish/${{ steps.version.outputs.exe }}
+          if-no-files-found: error
+
+  # 配布するのは Windows で動く exe なので、その exe を Windows で実際に起動して
+  # 確かめる。クロスコンパイルはビルドが通っても起動しないことがあり得るため、
+  # 「ビルドできた」で終わらせない。
+  smoke:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: publish
+
+      - name: Smoke test
+        shell: pwsh
+        env:
+          EXE: ${{ needs.build.outputs.exe }}
+          EXPECTED: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Resolve-Path "./publish/$env:EXE").Path
+
+          # (1) exe が起動して正常終了すること。
+          #     出力は見ない: -H=windowsgui の exe はコンソールに接続されておらず、
+          #     標準出力が親のコンソールに渡るか捨てられるかは実行環境によるため、
+          #     ここで文字列を当てにすると環境依存の失敗になる。バージョンの確認は
+          #     (2) で、動いているプロセス自身に答えさせる。
+          $proc = Start-Process -FilePath $exe -ArgumentList '-version' -NoNewWindow -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "-version が異常終了しました (exit=$($proc.ExitCode))"
+          }
+
+          # (2) 常駐させて HTTP を実際に喋らせる。カメラは無いので、届かない MJPEG URL を
+          #     指定してドライバを再接続させ続ける (起動そのものは妨げない)。設定ファイルは
+          #     ランナー上の一時パスに置き、%APPDATA% を触らせない。
+          $cfg = Join-Path $env:RUNNER_TEMP 'paperbridge-smoke.toml'
+          $bridgeArgs = @(
+            '-headless', '-console',
+            '-config', $cfg,
+            '-listen', '127.0.0.1:18099',
+            '-source', 'mjpeg',
+            '-mjpeg-url', 'http://127.0.0.1:9/stream',
+            '-log-level', 'error'
+          )
+          $bridge = Start-Process -FilePath $exe -ArgumentList $bridgeArgs -NoNewWindow -PassThru
+          try {
+            # 起動を待つ。落ちていたら待ち続けても無駄なので、その場で失敗させる。
+            $stats = $null
+            foreach ($i in 1..30) {
+              if ($bridge.HasExited) {
+                throw "常駐起動が終了してしまいました (exit=$($bridge.ExitCode))"
+              }
+              try {
+                $stats = Invoke-RestMethod -Uri 'http://127.0.0.1:18099/stats' -TimeoutSec 2
+                break
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if ($null -eq $stats) {
+              throw '15 秒以内に /stats が応答しませんでした'
+            }
+
+            # 埋め込まれたバージョンを、動いている exe 自身から確認する。
+            Write-Host "/stats version = $($stats.version)"
+            if ($stats.version -ne $env:EXPECTED) {
+              throw "バージョン不一致: expected $env:EXPECTED, got $($stats.version)"
+            }
+
+            # /healthz はカメラが無いので 503 が正しい。応答すること自体を確かめる。
+            $code = try {
+              [int](Invoke-WebRequest -Uri 'http://127.0.0.1:18099/healthz' -TimeoutSec 5).StatusCode
+            } catch {
+              # 503 は Invoke-WebRequest では例外になる。応答自体は届いているので、
+              # そこからステータスコードを取り出す。
+              [int]$_.Exception.Response.StatusCode
+            }
+            Write-Host "/healthz => $code"
+            if ($code -ne 503) {
+              throw "/healthz = $code, カメラ未接続なので 503 を期待"
+            }
+          } finally {
+            if (-not $bridge.HasExited) {
+              Stop-Process -Id $bridge.Id -Force
+            }
+          }
