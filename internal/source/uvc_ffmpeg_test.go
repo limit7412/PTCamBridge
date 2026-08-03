@@ -328,13 +328,41 @@ func TestUVCSaysHowToGetFFmpegWhenThereIsNone(t *testing.T) {
 
 	u := &UVC{cfg: UVCConfig{Device: "camera"}, log: discardLogger()}
 	_, err := u.ffmpegPath()
-	if err == nil {
-		t.Fatal("ffmpegPath succeeded with no ffmpeg anywhere")
+	if !errors.Is(err, ErrNoFFmpeg) {
+		t.Fatalf("ffmpegPath() error = %v, want ErrNoFFmpeg", err)
 	}
 	for _, want := range []string{"tray", "ffmpeg_path"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
+	}
+}
+
+// Missing ffmpeg has to stay retryable. The tray can fetch one while the bridge
+// is running, and if the driver gave up for good the fetch would finish with
+// the camera still dead until the user restarted -- which is the whole flow the
+// download exists to serve.
+func TestUVCKeepsRetryingWhenThereIsNoFFmpegYet(t *testing.T) {
+	settings := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", settings)
+	t.Setenv("APPDATA", settings)
+	t.Setenv("PATH", t.TempDir())
+
+	u, err := NewUVC(UVCConfig{Device: "camera"}, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("NewUVC: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	runErr := u.Run(ctx, make(chan core.Frame, 4))
+
+	var fatal *FatalError
+	if errors.As(runErr, &fatal) {
+		t.Fatalf("Run gave up with %v, want it to keep retrying until ffmpeg appears", runErr)
+	}
+	if runErr != nil {
+		t.Errorf("Run = %v, want nil once the context expires", runErr)
 	}
 }
 

@@ -284,6 +284,16 @@ func run() error {
 		log.Warn("the HTTP server did not shut down in time")
 	}
 
+	// Quitting during a download cancels the transfer, but the goroutine still
+	// has to delete the part-downloaded archive. Returning without waiting for
+	// that leaves a hundred-odd megabytes in the settings folder, and nothing
+	// left running to clean it up.
+	if fetcher != nil {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+		fetcher.Wait(waitCtx)
+		cancelWait()
+	}
+
 	log.Info("paperbridge stopped")
 	return nil
 }

@@ -543,3 +543,131 @@ func TestStartStopsWhenTheLifetimeEnds(t *testing.T) {
 	}
 	assertEmptyOfInstalls(t, dir)
 }
+
+// A server that answers and then goes quiet produces no bytes and no error.
+// Without a watchdog the download hangs until the bridge exits, with the menu
+// stuck on "Downloading..." and every retry refused as busy.
+func TestFetchGivesUpWhenTheServerStopsSending(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000000")
+		_, _ = w.Write([]byte("the beginning of an archive"))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	dir := t.TempDir()
+	m := New(Options{
+		Dir:          dir,
+		StallTimeout: 100 * time.Millisecond,
+		Build:        Build{URL: srv.URL, SHA256: digestOf(nil), Size: 1000000, Binary: "bin/ffmpeg.exe", Notice: "LICENSE.txt"},
+		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	_, err := m.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("Fetch succeeded, want the stall reported")
+	}
+	if !strings.Contains(err.Error(), "nothing received") {
+		t.Errorf("error = %v, want it to say the transfer stalled", err)
+	}
+	assertEmptyOfInstalls(t, dir)
+	for _, name := range readDir(t, dir) {
+		if strings.HasPrefix(name, "ffmpeg-download-") {
+			t.Errorf("%s was left behind after a stall", name)
+		}
+	}
+	// And the manager is free again rather than stuck reporting a download.
+	if state := m.State(); state.Downloading {
+		t.Error("still reporting a download after the stall")
+	}
+}
+
+// A slow trickle is not a stall. Abandoning a download that is working, just
+// slowly, is worse than the hang the watchdog exists to prevent.
+func TestFetchToleratesASlowButMovingDownload(t *testing.T) {
+	archive := defaultArchive(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < len(archive); i += 64 {
+			end := min(i+64, len(archive))
+			_, _ = w.Write(archive[i:end])
+			w.(http.Flusher).Flush()
+			time.Sleep(time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	m := New(Options{
+		Dir: dir,
+		// Far shorter than the whole transfer takes, so this only passes if the
+		// watchdog is measuring the gap between reads rather than the total.
+		StallTimeout: 200 * time.Millisecond,
+		Build: Build{
+			URL: srv.URL, SHA256: digestOf(archive), Size: int64(len(archive)),
+			Binary: "bin/ffmpeg.exe", Notice: "LICENSE.txt",
+		},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	if _, err := m.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+}
+
+// Shutdown has to outlast the cleanup, not just the transfer.
+func TestWaitReturnsOnlyAfterTheDownloadHasTidiedUp(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000000")
+		_, _ = w.Write([]byte("the beginning of an archive"))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	lifetime, stop := context.WithCancel(context.Background())
+	dir := t.TempDir()
+	m := New(Options{
+		Lifetime: lifetime,
+		Dir:      dir,
+		Build:    Build{URL: srv.URL, SHA256: digestOf(nil), Size: 1000000, Binary: "bin/ffmpeg.exe", Notice: "LICENSE.txt"},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return m.State().Received > 0 })
+
+	stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m.Wait(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("Wait timed out")
+	}
+
+	// The point of waiting: by the time it returns, the part-downloaded
+	// archive is gone.
+	for _, name := range readDir(t, dir) {
+		if strings.HasPrefix(name, "ffmpeg-download-") {
+			t.Errorf("%s was still there when Wait returned", name)
+		}
+	}
+}
+
+// Waiting on a manager that is doing nothing returns at once.
+func TestWaitReturnsImmediatelyWithNoDownload(t *testing.T) {
+	m, _ := serve(t, defaultArchive(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	m.Wait(ctx)
+	if ctx.Err() != nil {
+		t.Error("Wait blocked with no download running")
+	}
+}

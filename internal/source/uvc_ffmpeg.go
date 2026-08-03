@@ -183,6 +183,15 @@ func (u *UVC) chooseCodec(frames uint64, diag string, err error) {
 func (u *UVC) capture(ctx context.Context, out chan<- core.Frame, copyCodec bool) (uint64, string, error) {
 	path, err := u.ffmpegPath()
 	if err != nil {
+		// Only a configured path that does not work is fatal: the settings name
+		// a specific file and it is not there, which no amount of retrying
+		// fixes. Finding none at all is not the same thing -- the tray can
+		// fetch one while the bridge is running, and the retry loop is what
+		// picks it up. Giving up here would mean the fetch finishes and the
+		// camera stays dead until the user restarts.
+		if errors.Is(err, ErrNoFFmpeg) {
+			return 0, "", err
+		}
 		return 0, "", fatalf(err)
 	}
 	args := u.args(copyCodec)
@@ -366,8 +375,16 @@ func (u *UVC) ffmpegPath() (string, error) {
 	if path, ok := ffmpegfetch.Installed(); ok {
 		return path, nil
 	}
-	return "", errors.New("uvc: ffmpeg not found next to the executable, on PATH, or in the settings folder; fetch it from the tray menu or set source.uvc.ffmpeg_path")
+	return "", ErrNoFFmpeg
 }
+
+// ErrNoFFmpeg means there is no ffmpeg anywhere the driver looks.
+//
+// Deliberately not fatal: unlike a mistyped ffmpeg_path, this is a state the
+// machine can leave without the bridge being restarted -- the user fetches
+// ffmpeg from the tray, or installs one on PATH -- and the retry loop is what
+// notices. It is the same reasoning as a camera that is not plugged in yet.
+var ErrNoFFmpeg = errors.New("uvc: ffmpeg not found next to the executable, on PATH, or in the settings folder; fetch it from the tray menu or set source.uvc.ffmpeg_path")
 
 func ffmpegBinaryName() string {
 	if runtime.GOOS == "windows" {

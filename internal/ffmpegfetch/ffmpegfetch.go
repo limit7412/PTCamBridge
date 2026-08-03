@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
@@ -139,6 +140,16 @@ func binaryName() string {
 // same bytes to the same place.
 var ErrBusy = errors.New("ffmpegfetch: a download is already in progress")
 
+// defaultStallTimeout is how long the transfer may receive nothing at all
+// before it is given up on.
+//
+// Generous, because the thing being watched is not throughput: a download over
+// a bad connection can crawl and still be working, and abandoning it would be
+// wrong. What it catches is the other case -- a server or a middlebox that
+// answers and then stops talking, which produces no bytes and no error and
+// would otherwise hold the download open until the bridge exits.
+const defaultStallTimeout = 60 * time.Second
+
 // State is what the tray and the management API show about the download.
 type State struct {
 	// Installed is whether a fetched ffmpeg is on disk right now.
@@ -172,7 +183,10 @@ type Options struct {
 	// Client overrides the HTTP client. Downloads are large and slow, so the
 	// default has no overall timeout; cancellation comes from the context.
 	Client *http.Client
-	Log    *slog.Logger
+	// StallTimeout is how long the download may go without receiving anything
+	// before it is abandoned. Zero selects defaultStallTimeout.
+	StallTimeout time.Duration
+	Log          *slog.Logger
 }
 
 // Manager owns the one download that may be in flight, and the state the tray
@@ -186,14 +200,19 @@ type Manager struct {
 	// isPinned records that the build came from Pinned() rather than from the
 	// caller. Only that one is tied to a platform: a caller naming its own
 	// archive knows what it is asking for.
-	isPinned bool
-	dir      string
-	client   *http.Client
-	log      *slog.Logger
+	isPinned     bool
+	dir          string
+	client       *http.Client
+	stallTimeout time.Duration
+	log          *slog.Logger
 	// lifetime is held rather than passed in because the work it bounds is not
 	// a call: Start hands the download to a goroutine and returns, so there is
 	// no call left to carry a context by the time the bytes are moving.
 	lifetime context.Context
+
+	// running tracks the background goroutine so shutdown can wait for it to
+	// clean up after itself.
+	running sync.WaitGroup
 
 	mu          sync.Mutex
 	downloading bool
@@ -204,11 +223,15 @@ type Manager struct {
 // New builds a Manager. It does not touch the disk or the network.
 func New(opts Options) *Manager {
 	m := &Manager{
-		build:    opts.Build,
-		dir:      opts.Dir,
-		client:   opts.Client,
-		log:      opts.Log,
-		lifetime: opts.Lifetime,
+		build:        opts.Build,
+		dir:          opts.Dir,
+		client:       opts.Client,
+		stallTimeout: opts.StallTimeout,
+		log:          opts.Log,
+		lifetime:     opts.Lifetime,
+	}
+	if m.stallTimeout <= 0 {
+		m.stallTimeout = defaultStallTimeout
 	}
 	if m.lifetime == nil {
 		m.lifetime = context.Background()
@@ -268,7 +291,9 @@ func (m *Manager) Start() error {
 	if err := m.begin(); err != nil {
 		return err
 	}
+	m.running.Add(1)
 	go func() {
+		defer m.running.Done()
 		path, err := m.download(m.lifetime)
 		m.finish(err)
 		if err != nil {
@@ -278,6 +303,25 @@ func (m *Manager) Start() error {
 		m.log.Info("ffmpeg fetched", "path", path, "source", m.build.URL)
 	}()
 	return nil
+}
+
+// Wait blocks until a background download has finished tidying up, or until
+// ctx is done.
+//
+// Cancelling the lifetime stops the transfer but does not make the goroutine
+// instantaneous: it still has to close and remove the part-downloaded archive.
+// Without waiting for that, shutting the bridge down mid-download can leave
+// a hundred-odd megabytes in the settings folder with nothing left to clean it.
+func (m *Manager) Wait(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		m.running.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // Fetch downloads and installs, returning the path to the binary. It is what
@@ -364,6 +408,23 @@ func (m *Manager) download(ctx context.Context) (string, error) {
 // fetchArchive downloads to a temporary file next to the install location and
 // verifies the digest. The returned file is positioned at the start.
 func (m *Manager) fetchArchive(ctx context.Context, dir string) (*os.File, error) {
+	// A server that answers, sends part of the body and then goes quiet is not
+	// covered by anything else here: the transport's timeouts stop at the
+	// response header, and there is deliberately no overall client deadline
+	// because a slow connection moving a hundred megabytes is not a fault. So
+	// the read is watched instead of the transfer -- any progress at all resets
+	// it, and only a stretch with none cancels the request. Without this the
+	// download hangs until the bridge exits, with the menu stuck on
+	// "Downloading..." and a retry refused as busy the whole time.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(m.stallTimeout, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	defer watchdog.Stop()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.build.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ffmpegfetch: build the request: %w", err)
@@ -396,8 +457,15 @@ func (m *Manager) fetchArchive(ctx context.Context, dir string) (*os.File, error
 	// rather than silently truncated to a size that then fails the digest with
 	// a less useful message.
 	body := io.LimitReader(resp.Body, m.build.Size+1)
-	written, err := io.Copy(io.MultiWriter(tmp, digest), &progressReader{r: body, report: m.progress})
+	progress := &progressReader{r: body, report: func(received int64) {
+		watchdog.Reset(m.stallTimeout)
+		m.progress(received)
+	}}
+	written, err := io.Copy(io.MultiWriter(tmp, digest), progress)
 	if err != nil {
+		if stalled.Load() {
+			return nil, fmt.Errorf("ffmpegfetch: download %s: nothing received for %s, giving up after %d of %d bytes", m.build.URL, m.stallTimeout, written, m.build.Size)
+		}
 		return nil, fmt.Errorf("ffmpegfetch: download %s: %w", m.build.URL, err)
 	}
 	if written != m.build.Size {
