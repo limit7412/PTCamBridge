@@ -1978,6 +1978,81 @@ func TestApplyCanTakeBackADeferredChange(t *testing.T) {
 	}
 }
 
+// 壊れたソースを抱えているユーザーこそ、GUI から設定を直したい。起動時にしか
+// 読まれない設定の変更が、カメラの状態に巻き込まれて保存できないのでは、この
+// 機能そのものが要るときに使えない。
+func TestApplySavesStartupOnlyChangesWhileTheSourceIsBroken(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+
+	// 404 は MJPEG ドライバにとって致命的。再接続せず停止する。
+	dead := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	defer dead.Close()
+
+	b := New(mjpegConfig(dead.URL), path, hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	waitFor(t, 5*time.Second, "the source to stop on its own", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.provenLocked()
+	})
+
+	cfg := b.Snapshot()
+	cfg.UI.Language = "ja"
+	cfg.Log.Level = "debug"
+	deferred, err := b.Apply(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Apply while the source is broken: %v", err)
+	}
+	if len(deferred) == 0 {
+		t.Error("deferred is empty, want the settings that wait for a restart")
+	}
+	saved, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if saved.UI.Language != "ja" || saved.Log.Level != "debug" {
+		t.Errorf("saved = %+v, want both startup-only changes on disk", saved)
+	}
+}
+
+// とはいえ、何も動かさない適用は素通りさせてはいけない。同じソースを選び直すのは、
+// 死んだドライバをもう一度起こす手段そのもの。
+func TestApplyStillRestartsWhenNothingStartupOnlyMoved(t *testing.T) {
+	shortenVerify(t, 200*time.Millisecond)
+
+	dead := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	defer dead.Close()
+
+	b := New(mjpegConfig(dead.URL), "", hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	waitFor(t, 5*time.Second, "the source to stop on its own", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.provenLocked()
+	})
+
+	// 同じ設定をそのまま適用する。ドライバを起こし直そうとして、上流がまだ 404 な
+	// ので失敗するのが正しい。黙って成功を返せば、/healthz が 503 のままなのに
+	// 直ったことになる。
+	if _, err := b.Apply(ctx, b.Snapshot()); err == nil {
+		t.Error("re-applying the same settings reported success without reviving the source")
+	}
+}
+
 // 保留の判定は、直前に受け入れた設定ではなく、このプロセスが実際に使っているものと
 // 比べなければならない。直前と比べると答えが 2 通りに裏返る。
 func TestDeferredNamesFollowWhatIsRunning(t *testing.T) {

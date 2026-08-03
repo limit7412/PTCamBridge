@@ -40,7 +40,7 @@
         </div>
         <div class="field">
           <label for="uvc-framerate">{{index .Text "framerate"}}</label>
-          <input type="number" id="uvc-framerate" min="0" max="240">
+          <input type="number" id="uvc-framerate" min="0">
           <p class="hint">{{index .Text "framerateHint"}}</p>
         </div>
         <div class="field">
@@ -239,6 +239,27 @@ function fill(cfg) {
   baseline = readForm();
 }
 
+// 保存中はフォームを触らせない。ソースの変更は最初のフレームを待つので最大 30 秒
+// かかることがあり、その間に入れた値は送信済みの本体に入っていない。応答で画面を
+// 描き直せば、それは黙って元へ戻り、しかも「保存しました」と出る。
+//
+// 元の disabled を控えてから戻すのは、常に押せるとは限らないボタンがあるため。
+// ffmpeg の取得ボタンは、提示する文面が届くまで押せないままでいなければならない。
+let formFrozen = false;
+
+function freezeForm(frozen) {
+  formFrozen = frozen;
+  for (const control of el("settings").querySelectorAll("input, select, button")) {
+    if (frozen) {
+      control.dataset.wasDisabled = control.disabled ? "1" : "";
+      control.disabled = true;
+    } else {
+      control.disabled = control.dataset.wasDisabled === "1";
+      delete control.dataset.wasDisabled;
+    }
+  }
+}
+
 function say(message, bad) {
   const result = el("result");
   result.textContent = message;
@@ -266,7 +287,7 @@ el("settings").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!baseline) return;
 
-  el("save").disabled = true;
+  freezeForm(true);
   say(TEXT.saving);
   try {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
@@ -300,7 +321,7 @@ el("settings").addEventListener("submit", async (event) => {
   } catch (err) {
     say(TEXT.saveFailed + " " + String(err), true);
   } finally {
-    el("save").disabled = false;
+    freezeForm(false);
   }
 });
 
@@ -362,11 +383,23 @@ async function pollFFmpeg() {
     ffmpegPrompt = state.ffmpeg_prompt || "";
     // 提示するものが無いなら押させない。取得できない状態か、状態そのものが
     // まだ読めていないかのどちらかで、後者で始めるのは黙って落とすのと同じ。
-    el("get-ffmpeg").disabled = !ffmpegPrompt;
+    allowFFmpeg(ffmpegPrompt !== "");
   } catch (err) {
     // 状態が読めない間は押させない。
-    el("get-ffmpeg").disabled = true;
+    allowFFmpeg(false);
   }
+}
+
+// allowFFmpeg は、取得ボタンを押せるかどうかを決めます。凍結中は直接触らず、
+// 解除したときに戻る先を書き換えます。2 秒ごとの polling が、保存の最中に
+// ボタンを 1 つだけ生き返らせないようにするためです。
+function allowFFmpeg(allowed) {
+  const button = el("get-ffmpeg");
+  if (formFrozen) {
+    button.dataset.wasDisabled = allowed ? "" : "1";
+    return;
+  }
+  button.disabled = !allowed;
 }
 
 // クリックしただけで第三者のバイナリのダウンロードが始まってはいけない。誰が

@@ -276,7 +276,16 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) ([]string, 
 		return nil, fmt.Errorf("server.boundary: %w", err)
 	}
 
-	if captureUnchanged(previous, cfg) && b.captureAsExpectedLocked() {
+	if startupOnlyChange(previous, cfg) {
+		// 動かしたのは起動時にしか読まれない葉だけ。この起動で触るものは何一つ
+		// 無いので、カメラには近づかない。近づくと、壊れたソースを抱えたユーザーが
+		// 表示言語もログの行も変えられなくなる。captureAsExpectedLocked は死んだ
+		// ドライバを起こし直すためのものだが、ここにはそもそも起こすべき変更が
+		// 無いし、検証に失敗すればこの保存ごと巻き戻る。GUI から保存できるように
+		// したはずの設定が、カメラが直るまで一つも保存できなくなる。
+		b.cfg = cfg
+		b.publishView()
+	} else if captureUnchanged(previous, cfg) && b.captureAsExpectedLocked() {
 		// 動いたのはサーバ側の設定だけなので、カメラには触れない。再起動すれば
 		// 何の得も無くストリームが途切れるし、カメラがたまたま再接続中であれば
 		// 下の検証が変更を丸ごと拒否してしまう。まさにその状況のための設定である
@@ -577,6 +586,29 @@ func captureUnchanged(previous, next config.Config) bool {
 //
 // 名前は TOML のキーそのものです。翻訳しません。ユーザーが設定ファイルを開いた
 // ときに探す文字列だからです。
+// startupOnlyChange は、この要求が起動時にしか読まれない葉だけを動かしたかどうかを
+// 返します。
+//
+// 何も動いていない場合は false です。同じ設定をそのまま適用することには意味があり —
+// 死んだドライバをもう一度起こす手段がそれです — 素通りさせてはいけません。
+//
+// 比べる相手は動作中の設定です。restartDeferred が起動時の設定と比べるのとは別の
+// 問いだからです。あちらは「何がまだ効いていないか」、こちらは「この要求は動作中の
+// 何かに触るか」を訊いています。
+func startupOnlyChange(previous, next config.Config) bool {
+	if len(restartDeferred(previous, next)) == 0 {
+		return false
+	}
+	// 起動時にしか読まれない葉を previous のものに戻して、残りが同じなら、動いたのは
+	// それらだけ。ExtraHeaders と Serial.Header があるので == では比べられません。
+	trimmed := next
+	trimmed.Server.Listen = previous.Server.Listen
+	trimmed.Log = previous.Log
+	trimmed.PaperTracker = previous.PaperTracker
+	trimmed.UI = previous.UI
+	return reflect.DeepEqual(trimmed, previous)
+}
+
 func restartDeferred(startup, next config.Config) []string {
 	var deferred []string
 	if startup.Server.Listen != next.Server.Listen {
