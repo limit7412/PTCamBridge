@@ -513,8 +513,17 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 
 // 厳格なデコードのもとでは、同梱の見本が構造体からずれた瞬間にそれは負債になる。
 // だから、それを写した人にではなく、ここで確認する。
+//
+// 見るのは埋め込みの default.toml。初回起動が書き出すのがこれで、ユーザーが
+// 実際に手にする唯一の見本だから。以前は configs/ 以下にもう 1 部あったが、
+// それは誰も読まないまま [ui] を落としてずれていた。見本が 2 つあれば、
+// いずれ片方だけが古くなる。
 func TestSampleConfigLoads(t *testing.T) {
-	if _, err := Load("../../configs/ptcambridge.toml"); err != nil {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, []byte(DefaultFile()), 0o644); err != nil {
+		t.Fatalf("write the sample: %v", err)
+	}
+	if _, err := Load(path); err != nil {
 		t.Fatalf("the sample settings file does not load: %v", err)
 	}
 }
@@ -617,6 +626,27 @@ func TestDefaultFileMatchesDefault(t *testing.T) {
 	}
 	if !reflect.DeepEqual(Default(), fromFile) {
 		t.Errorf("the embedded default file does not match Default()\n file: %+v\n code: %+v", fromFile, Default())
+	}
+}
+
+// 既定はカメラのモードを決めない。決めてしまうと、それを持っていないカメラは
+// 一切開かない。DirectShow は要求したモードが無いと入力を開けないので、汎用の
+// webcam を挿した人が「カメラを選んだだけ」で、再試行を繰り返すだけの起動を
+// 手にする。決めなければカメラが自分の既定モードを選び、それは必ず存在する。
+func TestDefaultDoesNotPinACameraMode(t *testing.T) {
+	cfg := Default()
+	if cfg.Source.UVC.Size != "" {
+		t.Errorf("Default().Source.UVC.Size = %q, want it left to the camera", cfg.Source.UVC.Size)
+	}
+	if cfg.Source.UVC.Framerate != 0 {
+		t.Errorf("Default().Source.UVC.Framerate = %d, want it left to the camera", cfg.Source.UVC.Framerate)
+	}
+
+	// Normalise がここを埋め戻してもいけない。埋めれば既定を決めたのと同じ。
+	cfg.Normalise()
+	if cfg.Source.UVC.Size != "" || cfg.Source.UVC.Framerate != 0 {
+		t.Errorf("Normalise filled in a camera mode: size=%q framerate=%d",
+			cfg.Source.UVC.Size, cfg.Source.UVC.Framerate)
 	}
 }
 

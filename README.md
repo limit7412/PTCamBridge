@@ -134,6 +134,27 @@ ptcambridge.exe -list-devices
 | `serial` | 有線 Babble ボード / OpenIris 系 | `[source.serial] port`。`auto` で VID から自動探索 |
 | `mjpeg` | WiFi ESP32 など HTTP 配信カメラ | `[source.mjpeg] url` |
 
+#### 解像度とフレームレート
+
+`[source.uvc] size` と `framerate` の既定は**空と 0、つまりカメラ任せ**です。
+
+**カメラが持っていないモードを指定すると、そのカメラは一切開きません。** DirectShow は
+要求した組み合わせが無いと `Could not set video options` で入力を開けず、再試行しても
+毎回同じ場所で落ちます。こちらで値を決めないでおけば、カメラは自分の既定モードを選び、
+それはどのカメラにも必ず存在します。
+
+Babble や EyeTrackVR のボードを使う場合は明示してください。
+
+```toml
+[source.uvc]
+device = "Bigeye"
+size = "240x240"
+framerate = 30
+```
+
+正方形が欲しいだけなら、カメラのモードを指定せずに `[transform] crop_square = true` で
+切り出す手もあります。
+
 UVC はまずカメラ自身に MJPEG を要求してパススルーします。1 フレームも得られず、
 かつ ffmpeg の診断がデバイス未オープンを示していない場合は、再エンコードに切り替えて
 試します。それでも 1 フレームも得られなければ「形式ではなくデバイスの問題だった」と

@@ -147,6 +147,7 @@ const (
 	UILangAuto        Key = "ui.lang.auto"
 	UIQualityHint     Key = "ui.hint.quality"
 	UIFramerateHint   Key = "ui.hint.framerate"
+	UISizeHint        Key = "ui.hint.size"
 	UIWriteCacheHint  Key = "ui.hint.write_cache"
 	UIRestartBadge    Key = "ui.restart.badge"
 	UIRestartNote     Key = "ui.restart.note"
@@ -314,7 +315,14 @@ var messages = map[Key]map[Lang]string{
 	UIFieldLogDir:     {English: "Folder", Japanese: "フォルダ"},
 	UILangAuto:        {English: "Follow the system", Japanese: "OS に合わせる"},
 	UIQualityHint:     {English: "0 transfers the camera's own JPEG without re-encoding it.", Japanese: "0 なら再エンコードせず、カメラの JPEG をそのまま転送します。"},
-	UIFramerateHint:   {English: "0 leaves the frame rate to the camera.", Japanese: "0 ならフレームレートをカメラに任せます。"},
+	UIFramerateHint: {
+		English:  "0 leaves the frame rate to the camera. A rate the camera does not have stops it from opening at all.",
+		Japanese: "0 ならフレームレートをカメラに任せます。カメラが持っていない値を書くと、そのカメラは開きません。",
+	},
+	UISizeHint: {
+		English:  "Empty leaves the resolution to the camera. A size the camera does not have stops it from opening at all.",
+		Japanese: "空ならカメラに任せます。カメラが持っていない解像度を書くと、そのカメラは開きません。",
+	},
 	UIWriteCacheHint: {
 		English:  "The previous address is kept, and \"ptcambridge -restore-cache\" puts it back.",
 		Japanese: "元の接続先は控えてあり、\"ptcambridge -restore-cache\" で戻せます。",

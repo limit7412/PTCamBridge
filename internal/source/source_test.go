@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -179,6 +180,24 @@ func TestUVCArgs(t *testing.T) {
 	}
 	if containsPair(reencode, "-c:v", "copy") {
 		t.Errorf("fallback args still copy the stream: %v", reencode)
+	}
+}
+
+// 既定はモードを決めないので、こちらが何も足さないことが要になる。-video_size や
+// -framerate が付いていると、その組み合わせを持っていないカメラは開かない。
+func TestUVCArgsLeaveTheModeToTheCamera(t *testing.T) {
+	u := &UVC{cfg: UVCConfig{Device: "USB Camera"}, log: discardLogger()}
+
+	for _, args := range [][]string{u.args(true), u.args(false)} {
+		if slices.Contains(args, "-video_size") {
+			t.Errorf("args ask for a resolution the camera may not have: %v", args)
+		}
+		if slices.Contains(args, "-framerate") {
+			t.Errorf("args ask for a frame rate the camera may not have: %v", args)
+		}
+		if !containsPair(args, "-i", "video=USB Camera") && !containsPair(args, "-i", "USB Camera") {
+			t.Errorf("args do not open the device: %v", args)
+		}
 	}
 }
 
