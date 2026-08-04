@@ -114,6 +114,50 @@ const (
 	UIWaitingForFrame Key = "ui.waiting_for_frame"
 	UIPreviewNote     Key = "ui.preview.note"
 
+	UINavStatus   Key = "ui.nav.status"
+	UINavSettings Key = "ui.nav.settings"
+
+	UISettingsTitle   Key = "ui.settings.title"
+	UISettingsStream  Key = "ui.settings.stream"
+	UISettingsDisplay Key = "ui.settings.display"
+	UISettingsLog     Key = "ui.settings.log"
+	UITransform       Key = "ui.transform"
+	UIPaperTracker    Key = "ui.papertracker"
+
+	UIFieldDevice     Key = "ui.field.device"
+	UIFieldSize       Key = "ui.field.size"
+	UIFieldFramerate  Key = "ui.field.framerate"
+	UIFieldFFmpegPath Key = "ui.field.ffmpeg_path"
+	UIFieldPort       Key = "ui.field.port"
+	UIFieldBaud       Key = "ui.field.baud"
+	UIFieldURL        Key = "ui.field.url"
+	UIFieldRotate     Key = "ui.field.rotate"
+	UIFieldFlipH      Key = "ui.field.flip_h"
+	UIFieldFlipV      Key = "ui.field.flip_v"
+	UIFieldCropSquare Key = "ui.field.crop_square"
+	UIFieldQuality    Key = "ui.field.quality"
+	UIFieldHold       Key = "ui.field.hold"
+	UIFieldBoundary   Key = "ui.field.boundary"
+	UIFieldListen     Key = "ui.field.listen"
+	UIFieldInstallDir Key = "ui.field.install_dir"
+	UIFieldWriteCache Key = "ui.field.write_cache"
+	UIFieldLanguage   Key = "ui.field.language"
+	UIFieldLogLevel   Key = "ui.field.log_level"
+	UIFieldLogDir     Key = "ui.field.log_dir"
+	UILangAuto        Key = "ui.lang.auto"
+	UIQualityHint     Key = "ui.hint.quality"
+	UIFramerateHint   Key = "ui.hint.framerate"
+	UIWriteCacheHint  Key = "ui.hint.write_cache"
+	UIRestartBadge    Key = "ui.restart.badge"
+	UIRestartNote     Key = "ui.restart.note"
+	UIOverriddenNote  Key = "ui.overridden.note"
+	UISave            Key = "ui.save"
+	UISaving          Key = "ui.saving"
+	UISaved           Key = "ui.saved"
+	UISavedPending    Key = "ui.saved_pending"
+	UISaveFailed      Key = "ui.save_failed"
+	UIGetFFmpeg       Key = "ui.get_ffmpeg"
+
 	UIFFmpegInstalled   Key = "ui.ffmpeg.installed"
 	UIFFmpegMissing     Key = "ui.ffmpeg.missing"
 	UIFFmpegDownloading Key = "ui.ffmpeg.downloading"
@@ -237,6 +281,59 @@ var messages = map[Key]map[Lang]string{
 		English:  "The preview asks for one still at a time, so it is not counted as a client above.",
 		Japanese: "プレビューは静止画を 1 枚ずつ取得するので、上のクライアント数には数えられません。",
 	},
+
+	UINavStatus:   {English: "Status", Japanese: "状態"},
+	UINavSettings: {English: "Settings", Japanese: "設定"},
+
+	UISettingsTitle:   {English: "PTCamBridge settings", Japanese: "PTCamBridge 設定"},
+	UISettingsStream:  {English: "Stream", Japanese: "配信"},
+	UISettingsDisplay: {English: "Display", Japanese: "表示"},
+	UISettingsLog:     {English: "Log", Japanese: "ログ"},
+	UITransform:       {English: "Transform", Japanese: "変換"},
+	UIPaperTracker:    {English: "PaperTracker", Japanese: "PaperTracker 連携"},
+
+	UIFieldDevice:     {English: "Device", Japanese: "デバイス"},
+	UIFieldSize:       {English: "Resolution", Japanese: "解像度"},
+	UIFieldFramerate:  {English: "Frame rate", Japanese: "フレームレート"},
+	UIFieldFFmpegPath: {English: "ffmpeg path", Japanese: "ffmpeg のパス"},
+	UIFieldPort:       {English: "Port", Japanese: "ポート"},
+	UIFieldBaud:       {English: "Baud rate", Japanese: "ボーレート"},
+	UIFieldURL:        {English: "URL", Japanese: "URL"},
+	UIFieldRotate:     {English: "Rotate", Japanese: "回転"},
+	UIFieldFlipH:      {English: "Flip horizontally", Japanese: "左右反転"},
+	UIFieldFlipV:      {English: "Flip vertically", Japanese: "上下反転"},
+	UIFieldCropSquare: {English: "Crop to a square", Japanese: "正方形に切り出す"},
+	UIFieldQuality:    {English: "Re-encode quality", Japanese: "再エンコード品質"},
+	UIFieldHold:       {English: "Keep clients connected while the source is away", Japanese: "ソースが落ちている間もクライアントを繋いだままにする"},
+	UIFieldBoundary:   {English: "Boundary", Japanese: "boundary"},
+	UIFieldListen:     {English: "Listen address", Japanese: "待受アドレス"},
+	UIFieldInstallDir: {English: "Install folder", Japanese: "インストールフォルダ"},
+	UIFieldWriteCache: {English: "Point PaperTracker at this bridge on startup", Japanese: "起動時に PaperTracker の接続先をこのブリッジに向ける"},
+	UIFieldLanguage:   {English: "Language", Japanese: "表示言語"},
+	UIFieldLogLevel:   {English: "Level", Japanese: "レベル"},
+	UIFieldLogDir:     {English: "Folder", Japanese: "フォルダ"},
+	UILangAuto:        {English: "Follow the system", Japanese: "OS に合わせる"},
+	UIQualityHint:     {English: "0 transfers the camera's own JPEG without re-encoding it.", Japanese: "0 なら再エンコードせず、カメラの JPEG をそのまま転送します。"},
+	UIFramerateHint:   {English: "0 leaves the frame rate to the camera.", Japanese: "0 ならフレームレートをカメラに任せます。"},
+	UIWriteCacheHint: {
+		English:  "The previous address is kept, and \"ptcambridge -restore-cache\" puts it back.",
+		Japanese: "元の接続先は控えてあり、\"ptcambridge -restore-cache\" で戻せます。",
+	},
+	UIRestartBadge: {English: "needs a restart", Japanese: "再起動が必要"},
+	UIRestartNote: {
+		English:  "Settings marked that way are saved, but the running bridge keeps using the old values until it is restarted.",
+		Japanese: "この印の付いた設定は保存されますが、動作中のブリッジは再起動するまで古い値を使い続けます。",
+	},
+	UIOverriddenNote: {
+		English:  "These settings were given on the command line or in the environment at startup. That wins, so changing them here has no effect, this time or the next:",
+		Japanese: "次の設定は、起動時にコマンドラインまたは環境変数で指定されています。そちらが優先されるので、ここで変えても今回も次回も反映されません:",
+	},
+	UISave:         {English: "Save", Japanese: "保存"},
+	UISaving:       {English: "Saving...", Japanese: "保存中..."},
+	UISaved:        {English: "Saved.", Japanese: "保存しました。"},
+	UISavedPending: {English: "Saved. These take effect on the next start:", Japanese: "保存しました。次の設定は次回起動で反映されます:"},
+	UISaveFailed:   {English: "Could not save:", Japanese: "保存できませんでした:"},
+	UIGetFFmpeg:    {English: "Get ffmpeg", Japanese: "ffmpeg を取得"},
 
 	UIFFmpegInstalled:   {English: "installed", Japanese: "導入済み"},
 	UIFFmpegMissing:     {English: "not installed; UVC cameras need it", Japanese: "未導入。UVC カメラを使うには必要です"},

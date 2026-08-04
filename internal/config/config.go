@@ -199,7 +199,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := cfg.ApplyEnv(os.Getenv); err != nil {
+	if _, err := cfg.ApplyEnv(os.Getenv); err != nil {
 		return cfg, err
 	}
 	cfg.Normalise()
@@ -371,63 +371,80 @@ type envLookup func(string) string
 // 求めていない速度で動くブリッジを手にすることになり、変数が無視されたことは
 // どこにも書かれません。それでも全変数を試すので、1 つの打ち間違いが次を隠すことは
 // ありません。
-func (c *Config) ApplyEnv(get envLookup) error {
+//
+// 返す名前は、環境変数が実際に指定した設定の葉です。値が変わったかどうかではなく、
+// 指定されたかどうかを答えます。ファイルと同じ値を指定することもあり、そのときも
+// 上書きは存在します — 呼び出し側がファイルを書き換えても、次の起動ではやはり
+// 環境変数が勝ちます。値の差から推測すると、この場合を見落とします。
+func (c *Config) ApplyEnv(get envLookup) ([]string, error) {
 	var errs []error
-	fail := func(err error) {
+	var set []string
+	mark := func(leaf string, applied bool) {
+		if applied {
+			set = append(set, leaf)
+		}
+	}
+	fail := func(applied bool, err error) bool {
 		if err != nil {
 			errs = append(errs, err)
 		}
+		return applied
 	}
 
-	setString(get, "PTCAMBRIDGE_LISTEN", &c.Server.Listen)
-	setString(get, "PTCAMBRIDGE_BOUNDARY", &c.Server.Boundary)
-	setString(get, "PTCAMBRIDGE_SOURCE_TYPE", &c.Source.Type)
-	setString(get, "PTCAMBRIDGE_UVC_DEVICE", &c.Source.UVC.Device)
-	setString(get, "PTCAMBRIDGE_UVC_SIZE", &c.Source.UVC.Size)
-	fail(setInt(get, "PTCAMBRIDGE_UVC_FRAMERATE", &c.Source.UVC.Framerate))
-	setString(get, "PTCAMBRIDGE_FFMPEG_PATH", &c.Source.UVC.FFmpegPath)
-	setString(get, "PTCAMBRIDGE_SERIAL_PORT", &c.Source.Serial.Port)
-	fail(setInt(get, "PTCAMBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud))
-	setString(get, "PTCAMBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL)
-	setString(get, EnvInstallDir, &c.PaperTracker.InstallDir)
-	fail(setBool(get, "PTCAMBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache))
-	setString(get, EnvLanguage, &c.UI.Language)
-	setString(get, "PTCAMBRIDGE_LOG_LEVEL", &c.Log.Level)
-	setString(get, "PTCAMBRIDGE_LOG_DIR", &c.Log.Dir)
+	mark("server.listen", setString(get, "PTCAMBRIDGE_LISTEN", &c.Server.Listen))
+	mark("server.boundary", setString(get, "PTCAMBRIDGE_BOUNDARY", &c.Server.Boundary))
+	mark("source.type", setString(get, "PTCAMBRIDGE_SOURCE_TYPE", &c.Source.Type))
+	mark("source.uvc.device", setString(get, "PTCAMBRIDGE_UVC_DEVICE", &c.Source.UVC.Device))
+	mark("source.uvc.size", setString(get, "PTCAMBRIDGE_UVC_SIZE", &c.Source.UVC.Size))
+	mark("source.uvc.framerate", fail(setInt(get, "PTCAMBRIDGE_UVC_FRAMERATE", &c.Source.UVC.Framerate)))
+	mark("source.uvc.ffmpeg_path", setString(get, "PTCAMBRIDGE_FFMPEG_PATH", &c.Source.UVC.FFmpegPath))
+	mark("source.serial.port", setString(get, "PTCAMBRIDGE_SERIAL_PORT", &c.Source.Serial.Port))
+	mark("source.serial.baud", fail(setInt(get, "PTCAMBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud)))
+	mark("source.mjpeg.url", setString(get, "PTCAMBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL))
+	mark("papertracker.install_dir", setString(get, EnvInstallDir, &c.PaperTracker.InstallDir))
+	mark("papertracker.write_cache", fail(setBool(get, "PTCAMBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache)))
+	mark("ui.language", setString(get, EnvLanguage, &c.UI.Language))
+	mark("log.level", setString(get, "PTCAMBRIDGE_LOG_LEVEL", &c.Log.Level))
+	mark("log.dir", setString(get, "PTCAMBRIDGE_LOG_DIR", &c.Log.Dir))
 
-	return errors.Join(errs...)
+	return set, errors.Join(errs...)
 }
 
-func setString(get envLookup, key string, dst *string) {
+// set* は、変数が指定されていて適用したときに true を返します。解釈できなかった
+// ものは指定されていなかったことにします。値が設定に入っていない以上、上書きとして
+// 数えると、実際には効いていない指定を「効いている」と言うことになります。
+func setString(get envLookup, key string, dst *string) bool {
 	if v := get(key); v != "" {
 		*dst = v
+		return true
 	}
+	return false
 }
 
-func setInt(get envLookup, key string, dst *int) error {
+func setInt(get envLookup, key string, dst *int) (bool, error) {
 	v := get(key)
 	if v == "" {
-		return nil
+		return false, nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return fmt.Errorf("%s=%q is not a whole number", key, v)
+		return false, fmt.Errorf("%s=%q is not a whole number", key, v)
 	}
 	*dst = n
-	return nil
+	return true, nil
 }
 
-func setBool(get envLookup, key string, dst *bool) error {
+func setBool(get envLookup, key string, dst *bool) (bool, error) {
 	v := get(key)
 	if v == "" {
-		return nil
+		return false, nil
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
-		return fmt.Errorf("%s=%q is not true or false", key, v)
+		return false, fmt.Errorf("%s=%q is not true or false", key, v)
 	}
 	*dst = b
-	return nil
+	return true, nil
 }
 
 // Normalise は、答えの明らかな空欄を埋めます。検証が本当に誤った値だけを拒否
@@ -459,6 +476,28 @@ func (c *Config) Normalise() {
 	if c.Source.Serial.Baud == 0 {
 		c.Source.Serial.Baud = DefaultSerialBaud
 	}
+}
+
+// maxExactJSONInt は、JSON の数値として往復できる最大の整数です。JSON の数値は
+// 倍精度浮動小数点なので、これを超える整数は読んだ時点で別の値になります。
+const maxExactJSONInt int64 = 1<<53 - 1
+
+// fitsInJSON は、整数の設定が設定画面を通っても値を保つかどうかを確かめます。
+//
+// 拒むのは、丸めが黙っているからです。設定画面は設定を JSON で読み書きするので、
+// 2^53 を超える max_frame_size は読んだ時点で近い値に化け、無関係な項目を保存した
+// だけでファイルへ書き戻されます。しかも動作中の設定と差が出るので、ログの行を
+// 直しただけのつもりでキャプチャが止まって立ち上げ直されます。
+//
+// 上限を「意味のある大きさ」ではなくここに置いたのは、これが我々の見立てではなく
+// 表現できるかどうかの境目だからです。ユーザーが必要とする速度やフレーム長を、
+// こちらの想像で狭めることにはなりません。
+func fitsInJSON(name string, value int) error {
+	if int64(value) > maxExactJSONInt {
+		return fmt.Errorf("%s must be at most %d; larger whole numbers change value when the settings page reads them as JSON, got %d",
+			name, maxExactJSONInt, value)
+	}
+	return nil
 }
 
 // Validate は、実行時に失敗する設定を報告します。
@@ -526,6 +565,18 @@ func (c Config) Validate() error {
 	for i, b := range c.Source.Serial.Header {
 		if b < 0 || b > 0xFF {
 			return fmt.Errorf("source.serial.header[%d] = %d is not a byte value", i, b)
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value int
+	}{
+		{"source.max_frame_size", c.Source.MaxFrameSize},
+		{"source.uvc.framerate", c.Source.UVC.Framerate},
+		{"source.serial.baud", c.Source.Serial.Baud},
+	} {
+		if err := fitsInJSON(field.name, field.value); err != nil {
+			return err
 		}
 	}
 	if err := c.CoreTransform().Validate(); err != nil {

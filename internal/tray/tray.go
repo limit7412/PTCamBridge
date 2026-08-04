@@ -52,14 +52,9 @@ type FFmpegFetcher interface {
 }
 
 // ffmpegPrompt は、何かがダウンロードされる前にユーザーへ見せる内容です。
-//
-// PTCamBridge は ffmpeg を同梱していないので、メニュー項目をクリックすると、
-// ユーザーの機械が第三者のバイナリを取ってくることになります。誰が作ったのか、
-// どれくらいの大きさか、どのライセンスなのか。同意するために必要なのはこの 3 つ
-// なので、README ではなく、最初の 1 バイトが動く前の画面に出します。
+// 設定画面も同じものを出すので、文面は ffmpegfetch が持っています。
 func ffmpegPrompt(p i18n.Printer, build ffmpegfetch.Build) string {
-	return p.F(i18n.DialogFFmpegBody,
-		build.Publisher, build.URL, build.Size/(1000*1000), build.License)
+	return ffmpegfetch.Prompt(p, build)
 }
 
 // ffmpegStatusLine は、メニュー項目そのものに出すダウンロードの説明です。

@@ -72,13 +72,19 @@ type Devices struct {
 type Controller interface {
 	// Snapshot は、現在有効な設定を返します。
 	Snapshot() config.Config
-	// Apply は新しい設定を検証し、採用します。
-	Apply(ctx context.Context, cfg config.Config) error
+	// Apply は新しい設定を検証し、採用します。起動時にしか読まれない設定も
+	// 受け入れますが、この起動の振る舞いは変わりません。落ち着いた設定と、
+	// それらの名前が返ります。2 つを別々に読むと、その隙間に入った別の要求の
+	// 設定と、こちらの要求について数えた名前が並ぶことになります。
+	Apply(ctx context.Context, cfg config.Config) (config.Config, []string, error)
 	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
 	// 1 つのエラーにまとめず、リストごとに報告します。
 	Devices(ctx context.Context) Devices
+	// Overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
+	// 読まれない設定の名前です。プロセスの間ずっと変わりません。
+	Overridden() []string
 }
 
 // FFmpegFetcher は、管理 API が操作する ffmpeg ダウンロードの一部です。
@@ -184,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/ui", s.handleUI)
 		mux.HandleFunc("/ui/", s.handleUI)
 		mux.HandleFunc("/ui/state", s.handleUIState)
+		mux.HandleFunc("/ui/settings", s.handleUISettings)
 		mux.HandleFunc("/api/v1/config", s.handleConfig)
 		mux.HandleFunc("/api/v1/source", s.handleSourceSwitch)
 		mux.HandleFunc("/api/v1/devices", s.handleDevices)
@@ -509,22 +516,33 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		var cfg config.Config
-		if err := decodeStrict(bytes.NewReader(body), &cfg); err != nil {
+		// 受け取る型は応答と同じものです。設定として知らない項目は今までどおり
+		// 撥ねますが、pending_restart だけは通します。これはこちらが応答に載せて
+		// いるもので、受け取ったものをそのまま送り返す呼び出し側 — この画面が
+		// まさにそうしかけました — が、自分では付けていない項目のせいで 400 を
+		// 受け取るのは、往復として筋が通りません。値は読みません。何が次の起動を
+		// 待っているかを決めるのは要求ではなく、ブリッジだからです。
+		var received appliedConfig
+		if err := decodeStrict(bytes.NewReader(body), &received); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		cfg := received.Config
 		carryUnmentioned(&cfg, body, s.opts.Controller.Snapshot())
 		cfg.Normalise()
 		if err := cfg.Validate(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.opts.Controller.Apply(r.Context(), cfg); err != nil {
+		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg)
+		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
 		}
-		writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
+		writeJSON(w, r, http.StatusOK, appliedConfig{
+			Config:         applied,
+			PendingRestart: deferred,
+		})
 
 	default:
 		w.Header().Set("Allow", "GET, PUT")
@@ -567,6 +585,21 @@ func (s *Server) handleSourceSwitch(w http.ResponseWriter, r *http.Request) {
 // applyStatus は、設定の失敗をステータスコードに対応付けます。反映はされたが
 // ディスクに書けなかった変更だけが「リクエストは正しく、こちら側が失敗した」場合
 // なので、400 にならないのはそれだけです。
+// appliedConfig は PUT /api/v1/config の応答です。
+//
+// 埋め込みなので、設定の各項目は今までどおり最上位に並びます。増えるのは 1 つ、
+// 保存はされたが、効くのは次の起動からという設定の名前です。値そのものは要求した
+// とおりに返ります。名前がなければ、設定を変えたのに何も変わらない理由を呼び出し側が
+// 自分で突き止めるしかありません。
+//
+// 何も保留にならなければ項目ごと出ません。空の配列は、読み手に「何かが保留になった」と
+// 一瞬考えさせるからです。
+type appliedConfig struct {
+	config.Config
+	// PendingRestart は、保存されたが次の起動まで効かない設定の TOML キーです。
+	PendingRestart []string `json:"pending_restart,omitempty"`
+}
+
 func applyStatus(err error) int {
 	if errors.Is(err, config.ErrNotSaved) {
 		return http.StatusInternalServerError

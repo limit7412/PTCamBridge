@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
@@ -279,5 +281,203 @@ func TestFormatBytes(t *testing.T) {
 		if got := formatBytes(tc.in); got != tc.want {
 			t.Errorf("formatBytes(%d) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// 設定画面も診断画面と同じ扱い。ここは書き込みの入口なので、なおさら。
+func TestUISettingsFollowsTheAdminSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		admin bool
+		want  int
+	}{
+		{"loopback", true, http.StatusOK},
+		{"off loopback", false, http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newTestServer(t, Options{EnableAdmin: tc.admin, Controller: &fakeController{}})
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, "/ui/settings", nil))
+			if rec.Code != tc.want {
+				t.Errorf("GET /ui/settings = %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}
+
+// 2 つの画面は互いへの行き来を持つ。片方しか知らないユーザーがもう片方に
+// 辿り着けなければ、作った意味が半分になる。
+func TestUIPagesLinkToEachOther(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: &fakeController{}})
+
+	for path, want := range map[string]string{
+		"/ui":          `href="/ui/settings"`,
+		"/ui/settings": `href="/ui"`,
+	} {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, path, nil))
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("%s does not link with %s", path, want)
+		}
+	}
+}
+
+// /ui 配下の綴り間違いは、拒否ではなく「無い」と答える。認証を持たない面に
+// ついて、在ることを教えてしまわないため。
+func TestUIUnknownPathIsNotFound(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: &fakeController{}})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, "/ui/nope", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /ui/nope = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// 保存はしたが動作中には効いていない設定は、応答が名指ししなければならない。
+// 応答に入っているのは動作中の設定なので、それらは要求した値ではなく古い値の
+// まま返る。名前が無ければ、その食い違いは呼び出し側が自分で見つけるしかない。
+func TestConfigPutNamesWhatWaitsForARestart(t *testing.T) {
+	ctrl := &fakeController{deferred: []string{"ui.language", "papertracker.write_cache"}}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+
+	body, err := json.Marshal(config.Default())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := uiRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/config = %d (%s), want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+
+	var got struct {
+		PendingRestart []string `json:"pending_restart"`
+		Source         struct {
+			Type string `json:"type"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.PendingRestart) != 2 || got.PendingRestart[0] != "ui.language" {
+		t.Errorf("pending_restart = %v, want the two names the bridge deferred", got.PendingRestart)
+	}
+	// 設定そのものは今までどおり最上位に並んでいなければならない。増えるのは
+	// 1 つだけで、既存の呼び出し側は何も気づかずに済む。
+	if got.Source.Type == "" {
+		t.Error("the response no longer carries the configuration at the top level")
+	}
+}
+
+// 何も保留にならなかったときは、その項目自体が出ない。空の配列を返せば、
+// 読み手は「何かが保留になった」と一瞬考えることになる。
+func TestConfigPutOmitsPendingWhenEverythingApplied(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: &fakeController{}})
+
+	body, err := json.Marshal(config.Default())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := uiRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/config = %d (%s), want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	if strings.Contains(rec.Body.String(), "pending_restart") {
+		t.Errorf("the response mentions pending_restart when nothing was deferred: %s", rec.Body.String())
+	}
+}
+
+// 応答をそのまま送り返せなければならない。pending_restart を載せているのは
+// こちらであって、呼び出し側が付けた項目ではない。読み書きを繰り返すクライアントが、
+// 自分では書いていない項目のせいで 400 を受け取るのは往復として筋が通らない。
+func TestConfigPutAcceptsItsOwnResponse(t *testing.T) {
+	ctrl := &fakeController{deferred: []string{"ui.language"}}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+
+	send := func(body []byte) *httptest.ResponseRecorder {
+		req := uiRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	first, err := json.Marshal(config.Default())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := send(first)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first PUT = %d (%s)", rec.Code, rec.Body.String())
+	}
+	// 1 回目の応答をそのまま 2 回目の本体にする。設定画面が最初にやりかけたこと。
+	if !strings.Contains(rec.Body.String(), "pending_restart") {
+		t.Fatal("the response does not carry pending_restart, so this test proves nothing")
+	}
+	again := send(rec.Body.Bytes())
+	if again.Code != http.StatusOK {
+		t.Errorf("second PUT = %d (%s), want %d", again.Code, again.Body.String(), http.StatusOK)
+	}
+}
+
+// とはいえ、設定として知らない項目は今までどおり撥ねる。綴り間違いを黙って
+// 捨てると、設定したつもりの値が効かない理由が分からなくなる。
+func TestConfigPutStillRejectsUnknownFields(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: &fakeController{}})
+
+	req := uiRequest(http.MethodPut, "/api/v1/config", strings.NewReader(`{"souce":{"type":"uvc"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PUT with a misspelled section = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// クリックしただけで第三者のバイナリのダウンロードが始まってはいけない。誰が
+// 作ったのか、どこから来るのか、どれくらいの大きさか、どのライセンスなのか。画面が
+// 同意を求められるよう、状態がそれを運ぶ。トレイの導線と同じもの。
+func TestUIStateCarriesTheFFmpegConsentText(t *testing.T) {
+	p := i18n.NewPrinter(i18n.English)
+	build := ffmpegfetch.Build{
+		URL:       "https://example.invalid/ffmpeg.zip",
+		Size:      145_000_000,
+		Publisher: "Someone",
+		License:   "LGPL v2.1+",
+	}
+
+	ready := newUIState(p, status.Snapshot{}, hub.Stats{}, ffmpegView{
+		present: true,
+		state:   ffmpegfetch.State{Supported: true, Source: build},
+	}, time.Now())
+	for _, want := range []string{build.URL, build.Publisher, build.License, "145"} {
+		if !strings.Contains(ready.FFmpegPrompt, want) {
+			t.Errorf("the consent text does not mention %q: %q", want, ready.FFmpegPrompt)
+		}
+	}
+
+	// 押せない状態で出しても、押していないボタンの説明にしかならない。
+	for _, tc := range []struct {
+		name  string
+		state ffmpegfetch.State
+	}{
+		{"installed", ffmpegfetch.State{Supported: true, Installed: true, Source: build}},
+		{"downloading", ffmpegfetch.State{Supported: true, Downloading: true, Source: build}},
+		{"unsupported", ffmpegfetch.State{Source: build}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := newUIState(p, status.Snapshot{}, hub.Stats{}, ffmpegView{present: true, state: tc.state}, time.Now())
+			if got.FFmpegPrompt != "" {
+				t.Errorf("the consent text is offered when the download cannot start: %q", got.FFmpegPrompt)
+			}
+		})
 	}
 }

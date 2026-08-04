@@ -125,7 +125,14 @@ func run() error {
 		return err
 	}
 	cfg := fileCfg
-	if err := cfg.ApplyEnv(os.Getenv); err != nil {
+	// どの葉が上書きされたかは、重ねる側にしか分かりません。ファイルと実効設定の
+	// 差から推測すると、ファイルと同じ値を指定した上書き — PTCAMBRIDGE_LANGUAGE=en
+	// をファイルの en に重ねる場合 — が見えません。それも上書きなので、ファイルを
+	// ja に書き換えても次の起動はやはり en です。
+	//
+	// 数えるのは環境変数だけです。理由は applyFlags を参照。
+	overridden, err := cfg.ApplyEnv(os.Getenv)
+	if err != nil {
 		return err
 	}
 	applyFlags(&cfg, opts)
@@ -172,7 +179,7 @@ func run() error {
 	// 保存の起点は実効設定ではなくファイルが述べていた内容。-device や
 	// PTCAMBRIDGE_* はこの実行のためのものであり、トレイが無関係な何かを変えた
 	// 最初の瞬間に書き戻されてはいけない。fileCfg にはどちらの層も適用していない。
-	app.SetPersistBase(fileCfg)
+	app.SetPersistBase(fileCfg, overridden)
 
 	admin := cfg.IsLoopback()
 	if !admin {
@@ -334,6 +341,12 @@ func resolveConfigPath(override string) (string, error) {
 }
 
 // applyFlags はコマンドラインを重ねます。これは他のすべてに優先します。
+//
+// 環境変数と違い、どの葉を指定したかは記録しません。フラグはこの起動だけのもので、
+// 次の起動には残らないからです。自動起動が Run キーに書くのは実行ファイルと
+// -config だけ (internal/autostart) なので、-log-level debug で一度起動した人が
+// 設定画面から info を保存すれば、それは次のサインインで実際に効きます。これを
+// 上書きとして数えると、起きる変更を「起きない」と案内することになります。
 func applyFlags(cfg *config.Config, o options) {
 	if o.listen != "" {
 		cfg.Server.Listen = o.listen

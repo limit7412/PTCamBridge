@@ -370,17 +370,23 @@ type fakeController struct {
 	devices Devices
 	// devicesCalls は列挙の回数を数える。Windows では 1 回につき子プロセスが要る。
 	devicesCalls int
+	// deferred は Apply が「保存したが動作中には効いていない」と報告する設定名。
+	deferred []string
+	// overridden は、起動時の指定が優先される設定名。
+	overridden []string
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
 
-func (c *fakeController) Apply(_ context.Context, cfg config.Config) error {
+func (c *fakeController) Overridden() []string { return c.overridden }
+
+func (c *fakeController) Apply(_ context.Context, cfg config.Config) (config.Config, []string, error) {
 	if c.applyErr != nil {
-		return c.applyErr
+		return config.Config{}, nil, c.applyErr
 	}
 	c.cfg = cfg
 	c.applied = true
-	return nil
+	return c.cfg, c.deferred, nil
 }
 
 func (c *fakeController) Switch(_ context.Context, sourceType string) error {

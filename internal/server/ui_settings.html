@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>{{template "css" .}}</style>
+</head>
+<body>
+<main>
+  <h1>{{.Title}}</h1>
+  <p class="sub mono">{{.Address}}</p>
+
+  <nav>
+    <a href="/ui">{{index .Text "navStatus"}}</a>
+    <a href="/ui/settings" aria-current="page">{{index .Text "navSettings"}}</a>
+  </nav>
+
+  <p id="offline">{{index .Text "unreachable"}}</p>
+
+  <form id="settings" autocomplete="off">
+    <section class="card">
+      <h2>{{index .Text "source"}}</h2>
+      <div class="choices">
+        <label><input type="radio" name="source-type" value="uvc"> {{index .Text "sourceUVC"}}</label>
+        <label><input type="radio" name="source-type" value="serial"> {{index .Text "sourceSerial"}}</label>
+        <label><input type="radio" name="source-type" value="mjpeg"> {{index .Text "sourceMJPEG"}}</label>
+      </div>
+
+      <div data-source="uvc">
+        <div class="field">
+          <label for="uvc-device">{{index .Text "device"}}</label>
+          <input type="text" id="uvc-device" list="camera-names" class="mono">
+        </div>
+        <datalist id="camera-names"></datalist>
+        <p class="hint warn" id="camera-error" hidden></p>
+        <div class="field">
+          <label for="uvc-size">{{index .Text "size"}}</label>
+          <input type="text" id="uvc-size" class="mono" placeholder="240x240">
+        </div>
+        <div class="field">
+          <label for="uvc-framerate">{{index .Text "framerate"}}</label>
+          <input type="number" id="uvc-framerate" min="0">
+          <p class="hint">{{index .Text "framerateHint"}}</p>
+        </div>
+        <div class="field">
+          <label for="uvc-ffmpeg">{{index .Text "ffmpegPath"}}</label>
+          <input type="text" id="uvc-ffmpeg" class="mono">
+        </div>
+        <div class="actions" id="ffmpeg-actions" hidden>
+          <button type="button" id="get-ffmpeg" disabled>{{index .Text "getFFmpeg"}}</button>
+          <span id="ffmpeg-state" class="hint mono"></span>
+        </div>
+      </div>
+
+      <div data-source="serial">
+        <div class="field">
+          <label for="serial-port">{{index .Text "port"}}</label>
+          <input type="text" id="serial-port" list="port-names" class="mono" placeholder="auto">
+        </div>
+        <datalist id="port-names"></datalist>
+        <p class="hint warn" id="serial-error" hidden></p>
+        <div class="field">
+          <label for="serial-baud">{{index .Text "baud"}}</label>
+          <input type="number" id="serial-baud" min="1">
+        </div>
+      </div>
+
+      <div data-source="mjpeg">
+        <div class="field">
+          <label for="mjpeg-url">{{index .Text "url"}}</label>
+          <input type="text" id="mjpeg-url" class="mono" placeholder="http://192.168.1.50/">
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "transform"}}</h2>
+      <div class="field">
+        <label for="rotate">{{index .Text "rotate"}}</label>
+        <select id="rotate">
+          <option value="0">0&deg;</option>
+          <option value="90">90&deg;</option>
+          <option value="180">180&deg;</option>
+          <option value="270">270&deg;</option>
+        </select>
+      </div>
+      <div class="check"><input type="checkbox" id="flip-h"><label for="flip-h">{{index .Text "flipH"}}</label></div>
+      <div class="check"><input type="checkbox" id="flip-v"><label for="flip-v">{{index .Text "flipV"}}</label></div>
+      <div class="check"><input type="checkbox" id="crop-square"><label for="crop-square">{{index .Text "cropSquare"}}</label></div>
+      <div class="field">
+        <label for="quality">{{index .Text "quality"}}</label>
+        <input type="number" id="quality" min="0" max="100">
+      </div>
+      <p class="hint">{{index .Text "qualityHint"}}</p>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "stream"}}</h2>
+      <div class="check"><input type="checkbox" id="hold"><label for="hold">{{index .Text "hold"}}</label></div>
+      <div class="field">
+        <label for="boundary">{{index .Text "boundary"}}</label>
+        <input type="text" id="boundary" class="mono">
+      </div>
+      <div class="field">
+        <label for="listen">{{index .Text "listen"}}<span class="badge">{{index .Text "restartBadge"}}</span></label>
+        <input type="text" id="listen" class="mono">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "papertracker"}}<span class="badge">{{index .Text "restartBadge"}}</span></h2>
+      <div class="field">
+        <label for="pt-dir">{{index .Text "installDir"}}</label>
+        <input type="text" id="pt-dir" class="mono">
+      </div>
+      <div class="check"><input type="checkbox" id="pt-write"><label for="pt-write">{{index .Text "writeCache"}}</label></div>
+      <p class="hint">{{index .Text "writeCacheHint"}}</p>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "display"}}<span class="badge">{{index .Text "restartBadge"}}</span></h2>
+      <div class="field">
+        <label for="language">{{index .Text "language"}}</label>
+        <select id="language">
+          <option value="auto">{{index .Text "langAuto"}}</option>
+          <option value="en">English</option>
+          <option value="ja">&#26085;&#26412;&#35486;</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{{index .Text "log"}}<span class="badge">{{index .Text "restartBadge"}}</span></h2>
+      <div class="field">
+        <label for="log-level">{{index .Text "logLevel"}}</label>
+        <select id="log-level">
+          <option value="debug">debug</option>
+          <option value="info">info</option>
+          <option value="warn">warn</option>
+          <option value="error">error</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="log-dir">{{index .Text "logDir"}}</label>
+        <input type="text" id="log-dir" class="mono">
+      </div>
+    </section>
+
+    <p class="hint">{{index .Text "restartNote"}}</p>
+    <p class="hint warn" id="overridden" hidden></p>
+
+    <div class="actions">
+      <button type="submit" id="save">{{index .Text "save"}}</button>
+      <p id="result"></p>
+    </div>
+  </form>
+</main>
+
+<script>
+"use strict";
+const TEXT = {{.TextJSON}};
+
+const el = (id) => document.getElementById(id);
+const num = (id) => Number(el(id).value) || 0;
+
+// FIELDS は、この画面が持っている設定の葉ぜんぶ。path は設定の中の位置、read は
+// 今フォームに入っている値、write はフォームへ書き戻す方法。
+//
+// 表として持つのは、保存するものを「触った項目だけ」に絞るため。画面を開いた
+// 直後の値を控えておき、送る直前にもう一度読んで、違っているものだけを最新の設定に
+// 重ねる。フォーム全体を送ると、画面を開いた後にトレイや別のクライアントが変えた
+// ものまで、こちらが見ていた古い値で押し戻すことになる。ログの行だけ直したつもりが、
+// トレイで切り替えたソースを元へ返してしまう。
+const FIELDS = [
+  { path: ["source", "type"],
+    read: () => document.querySelector('input[name="source-type"]:checked').value,
+    write: (v) => {
+      const radio = document.querySelector(`input[name="source-type"][value="${v}"]`);
+      if (radio) radio.checked = true;
+      showSource(v);
+    } },
+
+  { path: ["source", "uvc", "device"], read: () => el("uvc-device").value.trim(), write: (v) => el("uvc-device").value = v || "" },
+  { path: ["source", "uvc", "size"], read: () => el("uvc-size").value.trim(), write: (v) => el("uvc-size").value = v || "" },
+  { path: ["source", "uvc", "framerate"], read: () => num("uvc-framerate"), write: (v) => el("uvc-framerate").value = v || 0 },
+  { path: ["source", "uvc", "ffmpeg_path"], read: () => el("uvc-ffmpeg").value.trim(), write: (v) => el("uvc-ffmpeg").value = v || "" },
+
+  { path: ["source", "serial", "port"], read: () => el("serial-port").value.trim(), write: (v) => el("serial-port").value = v || "" },
+  { path: ["source", "serial", "baud"], read: () => num("serial-baud"), write: (v) => el("serial-baud").value = v || 0 },
+
+  { path: ["source", "mjpeg", "url"], read: () => el("mjpeg-url").value.trim(), write: (v) => el("mjpeg-url").value = v || "" },
+
+  { path: ["transform", "rotate"], read: () => num("rotate"), write: (v) => el("rotate").value = String(v || 0) },
+  { path: ["transform", "flip_h"], read: () => el("flip-h").checked, write: (v) => el("flip-h").checked = !!v },
+  { path: ["transform", "flip_v"], read: () => el("flip-v").checked, write: (v) => el("flip-v").checked = !!v },
+  { path: ["transform", "crop_square"], read: () => el("crop-square").checked, write: (v) => el("crop-square").checked = !!v },
+  { path: ["transform", "reencode_quality"], read: () => num("quality"), write: (v) => el("quality").value = v || 0 },
+
+  { path: ["server", "hold_on_source_loss"], read: () => el("hold").checked, write: (v) => el("hold").checked = !!v },
+  { path: ["server", "boundary"], read: () => el("boundary").value.trim(), write: (v) => el("boundary").value = v || "" },
+  { path: ["server", "listen"], read: () => el("listen").value.trim(), write: (v) => el("listen").value = v || "" },
+
+  { path: ["papertracker", "install_dir"], read: () => el("pt-dir").value.trim(), write: (v) => el("pt-dir").value = v || "" },
+  { path: ["papertracker", "write_cache"], read: () => el("pt-write").checked, write: (v) => el("pt-write").checked = !!v },
+
+  { path: ["ui", "language"], read: () => el("language").value, write: (v) => el("language").value = v || "auto" },
+
+  { path: ["log", "level"], read: () => el("log-level").value, write: (v) => el("log-level").value = v || "info" },
+  { path: ["log", "dir"], read: () => el("log-dir").value.trim(), write: (v) => el("log-dir").value = v || "" },
+];
+
+// baseline は、この画面がフォームを描いたときの値。ここからの差が「ユーザーが
+// 触ったもの」になる。
+let baseline = null;
+
+const at = (cfg, path) => path.reduce((node, key) => (node == null ? node : node[key]), cfg);
+
+function put(cfg, path, value) {
+  let node = cfg;
+  for (const key of path.slice(0, -1)) {
+    if (node[key] == null) node[key] = {};
+    node = node[key];
+  }
+  node[path[path.length - 1]] = value;
+}
+
+const readForm = () => FIELDS.map((field) => field.read());
+
+function showSource(type) {
+  for (const block of document.querySelectorAll("[data-source]")) {
+    block.hidden = block.dataset.source !== type;
+  }
+}
+
+function fill(cfg) {
+  for (const field of FIELDS) {
+    field.write(at(cfg, field.path));
+  }
+  baseline = readForm();
+}
+
+// rebase は、基準を cfg のものへ取り直し、ユーザーが触った項目だけを画面に残します。
+//
+// 保存が失敗しても、ブリッジが要求した値を動作中の設定へ入れていることがあります
+// (適用はできたが、ファイルに書けなかった場合)。そのとき基準を失敗前のままにすると、
+// ユーザーが元の値へ戻して保存し直しても「変えていない」と判断されます。送る土台は
+// 取り直した設定なので、取り消したはずの値がそのまま書かれ、しかも応答で画面まで
+// そちらへ戻ります。
+//
+// 残すのは keep に入っている項目だけです。触っていない項目まで戻すと、こちらが
+// 見ていない間にトレイや別のクライアントが変えたものまで「ユーザーが変えた」ことに
+// なり、次の保存がそれを古い値で押し戻します。ログの保存に失敗した直後にソースが
+// 切り替わっていれば、そのまま再送しただけで切り替えを取り消すことになります。
+//
+// いったん cfg を書いてから読み直すのは、fill と同じ変換を通すためです。設定の値を
+// そのまま基準にすると、フォームが返す形 (trim した文字列、数値、真偽値) と食い違って、
+// 触っていない項目が変更として送られます。
+function rebase(cfg, keep) {
+  const mine = readForm();
+  for (const field of FIELDS) {
+    field.write(at(cfg, field.path));
+  }
+  baseline = readForm();
+  FIELDS.forEach((field, i) => {
+    if (keep.has(i)) field.write(mine[i]);
+  });
+}
+
+// 保存中はフォームを触らせない。ソースの変更は最初のフレームを待つので最大 30 秒
+// かかることがあり、その間に入れた値は送信済みの本体に入っていない。応答で画面を
+// 描き直せば、それは黙って元へ戻り、しかも「保存しました」と出る。
+//
+// 元の disabled を控えてから戻すのは、常に押せるとは限らないボタンがあるため。
+// ffmpeg の取得ボタンは、提示する文面が届くまで押せないままでいなければならない。
+let formFrozen = false;
+
+function freezeForm(frozen) {
+  formFrozen = frozen;
+  for (const control of el("settings").querySelectorAll("input, select, button")) {
+    if (frozen) {
+      control.dataset.wasDisabled = control.disabled ? "1" : "";
+      control.disabled = true;
+    } else {
+      control.disabled = control.dataset.wasDisabled === "1";
+      delete control.dataset.wasDisabled;
+    }
+  }
+}
+
+function say(message, bad) {
+  const result = el("result");
+  result.textContent = message;
+  result.classList.toggle("bad", !!bad);
+}
+
+async function getConfig() {
+  const response = await fetch("/api/v1/config", { cache: "no-store" });
+  if (!response.ok) throw new Error(response.status);
+  return await response.json();
+}
+
+async function load() {
+  try {
+    fill(await getConfig());
+    el("offline").style.display = "none";
+    el("save").disabled = false;
+  } catch (err) {
+    el("offline").style.display = "block";
+    el("save").disabled = true;
+  }
+}
+
+el("settings").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!baseline) return;
+
+  freezeForm(true);
+  say(TEXT.saving);
+  // dirty と sent は catch からも要る。応答が届かなかっただけで、ブリッジは適用も
+  // 保存も済ませていることがある。
+  const dirty = new Set();
+  let sent = false;
+  try {
+    // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
+    // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
+    // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
+    const cfg = await getConfig();
+    const now = readForm();
+    FIELDS.forEach((field, i) => {
+      if (now[i] !== baseline[i]) {
+        dirty.add(i);
+        put(cfg, field.path, now[i]);
+      }
+    });
+
+    sent = true;
+    const response = await fetch("/api/v1/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      // ブリッジの言葉をそのまま出す。どの項目が悪いかを名指ししているのは
+      // あちらであって、こちらではない。
+      say(TEXT.saveFailed + " " + text.trim(), true);
+      // 失敗しても値が動作中の設定に入っていることはある。基準を取り直さないと、
+      // 元へ戻す操作が変更として見えなくなる。rebase を参照。
+      try {
+        rebase(await getConfig(), dirty);
+      } catch (err) {
+        // 取り直せないだけ。画面の値はそのまま。
+      }
+      return;
+    }
+    const applied = JSON.parse(text);
+    // 応答は設定そのものに pending_restart が 1 つ増えた形。フォームを描き直すのに
+    // 使うだけなので、余分な項目があっても構わない。次に送る土台は、そのときまた
+    // 取り直す。
+    fill(applied);
+    const pending = applied.pending_restart || [];
+    say(pending.length ? TEXT.savedPending + " " + pending.join(", ") : TEXT.saved);
+  } catch (err) {
+    say(TEXT.saveFailed + " " + String(err), true);
+    // ここへ来るのは、要求を送った後に応答が読めなかった場合を含む。ブリッジは
+    // 適用も保存も済ませているかもしれないので、基準の扱いは HTTP のエラーと同じ。
+    // 取り直さないと、元へ戻す操作が変更として見えなくなる。rebase を参照。
+    //
+    // 送る前に落ちた場合 — 土台を取りに行った最初の GET が失敗したとき — は
+    // 取り直さない。ブリッジ側は何も変わっていないし、dirty はまだ空なので、
+    // 取り直せばユーザーの編集を 1 つ残らずサーバの値で塗り潰すことになる。
+    if (sent) {
+      try {
+        rebase(await getConfig(), dirty);
+      } catch (err) {
+        // 取り直せないだけ。画面の値はそのまま。
+      }
+    }
+  } finally {
+    freezeForm(false);
+  }
+});
+
+for (const radio of document.querySelectorAll('input[name="source-type"]')) {
+  radio.addEventListener("change", () => showSource(radio.value));
+}
+
+// デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
+// 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
+async function loadDevices() {
+  const options = (id, names) => {
+    const list = el(id);
+    list.replaceChildren();
+    for (const name of names) {
+      const option = document.createElement("option");
+      option.value = name;
+      list.append(option);
+    }
+  };
+  // 列挙の失敗は、候補が空になることと区別して出す。ffmpeg が無いから列挙できない
+  // のか、カメラが繋がっていないのか。候補欄が空という 1 つの見た目が 2 つの意味を
+  // 持つと、ユーザーはどちらを直せばよいのか分からない。
+  const failure = (id, message) => {
+    const node = el(id);
+    node.textContent = message || "";
+    node.hidden = !message;
+  };
+
+  try {
+    const devices = await (async () => {
+      const response = await fetch("/api/v1/devices", { cache: "no-store" });
+      if (!response.ok) throw new Error(response.status);
+      return await response.json();
+    })();
+    options("camera-names", (devices.cameras || []).map((d) => d.name));
+    options("port-names", (devices.serial_ports || []).map((p) => p.name));
+    failure("camera-error", devices.camera_error);
+    failure("serial-error", devices.serial_error);
+  } catch (err) {
+    failure("camera-error", String(err));
+    failure("serial-error", String(err));
+  }
+}
+
+// ffmpeg の取得。100 メガバイトは 1 つの応答に収まらないので、開始したら状態を
+// 見に行く。診断画面と同じ数字を同じところから読んでいる。
+//
+// prompt は、取得を始める前にユーザーへ見せなければならない内容 — 配布元、URL、
+// サイズ、ライセンス。取得できる状態のときだけ届く。
+let ffmpegPrompt = "";
+
+async function pollFFmpeg() {
+  try {
+    const response = await fetch("/ui/state", { cache: "no-store" });
+    if (!response.ok) return;
+    const state = await response.json();
+    el("ffmpeg-actions").hidden = !state.has_ffmpeg;
+    el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
+    // 起動時の指定が優先される設定。ファイルに何を書いても次の起動でも変わらない
+    // ので、「次回起動で反映されます」とは別のこととして伝える。
+    const overridden = state.overridden || [];
+    const note = el("overridden");
+    note.textContent = overridden.length ? TEXT.overriddenNote + " " + overridden.join(", ") : "";
+    note.hidden = overridden.length === 0;
+
+    ffmpegPrompt = state.ffmpeg_prompt || "";
+    // 提示するものが無いなら押させない。取得できない状態か、状態そのものが
+    // まだ読めていないかのどちらかで、後者で始めるのは黙って落とすのと同じ。
+    allowFFmpeg(ffmpegPrompt !== "");
+  } catch (err) {
+    // 状態が読めない間は押させない。
+    allowFFmpeg(false);
+  }
+}
+
+// allowFFmpeg は、取得ボタンを押せるかどうかを決めます。凍結中は直接触らず、
+// 解除したときに戻る先を書き換えます。2 秒ごとの polling が、保存の最中に
+// ボタンを 1 つだけ生き返らせないようにするためです。
+function allowFFmpeg(allowed) {
+  const button = el("get-ffmpeg");
+  if (formFrozen) {
+    button.dataset.wasDisabled = allowed ? "" : "1";
+    return;
+  }
+  button.disabled = !allowed;
+}
+
+// クリックしただけで第三者のバイナリのダウンロードが始まってはいけない。誰が
+// 作ったのか、どこから来るのか、どれくらいの大きさか、どのライセンスなのか。
+// 同意するために必要なものを出してから、承認されたときだけ始める。トレイの
+// 「ffmpeg を取得」がダイアログでしているのと同じことで、文面も同じ 1 つから来る。
+// 入口が 2 つあることは、片方が黙ってよい理由にならない。
+el("get-ffmpeg").addEventListener("click", async () => {
+  if (!ffmpegPrompt || !window.confirm(ffmpegPrompt)) return;
+
+  el("get-ffmpeg").disabled = true;
+  try {
+    await fetch("/api/v1/ffmpeg", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  } catch (err) {
+    // 進捗は下の polling が拾う。
+  } finally {
+    pollFFmpeg();
+  }
+});
+
+load();
+loadDevices();
+pollFFmpeg();
+setInterval(pollFFmpeg, 2000);
+</script>
+</body>
+</html>
