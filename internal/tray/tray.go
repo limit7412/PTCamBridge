@@ -9,6 +9,8 @@ package tray
 import (
 	"context"
 	_ "embed"
+	"errors"
+	"log/slog"
 	"reflect"
 	"sync"
 
@@ -17,8 +19,6 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/i18n"
 	"github.com/limit7412/PTCamBridge/internal/status"
-
-	"log/slog"
 )
 
 //go:embed icon.ico
@@ -207,6 +207,24 @@ func (q *commandQueue) submit(what string, cmd func()) bool {
 }
 
 func (q *commandQueue) close() { close(q.cmds) }
+
+// reportCommandFailure は、メニュー操作の失敗を記録します。
+//
+// 終了の途中で終わった操作は ERROR にしません。トレイのコマンドキューは、終了の
+// 合図が来たときにまだ実行中の要求を抱えていることがあります。その要求は
+// context.Canceled で返りますが、これは何かが壊れたという意味ではありません。
+// アプリが閉じているというだけです。ERROR で書くと、正常な終了のたびに記録が残り、
+// 後からログを読む人は最後の 2 行を見て、あるはずのない不具合を探すことになります。
+//
+// 黙って捨てもしません。要求は確かに行われず、それは debug で追える事実です。
+func reportCommandFailure(log *slog.Logger, msg string, err error, args ...any) {
+	args = append(args, "error", err)
+	if errors.Is(err, context.Canceled) {
+		log.Debug(msg+" (the application was shutting down)", args...)
+		return
+	}
+	log.Error(msg, args...)
+}
 
 // inFlight は、同じ対象に対する操作が同時に 1 つだけ走るようにします。
 //

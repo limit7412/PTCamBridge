@@ -349,7 +349,16 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 		// 公開するのは検証を通った後です。ドライバは view ではなく b.cfg を読むので、
 		// 起動には差し支えありません。
 		if err := b.verifyStartLocked(ctx); err != nil {
-			b.log.Error("new settings could not start a source, reverting", "error", err)
+			// 要求が途中で終わったのなら、これはソースの失敗ではありません。呼び出し側
+			// が去ったか、アプリが終了しているだけで、カメラについては何も分かって
+			// いません。ERROR で「ソースを起動できなかった」と書くと、終了のたびに
+			// 記録が 2 行残り、後からログを読む人はカメラを疑うことになります。
+			// 巻き戻しはどちらでも同じように行います。違うのは何と呼ぶかだけです。
+			if errors.Is(err, context.Canceled) {
+				b.log.Info("the request ended before the new settings could be verified, reverting", "error", err)
+			} else {
+				b.log.Error("new settings could not start a source, reverting", "error", err)
+			}
 			b.cfg = previous
 			b.publishView()
 

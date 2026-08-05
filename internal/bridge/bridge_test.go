@@ -2783,3 +2783,55 @@ func TestRestartOnlyLeavesMatchWhatCanBeDeferred(t *testing.T) {
 		}
 	}
 }
+
+// 要求が途中で終わったのは、ソースの失敗ではない。アプリの終了や、去った呼び出し側に
+// ついて分かることであって、カメラについては何も分かっていない。ERROR で
+// 「ソースを起動できなかった」と書くと、終了のたびに記録が残り、後から読む人は
+// あるはずのない不具合を探すことになる。
+func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
+	shortenVerify(t, 5*time.Second)
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	silent := silentUpstream(t)
+
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	b := New(mjpegConfig(working.URL), "", hub.New(), status.New(), log)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitFor(t, 5*time.Second, "the first source to prove itself", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.provenLocked()
+	})
+
+	// 応答するだけでフレームを出さない上流へ切り替え、検証の最中に要求を打ち切る。
+	// 終了がキューに積まれた切替を捕まえたときと同じ形。
+	reqCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := b.Apply(reqCtx, mjpegConfig(silent.URL))
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if err := <-done; err == nil {
+		t.Fatal("Apply reported success for a request that was cut short")
+	}
+
+	out := logged.String()
+	if strings.Contains(out, "level=ERROR") {
+		t.Errorf("a cancelled request was reported as a source failure:\n%s", out)
+	}
+	if !strings.Contains(out, "the request ended before the new settings could be verified") {
+		t.Errorf("the rollback left no record of why:\n%s", out)
+	}
+
+	// 巻き戻しは今までどおり行われる。呼び方を変えただけで、動きは変えていない。
+	if got := b.Snapshot().Source.MJPEG.URL; got != working.URL {
+		t.Errorf("url = %q, want it back at %q", got, working.URL)
+	}
+}
