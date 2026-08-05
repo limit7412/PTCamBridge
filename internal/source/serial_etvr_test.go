@@ -506,6 +506,84 @@ func TestSerialAutoFallbackSaysThePickIsAGuess(t *testing.T) {
 	}
 }
 
+// 推測は有限回で打ち切る。実機で踏んだのは Valve の VR 機器 (28DE:2102) で、
+// ブリッジはそれを 7 秒おきに永久に開き直していた。他人の機器のポートを掴み続けるのは、
+// ログを汚す以上のことをしている。
+func TestSerialAutoGuessStopsOpeningAPortThatNeverDelivers(t *testing.T) {
+	valve := SerialPort{Name: "COM4", VID: "28DE", PID: "2102", Product: "Valve Controller"}
+	s := autoSerial(t, valve)
+
+	for i := 1; i <= maxGuessAttempts; i++ {
+		if got := resolve(t, s); got != "COM4" {
+			t.Fatalf("attempt %d: resolvePort = %q, want COM4", i, got)
+		}
+	}
+
+	_, err := s.resolvePort()
+	if err == nil {
+		t.Fatalf("resolvePort kept handing out the guess after %d attempts", maxGuessAttempts)
+	}
+	// 対処は「no port matched a known camera board」のときと同じ — ポートを明示する。
+	// 画面がその案内を出せるよう、同じ sentinel でなければならない。
+	if !errors.Is(err, ErrNoSerialPort) {
+		t.Errorf("error = %v, want it to be ErrNoSerialPort so the UI can offer the same remedy", err)
+	}
+	// 何を諦めたのかが分からなければ、ユーザーはどのポートを疑えばよいのか分からない。
+	for _, want := range []string{"COM4", "28DE:2102", "Valve Controller"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// 打ち切るのは「開くこと」だけで、「待つこと」ではない。後からボードを挿した
+// ユーザーが、アプリを再起動せずに拾われなければならない。
+func TestSerialAutoGuessStillFindsABoardPluggedInLater(t *testing.T) {
+	valve := SerialPort{Name: "COM4", VID: "28DE", PID: "2102", Product: "Valve Controller"}
+	board := SerialPort{Name: "COM7", Vendor: "Espressif", VID: "303A"}
+
+	ports := []SerialPort{valve}
+	s := autoSerial(t)
+	s.listPorts = func() ([]SerialPort, error) { return ports, nil }
+
+	for i := 1; i <= maxGuessAttempts; i++ {
+		resolve(t, s)
+	}
+	if _, err := s.resolvePort(); err == nil {
+		t.Fatal("the guess was not exhausted")
+	}
+
+	// ボードを挿した。次の再試行がそれを見つける。
+	ports = []SerialPort{valve, board}
+	if got := resolve(t, s); got != "COM7" {
+		t.Errorf("resolvePort = %q, want the board that was plugged in", got)
+	}
+}
+
+// 既知の VID に載っていないだけの本物のボードは実在する。1 枚でもフレームを出したら
+// それは推測ではないので、次に切れたときも開き直す。
+func TestSerialAutoGuessThatDeliveredIsNotCountedAgainstItself(t *testing.T) {
+	unknown := SerialPort{Name: "COM4", VID: "1234", PID: "5678", Product: "New Board"}
+	s := autoSerial(t, unknown)
+
+	for i := 1; i <= maxGuessAttempts; i++ {
+		resolve(t, s)
+	}
+	// このポートがフレームを出したときに session が行うこと。
+	s.proven = "COM4"
+	delete(s.guessed, "COM4")
+
+	if got := resolve(t, s); got != "COM4" {
+		t.Fatalf("resolvePort = %q, want the port that worked", got)
+	}
+	// そしてその後も、また上限まで試せる。前の巡回の回数を引きずらない。
+	for i := 1; i <= maxGuessAttempts; i++ {
+		if got := resolve(t, s); got != "COM4" {
+			t.Fatalf("attempt %d after it worked: resolvePort = %q, want COM4", i, got)
+		}
+	}
+}
+
 // 既知のボードは推測ではないので、騒ぎ立ててはいけない。
 func TestSerialAutoRecognisedPortIsNotWarnedAbout(t *testing.T) {
 	var logged bytes.Buffer

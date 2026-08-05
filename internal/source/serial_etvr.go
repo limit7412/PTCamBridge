@@ -47,6 +47,20 @@ const previewBytes = 16
 // いると分かるには数回で十分ですし、debug 行にはその全部が残ります。
 const maxWarnedStreams = 3
 
+// maxGuessAttempts は、既知ベンダーに一致しないポートを推測で開く回数の上限です。
+//
+// 上限が要るのは、これが推測だからです。既知の VID に一致しないポートは、そもそも
+// カメラですらないかもしれません。実際に踏んだ例が Valve の VR 機器 (28DE:2102) で、
+// ブリッジはそれを 7 秒おきに永久に開き直していました。他人の機器のポートを
+// 掴み続けるのは、ログを汚す以上のことをしています — そのデバイスを使う別のソフトが
+// ポートを取れなくなり得ますし、こちらにはそれを知る手立てがありません。
+//
+// 0 回ではなく数回なのは、未知の VID を持つ本物のボードがあり得るからです。新しい
+// 版のボードや、ここに載っていないブリッジ IC を使ったもの。しかも起動が遅い
+// ボードは、最初の 5 秒では何も出しません。既定のバックオフ (1・2・4 秒) と合わせて
+// 20 秒あまりの猶予になり、立ち上がるものは立ち上がります。
+const maxGuessAttempts = 3
+
 // knownCameraVIDs は、Babble や OpenIris のボードに載っているブリッジや MCU の
 // USB ベンダー ID です。Espressif、Silicon Labs、QinHeng、FTDI、Raspberry Pi。
 var knownCameraVIDs = map[string]string{
@@ -88,6 +102,15 @@ type Serial struct {
 	// どちらに触れるのも Run だけで、Run は単一スレッドです。
 	tried  map[string]struct{}
 	proven string
+
+	// guessed は、既知ベンダーに一致しないポートを推測で開いた回数を、ポートごとに
+	// 数えています。maxGuessAttempts に達したポートは、それ以上開きません。
+	//
+	// tried とは別に持ちます。tried は 1 巡の中での位置を表すもので、巡回のたびに
+	// 消えます。こちらは「このポートは推測として何回外したか」で、巡回をまたいで
+	// 残らなければ意味がありません。フレームが 1 枚でも出ればそのポートは推測では
+	// なくなるので、そこで消します。
+	guessed map[string]int
 
 	// tail は、直近のパケットの終端より後ろにあるとパーサーが最後に報告した量です。
 	// なぜここに持つのかは splitPackets を参照してください。
@@ -143,6 +166,7 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 		log:       log,
 		reporter:  reporter,
 		tried:     map[string]struct{}{},
+		guessed:   map[string]int{},
 		warned:    map[string][]string{},
 		listPorts: ListSerialPorts,
 		openPort: func(name string, baud int) (serialPort, error) {
@@ -226,6 +250,10 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 				// 今は動いている。後で解析できなくなれば、以前どう言われていようと
 				// それは改めて新しい知らせになる。
 				delete(s.warned, name)
+				// もう推測ではない。フレームを出したのだから、次に切れたときも
+				// 開き直す価値がある。既知の VID に載っていないだけのボードは
+				// 実在する。
+				delete(s.guessed, name)
 				s.reporter.Connected(s.Name())
 			}
 			count++
@@ -351,6 +379,10 @@ func (s *Serial) resolvePort() (string, error) {
 		}
 	}
 
+	if guessed {
+		return s.resolveGuess(candidates[0], ports)
+	}
+
 	name, ok := s.firstUntried(candidates)
 	if !ok {
 		// すべての候補が一巡した。諦めずに巡回をやり直す。ボードは抜き差しされ得る
@@ -360,16 +392,35 @@ func (s *Serial) resolvePort() (string, error) {
 		name, _ = s.firstUntried(candidates)
 	}
 	s.tried[name] = struct{}{}
-	if guessed {
-		// 省略せず全部言う。これは推測であり、前回の推測は誰かの午後を丸ごと
-		// 奪ったから。そのポートは VR ヘッドセットで、ログはポートが
-		// "auto-selected" されたとしか言っていなかった。この分岐で開くものは
-		// そもそもカメラですらないかもしれないので、それが実際に何なのかを行に書く。
-		s.log.Warn("no serial port matches a known camera board; trying the only port there is, which may not be a camera",
-			"port", name, "device", describePort(ports, name))
-	} else {
-		s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	return name, nil
+}
+
+// resolveGuess は、既知ベンダーに一致するポートが 1 つも無いときに、唯一あった
+// ポートを開いてよいかどうかを答えます。autoCandidates がこの形を返すのは候補が
+// ちょうど 1 本のときだけなので、巡回する相手はいません。回数だけで決めます。
+//
+// 上限を超えたら開くのをやめますが、再試行のループは止めません。止めると、後から
+// 本物のボードを挿したユーザーがアプリを再起動する羽目になります。次の試行も列挙
+// からやり直すので、既知ベンダーのボードが現れればそちらへ移ります。列挙するだけなら
+// 誰の邪魔にもなりません。開くことが邪魔になるのです。
+func (s *Serial) resolveGuess(name string, ports []SerialPort) (string, error) {
+	if s.guessed[name] >= maxGuessAttempts {
+		// ポート名を別に書く。describePort が返すのは列挙が言っていることだけで、
+		// そこに名前が入っているとは限らない。設定に書く文字列がこの行に無ければ、
+		// 「明示的に設定してください」という案内は宙に浮く。
+		return "", fmt.Errorf("%w (%s, %s, was opened %d times and produced no frames, so it is not being opened again)",
+			ErrNoSerialPort, name, describePort(ports, name), s.guessed[name])
 	}
+	s.guessed[name]++
+	s.tried[name] = struct{}{}
+	// 省略せず全部言う。これは推測であり、前回の推測は誰かの午後を丸ごと
+	// 奪ったから。そのポートは VR ヘッドセットで、ログはポートが
+	// "auto-selected" されたとしか言っていなかった。この分岐で開くものは
+	// そもそもカメラですらないかもしれないので、それが実際に何なのかを行に書く。
+	s.log.Warn("no serial port matches a known camera board; trying the only port there is, which may not be a camera",
+		"port", name, "device", describePort(ports, name),
+		"attempt", s.guessed[name], "attempts_allowed", maxGuessAttempts)
 	return name, nil
 }
 
