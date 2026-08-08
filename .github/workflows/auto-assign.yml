@@ -1,0 +1,55 @@
+name: Auto Assign
+
+# 新しく開かれた issue と pull request に担当者を付ける。
+#
+# 担当者が空のままだと、GitHub の一覧やダッシュボードでは「誰も見ていないもの」と
+# 「見ているが表示されていないもの」が同じ見た目になる。個人リポジトリでも、
+# 通知や自分宛ての絞り込みはアサインを手掛かりにするので、付いていること自体に
+# 意味がある。手で付けるのを忘れる前提で、開いた時点で埋める。
+
+on:
+  issues:
+    types: [opened]
+  # pull_request ではなく pull_request_target を使う。fork からの pull_request は
+  # 読み取り専用のトークンで走るので、アサインの API が 403 で落ちる。
+  # pull_request_target はベースリポジトリ側のトークンで走るため通る。
+  #
+  # pull_request_target が危険なのは、PR のコードを checkout して実行する場合。
+  # 書き込み権限のあるトークンを、PR 作成者が書いた内容に渡すことになるため。
+  # このワークフローは checkout をせず、イベントの payload から番号を読んで
+  # API を 1 回叩くだけなので、その危険は無い。**ここに checkout を足さないこと。**
+  pull_request_target:
+    types: [opened]
+
+# 既定の権限を捨てて、必要な 2 つだけにする。アサインは issues API で行うので
+# issues: write が実体で、pull-requests: write は PR 側のイベントで同じ操作を
+# するためのもの。contents は要らない (checkout しない)。
+permissions:
+  issues: write
+  pull-requests: write
+
+env:
+  # 担当者。変えるならここ 1 箇所。
+  ASSIGNEE: limit7412
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    # 開いた時点で既に担当者が付いているなら、それは誰かが意図して選んだもの。
+    # 上書きも追加もしない。issue のイベントでは pull_request が、その逆では
+    # issue が null になるが、GitHub の式は null のプロパティ参照を null にする
+    # ので、どちらの経路でもこのまま評価できる。
+    if: ${{ !github.event.issue.assignees[0] && !github.event.pull_request.assignees[0] }}
+    steps:
+      - name: Assign the maintainer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # pull request も issues API から見れば issue なので、番号の取り出し方が
+          # 違うだけで叩く先は同じ。
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        # --silent を付けるのは、成功時に issue の JSON 全体がログへ流れるのを
+        # 防ぐため。失敗したときは gh がエラーを標準エラーに書き、非ゼロで終わる。
+        run: |
+          gh api --silent "repos/$REPO/issues/$NUMBER/assignees" \
+            -f "assignees[]=$ASSIGNEE"
