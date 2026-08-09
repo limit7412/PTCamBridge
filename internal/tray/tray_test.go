@@ -1,7 +1,10 @@
 package tray
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -403,5 +406,58 @@ func TestInFlightIsSafeForConcurrentUse(t *testing.T) {
 	wg.Wait()
 	if !f.begin("target") {
 		t.Error("the target stayed locked after every attempt finished")
+	}
+}
+
+// 終了の途中で終わった操作を ERROR にすると、正常な終了のたびにログの最後へ
+// 2 行の「失敗」が残る。実機のログでもそうなっていて、後から読む人は最後の 2 行を
+// 見てカメラを疑うことになる。
+func TestShutdownDoesNotLookLikeAFailure(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	reportCommandFailure(log, "could not switch source", fmt.Errorf("bridge: serial was still starting when the request ended: %w", context.Canceled), "source", "serial")
+
+	out := logged.String()
+	if strings.Contains(out, "level=ERROR") {
+		t.Errorf("a cancelled request was reported as an error:\n%s", out)
+	}
+	// 黙って捨てもしない。要求は確かに行われていない。
+	if !strings.Contains(out, "level=DEBUG") {
+		t.Errorf("the cancelled request left no record at all:\n%s", out)
+	}
+	for _, want := range []string{"could not switch source", "shutting down", "serial"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not mention %q:\n%s", want, out)
+		}
+	}
+}
+
+// 期限切れもコンテキストの終わり方の 1 つで、ブリッジやカメラについては何も語らない。
+// 片方しか見ていない判定は、期限が付いた日に黙ってずれる。
+func TestARequestThatRanOutOfTimeIsNotAFailureEither(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	reportCommandFailure(log, "could not switch source", fmt.Errorf("bridge: mjpeg was still starting when the request ended: %w", context.DeadlineExceeded), "source", "mjpeg")
+
+	if strings.Contains(logged.String(), "level=ERROR") {
+		t.Errorf("a request that ran out of time was reported as an error:\n%s", logged.String())
+	}
+}
+
+// 本当の失敗は今までどおり ERROR。中断と混ぜてはいけない。
+func TestARealFailureIsStillAnError(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, nil))
+
+	reportCommandFailure(log, "could not switch source", errors.New("uvc: no camera configured"), "source", "uvc")
+
+	out := logged.String()
+	if !strings.Contains(out, "level=ERROR") {
+		t.Errorf("a real failure was demoted:\n%s", out)
+	}
+	if !strings.Contains(out, "no camera configured") {
+		t.Errorf("the log does not carry the reason:\n%s", out)
 	}
 }

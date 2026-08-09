@@ -349,7 +349,16 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 		// 公開するのは検証を通った後です。ドライバは view ではなく b.cfg を読むので、
 		// 起動には差し支えありません。
 		if err := b.verifyStartLocked(ctx); err != nil {
-			b.log.Error("new settings could not start a source, reverting", "error", err)
+			// 要求が途中で終わったのなら、これはソースの失敗ではありません。呼び出し側
+			// が去ったか、アプリが終了しているだけで、カメラについては何も分かって
+			// いません。ERROR で「ソースを起動できなかった」と書くと、終了のたびに
+			// 記録が 2 行残り、後からログを読む人はカメラを疑うことになります。
+			// 巻き戻しはどちらでも同じように行います。違うのは何と呼ぶかだけです。
+			if requestEnded(err) {
+				b.log.Info("the request ended before the new settings could be verified, reverting", "error", err)
+			} else {
+				b.log.Error("new settings could not start a source, reverting", "error", err)
+			}
 			b.cfg = previous
 			b.publishView()
 
@@ -1000,8 +1009,14 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	case <-b.root.Done():
 		// 停止中であることは、何かが機能する証拠ではない。ここで成功を報告すると、
 		// 誰も検証していない設定が保存され、次回の実行はその上で始まる。
+		//
+		// 原因を包むのは、これが「中断であって失敗ではない」と呼び出し側が判断
+		// できるようにするため。トレイからの切替は Start と同じコンテキストを渡すので、
+		// 終了時には verifyCtx.Done() とこの case が同時に準備完了になり、select は
+		// どちらを選んでもおかしくない。片方だけが context.Canceled を運んでいると、
+		// 正常な終了が半分の確率で ERROR として記録される。
 		b.stopLocked()
-		return errors.New("bridge: shutting down before the new source produced a frame")
+		return fmt.Errorf("bridge: shutting down before %s produced a frame: %w", drv.Name(), b.root.Err())
 	}
 
 	if err := verifyOutcome(drv.Name(), frameErr, verifyCtx.Err(), b.root.Err()); err != nil {
@@ -1012,6 +1027,17 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	b.proven = true
 	b.log.Info("source started", "source", drv.Name())
 	return nil
+}
+
+// requestEnded は、この失敗が「待っていた相手が居なくなった」ことによるものかどうかを
+// 返します。
+//
+// コンテキストの終わり方は 2 つあり、どちらもカメラについては何も語りません。
+// キャンセルは呼び出し側が去ったかアプリが終了した場合、期限切れは呼び出し側が
+// 待つ時間を先に決めていた場合です。前者だけを見ていると、期限を付けた
+// クライアント — HTTP のタイムアウトはその形 — がソースの失敗として記録されます。
+func requestEnded(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // verifyOutcome は、変更を求めたリクエストとブリッジ自身がまだ健在かを踏まえて、
@@ -1034,7 +1060,10 @@ func verifyOutcome(name string, frameErr, requestErr, shutdownErr error) error {
 	if shutdownErr != nil {
 		// ブリッジが止まる直前に実力を示した設定も、結局その上で何も動いていない
 		// 設定であり、次の起動は未検証のままそれで立ち上がることになる。
-		return errors.New("bridge: shutting down as the new source produced its first frame")
+		//
+		// 上の case と同じ理由で原因を包む。終了の経路がどれも同じ分類になって
+		// いなければ、呼び出し側は「中断」と「本当の失敗」を見分けられない。
+		return fmt.Errorf("bridge: shutting down as %s produced its first frame: %w", name, shutdownErr)
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2155,6 +2156,48 @@ func waitFor(t *testing.T, timeout time.Duration, what string, want func() bool)
 
 // silentUpstream は応答した後に何も言わない。ドライバは接続して待ち続け、検証は
 // そこで待てない。
+// silentUpstreamConnected は silentUpstream に「繋がった」合図を足したもの。
+//
+// 検証の最中にキャンセルするテストには、固定の sleep ではなくこれが要る。applyLocked は
+// 冒頭で ctx を見て、既に終わっていれば検証へ進まずに返す。負荷の高い CI で goroutine が
+// sleep の間に検証まで辿り着けないと、実装が正しくてもテストが落ちる。
+//
+// 上流に接続が来たことは、ドライバが起動して applyLocked が verifyStartLocked の中で
+// 待っていることを意味する。ドライバが起動する経路は、その冒頭の判定を通った先にしか
+// 無いため。
+func silentUpstreamConnected(t *testing.T) (*httptest.Server, <-chan struct{}) {
+	t.Helper()
+	connected := make(chan struct{})
+	var once sync.Once
+	done := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// 再接続で複数回来るので once。閉じるのは最初の 1 回だけ。
+		once.Do(func() { close(connected) })
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(done); ts.Close() })
+	return ts, connected
+}
+
+// waitForVerify は、新しいソースが上流に繋がるまで待つ。ここから先でキャンセルすれば、
+// 検証の最中に割り込んだことになる。
+func waitForVerify(t *testing.T, connected <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the new source never reached the upstream, so nothing was interrupted mid-verification")
+	}
+}
+
 func silentUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	done := make(chan struct{})
@@ -2781,5 +2824,165 @@ func TestRestartOnlyLeavesMatchWhatCanBeDeferred(t *testing.T) {
 				t.Errorf("restartDeferred after moving %s named %q, which restartOnlyLeaves does not have", name, got)
 			}
 		}
+	}
+}
+
+// 要求が途中で終わったのは、ソースの失敗ではない。アプリの終了や、去った呼び出し側に
+// ついて分かることであって、カメラについては何も分かっていない。ERROR で
+// 「ソースを起動できなかった」と書くと、終了のたびに記録が残り、後から読む人は
+// あるはずのない不具合を探すことになる。
+func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
+	shortenVerify(t, 5*time.Second)
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	silent, connected := silentUpstreamConnected(t)
+
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	b := New(mjpegConfig(working.URL), "", hub.New(), status.New(), log)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitFor(t, 5*time.Second, "the first source to prove itself", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.provenLocked()
+	})
+
+	// 応答するだけでフレームを出さない上流へ切り替え、検証の最中に要求を打ち切る。
+	// 終了がキューに積まれた切替を捕まえたときと同じ形。
+	reqCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := b.Apply(reqCtx, mjpegConfig(silent.URL))
+		done <- err
+	}()
+	waitForVerify(t, connected)
+	cancel()
+
+	if err := <-done; err == nil {
+		t.Fatal("Apply reported success for a request that was cut short")
+	}
+
+	out := logged.String()
+	if strings.Contains(out, "level=ERROR") {
+		t.Errorf("a cancelled request was reported as a source failure:\n%s", out)
+	}
+	if !strings.Contains(out, "the request ended before the new settings could be verified") {
+		t.Errorf("the rollback left no record of why:\n%s", out)
+	}
+
+	// 巻き戻しは今までどおり行われる。呼び方を変えただけで、動きは変えていない。
+	if got := b.Snapshot().Source.MJPEG.URL; got != working.URL {
+		t.Errorf("url = %q, want it back at %q", got, working.URL)
+	}
+}
+
+// 終了の経路は 2 つある。トレイからの Switch は Start と同じコンテキストを渡すので、
+// 終了時には verifyCtx.Done() と b.root.Done() が同時に準備完了になり、select は
+// どちらを選んでもおかしくない。片方だけが原因を運んでいると、正常な終了が半分の
+// 確率で ERROR として記録される。
+func TestShuttingDownTheBridgeIsNotASourceFailure(t *testing.T) {
+	shortenVerify(t, 5*time.Second)
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	silent, connected := silentUpstreamConnected(t)
+
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	b := New(mjpegConfig(working.URL), "", hub.New(), status.New(), log)
+	root, shutdown := context.WithCancel(context.Background())
+	if err := b.Start(root); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitFor(t, 5*time.Second, "the first source to prove itself", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.provenLocked()
+	})
+
+	// 要求そのものは生きたまま、ブリッジの方を止める。b.root.Done() の case を
+	// 確実に通す形。
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := b.Apply(context.Background(), mjpegConfig(silent.URL))
+		done <- err
+	}()
+	waitForVerify(t, connected)
+	shutdown()
+
+	err := <-done
+	if err == nil {
+		t.Fatal("Apply reported success while the bridge was shutting down")
+	}
+	// 呼び出し側 — トレイの reportCommandFailure — が中断だと見分けられなければ、
+	// この経路を通った終了はやはり ERROR として記録される。
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to carry the cancellation so callers can tell it apart", err)
+	}
+	if strings.Contains(logged.String(), "level=ERROR") {
+		t.Errorf("shutting down was reported as a source failure:\n%s", logged.String())
+	}
+}
+
+// verifyOutcome は純粋関数なので、フレームと終了が同時に起きる — 実際に起こすのが
+// 難しい — 場合をここで直接押さえられる。
+func TestVerifyOutcomeCarriesTheCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		frameErr   error
+		requestErr error
+		shutdown   error
+	}{
+		{name: "the request was cancelled", requestErr: context.Canceled},
+		{name: "the request ran out of time", requestErr: context.DeadlineExceeded},
+		{name: "the bridge is shutting down", shutdown: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyOutcome("mjpeg", tc.frameErr, tc.requestErr, tc.shutdown)
+			if err == nil {
+				t.Fatal("verifyOutcome = nil, want the frame rejected")
+			}
+			if !requestEnded(err) && !errors.Is(err, context.Canceled) {
+				t.Errorf("error = %v, want it to carry why nobody is waiting any more", err)
+			}
+		})
+	}
+
+	// 本当の失敗は中断と混ざってはいけない。
+	err := verifyOutcome("mjpeg", errors.New("not a JPEG"), nil, nil)
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want a real failure kept apart from a cancellation", err)
+	}
+}
+
+// コンテキストの終わり方は 2 つあり、どちらもカメラについては何も語らない。
+// キャンセルだけを見ていると、期限を付けたクライアント — HTTP のタイムアウトは
+// その形 — がソースの失敗として記録される。
+func TestRequestEndedCoversBothWaysAContextEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "cancelled", err: context.Canceled, want: true},
+		{name: "out of time", err: context.DeadlineExceeded, want: true},
+		{
+			name: "wrapped the way verifyStartLocked wraps it",
+			err:  fmt.Errorf("bridge: mjpeg was still starting when the request ended: %w", context.DeadlineExceeded),
+			want: true,
+		},
+		// 本当の失敗を巻き込んではいけない。これを降格すると、カメラが壊れていても
+		// ログには何も残らない。
+		{name: "a real failure", err: errors.New("uvc: no camera configured"), want: false},
+		{name: "no failure at all", err: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requestEnded(tc.err); got != tc.want {
+				t.Errorf("requestEnded(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

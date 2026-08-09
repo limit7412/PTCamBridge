@@ -166,7 +166,11 @@ func run(ctx context.Context, opts Options, m menu) {
 				kind := action
 				queue.submit("switch source", func() {
 					if err := opts.Controller.Switch(ctx, kind); err != nil {
-						opts.Log.Error("could not switch source", "source", kind, "error", err)
+						// キューに積まれた切替は、終了の合図が来たときにまだ
+						// 走っていることがある。ctx はそこで切れるので、
+						// これは失敗ではなく中断。SetPaused には ctx が無いので
+						// この形にはならない。
+						reportCommandFailure(opts.Log, "could not switch source", err, "source", kind)
 					}
 				})
 			}
