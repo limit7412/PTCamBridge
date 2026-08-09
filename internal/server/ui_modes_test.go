@@ -468,6 +468,67 @@ console.log(JSON.stringify({
 	}
 }
 
+// まだ答えていないカメラへ戻ったときも、出ている候補は捨てなければなりません。
+//
+// A を調べている最中に B へ変え、B が先に答えると、画面には B の候補が出ます。
+// そこで A へ戻ると「A は調べ中」として何もしないままになり、入力欄は A なのに
+// B の解像度が選べます。選んで保存すれば、A が持たないモードが設定に入ります。
+func TestSettingsPageDropsAnotherCamerasCandidatesWhenComingBackMidLookup(t *testing.T) {
+	harness := modesHarness + `
+// A を調べ始める。まだ答えない。
+const a = loadCameraModes();
+
+// B へ変えて、B だけを答えさせる。
+nodes["uvc-device"].value = "B";
+const b = loadCameraModes();
+const waitingForA = pending.slice(0, 1);
+pending = pending.slice(1);
+release();
+await b;
+const afterB = listed["camera-sizes"];
+
+// A へ戻る。A はまだ調べている最中。
+nodes["uvc-device"].value = "A";
+await loadCameraModes();
+const backOnA = { sizes: listed["camera-sizes"], said: nodes["camera-modes"].textContent, asked };
+
+pending = waitingForA;
+release();
+await a;
+console.log(JSON.stringify({afterB, backOnA, finalSizes: listed["camera-sizes"]}));
+`
+	var got struct {
+		AfterB  []string `json:"afterB"`
+		BackOnA struct {
+			Sizes []string `json:"sizes"`
+			Said  string   `json:"said"`
+			Asked int      `json:"asked"`
+		} `json:"backOnA"`
+		FinalSizes []string `json:"finalSizes"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"1280x720"}; !equalStrings(got.AfterB, want) {
+		t.Fatalf("sizes after B answered = %v, want %v", got.AfterB, want)
+	}
+	if len(got.BackOnA.Sizes) != 0 {
+		t.Errorf("sizes after coming back to A = %v, want B's candidates gone", got.BackOnA.Sizes)
+	}
+	if got.BackOnA.Said != "looking" {
+		t.Errorf("the page said %q while A is still being looked up, want it to say so", got.BackOnA.Said)
+	}
+	if got.BackOnA.Asked != 2 {
+		t.Errorf("started %d lookups, want the one already running for A to be reused", got.BackOnA.Asked)
+	}
+	// A が答えたら、A の候補で埋まる。
+	if want := []string{"640x480"}; !equalStrings(got.FinalSizes, want) {
+		t.Errorf("sizes once A answered = %v, want %v", got.FinalSizes, want)
+	}
+}
+
 // 進行中は 1 つでは足りません。
 //
 // A を待っている間に B へ変え、また A に戻すと、3 回目の A は「今 B を調べている」

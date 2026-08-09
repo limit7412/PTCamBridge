@@ -3269,6 +3269,73 @@ func TestCameraModesOpensACameraOnceForConcurrentCallers(t *testing.T) {
 	}
 }
 
+// 共有している列挙は、始めた要求と一緒に終わってはいけない。
+//
+// 始めたタブが閉じただけで止めると、同じ答えを待っている他の要求まで巻き添えに
+// なる。待っている側の要求はまだ生きているのに、候補が出せない。
+func TestCameraModesFinishesTheLookupTheFirstCallerAbandoned(t *testing.T) {
+	onWindowsCameraRules(t)
+	want := []source.Mode{{MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		close(started)
+		// 本物の列挙と同じく、期限が切れればそこで終わる。
+		select {
+		case <-release:
+			return want, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	// 1 人目。これが列挙を始め、そして先に立ち去る。
+	leaving, giveUp := context.WithCancel(context.Background())
+	defer giveUp()
+	gone := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(leaving, "Bigeye")
+		gone <- err
+	}()
+	<-started
+
+	// 2 人目。1 人目の答えを待つ。
+	stays := make(chan []source.Mode, 1)
+	staysErr := make(chan error, 1)
+	go func() {
+		modes, err := b.CameraModes(context.Background(), "Bigeye")
+		stays <- modes
+		staysErr <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the second caller never joined the running lookup")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// 1 人目が去る。列挙は 2 人目のために続かなければならない。
+	giveUp()
+	if err := <-gone; !errors.Is(err, context.Canceled) {
+		t.Errorf("the caller that left got %v, want its own cancellation", err)
+	}
+	close(release)
+
+	if err := <-staysErr; err != nil {
+		t.Fatalf("the caller that stayed got %v, want the modes", err)
+	}
+	if modes := <-stays; !slices.Equal(modes, want) {
+		t.Errorf("modes = %v, want %v", modes, want)
+	}
+}
+
 // 初めて数えた顔ぶれは、変化ではない。
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、

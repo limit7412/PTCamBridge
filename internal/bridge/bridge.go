@@ -916,15 +916,7 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	if call, ok := b.listing[key]; ok {
 		call.waiting++
 		b.modesMu.Unlock()
-		select {
-		case <-call.done:
-			// 先に走っている方の答えをそのまま使う。写しを渡すのは、憶えと同じ
-			// 理由 — 待っていた全員が同じ 1 本を書き換え合わないため。
-			return slices.Clone(call.modes), call.err
-		case <-ctx.Done():
-			// こちらの要求だけが終わった。走っている列挙は他の待ち手のもの。
-			return nil, ctx.Err()
-		}
+		return awaitModes(ctx, call)
 	}
 	call := &modeLookup{done: make(chan struct{})}
 	if b.listing == nil {
@@ -933,15 +925,34 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	b.listing[key] = call
 	b.modesMu.Unlock()
 
-	modes, err := listModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
+	ffmpegPath := b.Snapshot().Source.UVC.FFmpegPath
+	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
+	// 同じ答えを待っている他の要求まで巻き添えにします。だから要求の期限からは
+	// 切り離します。放置にはなりません — 列挙は自前で 15 秒の期限を持っています
+	// (source.ListModes を参照)。
+	go func() {
+		modes, err := listModes(context.WithoutCancel(ctx), ffmpegPath, device)
+		b.modesMu.Lock()
+		delete(b.listing, key)
+		b.modesMu.Unlock()
+		call.modes, call.err = modes, err
+		close(call.done)
+	}()
 
-	b.modesMu.Lock()
-	delete(b.listing, key)
-	b.modesMu.Unlock()
-	call.modes, call.err = modes, err
-	close(call.done)
+	return awaitModes(ctx, call)
+}
 
-	return modes, err
+// awaitModes は、走っている列挙の答えを待ちます。
+//
+// 写しを渡すのは、憶えと同じ理由 — 待っていた全員が同じ 1 本を書き換え合わない
+// ためです。呼び出し側の要求が先に終わればそちらを返します。列挙は止めません。
+func awaitModes(ctx context.Context, call *modeLookup) ([]source.Mode, error) {
+	select {
+	case <-call.done:
+		return slices.Clone(call.modes), call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // capturing は、名前で指定されたカメラを今このブリッジが握っているかどうかを

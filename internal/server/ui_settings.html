@@ -509,11 +509,12 @@ async function loadCameraModes() {
   if (chosenSource() !== "uvc") return;
 
   const device = el("uvc-device").value.trim();
-  if (device === modesFor || modesLoading.has(device)) return;
+  // 今出ている候補が既にこのカメラのものなら、することは無い。
+  if (device === modesFor) return;
 
-  // 前のカメラの候補はここで捨てる。列挙には 15 秒かかることがあり、その間ずっと
-  // 前のカメラの解像度を選べたままにすると、今のカメラが持っていない組み合わせを
-  // 保存できてしまう。
+  // ここから先、出ている候補は別のカメラのもの。捨てる。列挙には 15 秒かかる
+  // ことがあり、その間ずっと前のカメラの解像度を選べたままにすると、今のカメラが
+  // 持っていない組み合わせを保存できてしまう。
   modesFor = null;
   cameraModes = [];
   refreshModeChoices();
@@ -523,6 +524,10 @@ async function loadCameraModes() {
     return;
   }
   sayModes(TEXT.modesLooking);
+
+  // 既に調べている最中なら、訊き直さない。候補は上で捨ててある — このカメラは
+  // まだ答えていないので、出ていたものは必ず別のカメラのものだった。
+  if (modesLoading.has(device)) return;
 
   modesLoading.add(device);
   try {
