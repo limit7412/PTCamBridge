@@ -425,6 +425,42 @@ func probeExistingInstance(addr string) (bool, string) {
 	return true, stats.Version
 }
 
+// modeListTimeout は、カメラ 1 台のモードを調べるのに与える時間。
+//
+// 期限はカメラごとに分ける。1 本の期限を全台で分け合うと、使用中の 1 台が待ち
+// 時間を使い切った後のカメラは、繋がっていてもモードを一切出せない。遅いデバイス
+// 1 台が、その後ろに並んだ全部の答えを消してしまう。
+const modeListTimeout = 20 * time.Second
+
+// listCameraModes は差し替えられるようにしてある。本物は ffmpeg を起動するので、
+// テストからは踏めない。
+var listCameraModes = source.ListModes
+
+// modeQueryName は、モードを訊くときにそのカメラを指す名前。
+//
+// フレンドリ名は重複し得る。同じ名前のカメラが 2 台あるとき、それを見分けて
+// いるのは Alternative の方なので、あるならそちらで訊く。名前で訊くと、ffmpeg が
+// 曖昧として拒むか、毎回同じ 1 台を開いて、もう一方の見出しの下に別のカメラの
+// モードを並べることになる。
+func modeQueryName(d source.Device) string {
+	if d.Alternative != "" {
+		return d.Alternative
+	}
+	return d.Name
+}
+
+// cameraModes は、カメラ 1 台のモードを、そのカメラだけの期限のもとで調べます。
+//
+// モードはカメラごとに ffmpeg を 1 回起動して調べます。デバイス一覧そのものに
+// 混ぜていないのは、設定画面がそれを定期的に読むからです (source.ListModes を
+// 参照)。ここは人が 1 回だけ叩くコマンドなので、その代金を払う価値があります。
+// 設定に書く値を探しているのは、まさにこれを実行している人だからです。
+func cameraModes(ffmpegPath string, d source.Device) ([]source.Mode, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), modeListTimeout)
+	defer cancel()
+	return listCameraModes(ctx, ffmpegPath, modeQueryName(d))
+}
+
 func listDevices(opts options) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -462,11 +498,7 @@ func listDevices(opts options) error {
 		if d.Alternative != "" {
 			fmt.Printf("    %s\n", d.Alternative)
 		}
-		// モードはカメラごとに ffmpeg を 1 回起動して調べる。デバイス一覧そのものに
-		// 混ぜていないのは、設定画面がそれを定期的に読むから (source.ListModes を
-		// 参照)。ここは人が 1 回だけ叩くコマンドなので、その代金を払う価値がある。
-		// 設定に書く値を探しているのは、まさにこれを実行している人だから。
-		modes, err := source.ListModes(ctx, ffmpegPath, d.Name)
+		modes, err := cameraModes(ffmpegPath, d)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "    %s %v\n", p.S(i18n.CLINoModes), err)
 			continue

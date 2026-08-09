@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,6 +103,11 @@ type Bridge struct {
 	// 凍りつき、失敗しつつあるソースに機会を与えている最中、ユーザーは終了する
 	// ことすらできなくなります。
 	view atomic.Pointer[view]
+
+	// modes は、列挙に成功したカメラのモードを、名前 (小文字化したもの) ごとに
+	// 憶えたものです。CameraModes を参照。
+	modesMu sync.Mutex
+	modes   map[string][]source.Mode
 
 	mu      sync.Mutex
 	cfg     config.Config
@@ -810,14 +816,84 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	return devices
 }
 
+// listModes は差し替えられるようにしてあります。本物は Windows でしか答えず
+// (source.ListModes を参照)、テストは Windows で走らないので、これが無いと
+// CameraModes の憶えと諦めの筋を 1 本も踏めません。
+var listModes = source.ListModes
+
 // CameraModes は、1 台のカメラが申告するモードを返します。
 //
-// ここは設定を読むだけで、動いているソースには触れません。使うのは ffmpeg の
-// 探索経路を揃えるための ffmpeg_path だけです。画面が指定したカメラと、動作中の
-// カメラが同じとは限りません — 解像度を決めるために、まだ選んでいないカメラを
-// 調べるのが、この呼び出しの主な用途です。
+// 列挙はカメラを開きます。UVC デバイスは排他的なので、ブリッジが今キャプチャして
+// いるカメラを訊かれると、その列挙は開けずに失敗します。しかも設定画面でいちばん
+// よく訊かれるのは、まさにその「今のカメラ」です。
+//
+// そこで、うまくいった列挙の答えをカメラ名ごとに憶えておき、開けなかったときは
+// それを返します。モードはカメラの持ち物で、こちらの都合では変わらないので、
+// 一度得た答えは後からでも正しいままです。キャプチャを止める — 一時停止でも、
+// 別のソースへの切り替えでも — とカメラは解放されるので、そこで一度訊けば以降は
+// 憶えたもので答えられます。
+//
+// 憶えが無く、かつ訊かれたのが今キャプチャしているカメラだった場合は、なぜ開け
+// なかったのかを添えて失敗させます。ffmpeg のエラーだけでは、名前を間違えたのか
+// 自分が握っているのかが読み取れないからです。
 func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode, error) {
-	return source.ListModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
+	busy := b.capturing(device)
+	if busy {
+		// 開けないと分かっているものを開きに行かない。列挙は自前で 15 秒待つので、
+		// 画面がカメラ名を打つたびにそれを払うことになる。
+		if modes, ok := b.recallModes(device); ok {
+			return modes, nil
+		}
+	}
+
+	modes, err := listModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
+	if err == nil {
+		b.rememberModes(device, modes)
+		return modes, nil
+	}
+	if modes, ok := b.recallModes(device); ok {
+		b.log.Debug("could not list the camera modes; answering with what it said earlier", "device", device, "error", err)
+		return modes, nil
+	}
+	if busy {
+		return nil, fmt.Errorf("%w; PTCamBridge is capturing %s right now and a UVC camera cannot be opened twice, so pause capture from the tray to look at its modes", err, device)
+	}
+	return nil, err
+}
+
+// capturing は、名前で指定されたカメラを今このブリッジが握っているかどうかを
+// 返します。一時停止中はカメラを解放しているので、握っていないと答えます。
+func (b *Bridge) capturing(device string) bool {
+	v := b.view.Load()
+	if v.paused || v.cfg.Source.Type != config.SourceUVC {
+		return false
+	}
+	// DirectShow のフレンドリ名は大文字小文字を区別しません。
+	return device != "" && strings.EqualFold(v.cfg.Source.UVC.Device, device)
+}
+
+// rememberModes / recallModes は、列挙に成功した答えを憶え、思い出します。
+//
+// mu ではなく専用のロックの下に置いてあります。設定変更中の Apply は mu をソースの
+// 検証のあいだ — 最長で startVerifyTimeout — 握るので、mu の下に置くと、設定画面が
+// カメラ名を打っただけで 30 秒待たされます。
+func (b *Bridge) rememberModes(device string, modes []source.Mode) {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	if b.modes == nil {
+		b.modes = make(map[string][]source.Mode)
+	}
+	b.modes[strings.ToLower(device)] = slices.Clone(modes)
+}
+
+func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	modes, ok := b.modes[strings.ToLower(device)]
+	if !ok {
+		return nil, false
+	}
+	return slices.Clone(modes), true
 }
 
 // SetPaused はキャプチャを停止または再開します。一時停止はカメラを解放します。

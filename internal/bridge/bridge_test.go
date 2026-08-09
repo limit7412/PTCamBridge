@@ -23,6 +23,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
@@ -2984,5 +2985,208 @@ func TestRequestEndedCoversBothWaysAContextEnds(t *testing.T) {
 				t.Errorf("requestEnded(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// uvcConfig は、名前だけ与えた UVC の設定。ドライバは起動しない。
+func uvcConfig(device string) config.Config {
+	cfg := config.Default()
+	cfg.Source.Type = config.SourceUVC
+	cfg.Source.UVC.Device = device
+	cfg.Normalise()
+	return cfg
+}
+
+// fakeModeLister は listModes を差し替え、呼ばれた回数と、そのとき渡された名前を
+// 記録する。
+type fakeModeLister struct {
+	mu      sync.Mutex
+	calls   int
+	devices []string
+	modes   []source.Mode
+	err     error
+}
+
+func (f *fakeModeLister) install(t *testing.T) {
+	t.Helper()
+	prev := listModes
+	listModes = func(_ context.Context, _, device string) ([]source.Mode, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.calls++
+		f.devices = append(f.devices, device)
+		return f.modes, f.err
+	}
+	t.Cleanup(func() { listModes = prev })
+}
+
+func (f *fakeModeLister) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// 列挙はカメラを開く。UVC は排他的なので、キャプチャ中のカメラを訊かれた列挙は
+// 失敗する。設定画面が最もよく訊くのがその「今のカメラ」なので、一度得た答えを
+// 憶えておいて、そこから答えられなければならない。
+func TestCameraModesAnswersTheRunningCameraFromWhatItLearnedEarlier(t *testing.T) {
+	want := []source.Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: want}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+
+	// まだ掴んでいないうちに一度訊く。ここは本当に列挙できる。
+	b.SetPaused(true)
+	got, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("modes = %v, want %v", got, want)
+	}
+
+	// 掴んだ後は列挙が失敗する。憶えたもので答えること。
+	lister.modes, lister.err = nil, errors.New("uvc: ffmpeg listed no modes")
+	b.SetPaused(false)
+	got, err = b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes while capturing: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("modes = %v, want the remembered %v", got, want)
+	}
+}
+
+// 掴んでいると分かっているカメラに、開けないと分かっている列挙をぶつけない。
+// 列挙は自前で 15 秒待つので、名前を打つたびにそれを払うことになる。
+func TestCameraModesDoesNotReopenTheCameraItIsHolding(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	before := lister.count()
+	for range 3 {
+		if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+			t.Fatalf("CameraModes while capturing: %v", err)
+		}
+	}
+	if got := lister.count() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera the bridge is holding, want 0", got)
+	}
+}
+
+// 掴んでいないはずのカメラの列挙が失敗したときも、憶えがあればそれで答える。
+//
+// 名前の比較は完全ではない。設定がフレンドリ名を持ち、画面が "@device_pnp_..."
+// で訊けば (あるいはその逆なら)、同じ 1 台でも別物に見える。そこで列挙は「自分が
+// 握っているせいで」失敗するが、こちらはそうと気付けない。憶えがあるなら、
+// 気付けなくても正しい答えは出せる。
+func TestCameraModesFallsBackToWhatItLearnedWhenTheLookupFails(t *testing.T) {
+	want := []source.Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: want}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_bigeye"); err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+
+	lister.modes, lister.err = nil, errors.New("uvc: ffmpeg listed no modes")
+	got, err := b.CameraModes(context.Background(), "@device_pnp_bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes after the lookup broke: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("modes = %v, want the remembered %v", got, want)
+	}
+}
+
+// 憶えが無いまま自分の握っているカメラを訊かれたら、なぜ開けなかったのかを言う。
+// ffmpeg のエラーだけでは、名前を間違えたのか自分が握っているのかが読めない。
+func TestCameraModesSaysWhenItIsTheOneHoldingTheCamera(t *testing.T) {
+	lister := &fakeModeLister{err: errors.New("uvc: ffmpeg listed no modes for \"Bigeye\"")}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_, err := b.CameraModes(context.Background(), "Bigeye")
+	if err == nil {
+		t.Fatal("expected an error when the camera cannot be opened")
+	}
+	if !strings.Contains(err.Error(), "pause capture") {
+		t.Errorf("error = %q, want it to say how to get the modes", err)
+	}
+	// 元の失敗も残すこと。取り違えのほうが原因である可能性は消えていない。
+	if !strings.Contains(err.Error(), "listed no modes") {
+		t.Errorf("error = %q, want it to keep what ffmpeg said", err)
+	}
+}
+
+// 握っていないカメラの失敗に、一時停止の助言を付けてはいけない。それはただの
+// 名前の打ち間違いで、一時停止しても何も変わらない。
+func TestCameraModesDoesNotBlameItselfForAnotherCamera(t *testing.T) {
+	lister := &fakeModeLister{err: errors.New("uvc: ffmpeg listed no modes for \"Typo\"")}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_, err := b.CameraModes(context.Background(), "Typo")
+	if err == nil {
+		t.Fatal("expected an error when the camera cannot be opened")
+	}
+	if strings.Contains(err.Error(), "pause capture") {
+		t.Errorf("error = %q, want no advice about a camera the bridge is not holding", err)
+	}
+}
+
+// 一時停止中はカメラを解放している。そこは実際に開けるので、憶えを取りに行く
+// 唯一の機会になる。
+func TestCameraModesLooksAgainWhilePaused(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	before := lister.count()
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	if got := lister.count() - before; got != 1 {
+		t.Errorf("ffmpeg ran %d times while paused, want 1", got)
+	}
+}
+
+// 憶えは呼び出し側に渡した後も、こちらのものであり続けなければならない。
+func TestCameraModesDoesNotHandOutItsOwnMemory(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+
+	// ここから先は憶えから答える経路。渡したものを書き換えられても、次の答えは
+	// 変わってはいけない。
+	lister.modes, lister.err = nil, errors.New("uvc: ffmpeg listed no modes")
+	got, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+	got[0].MinSize = "scribbled"
+
+	again, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+	if again[0].MinSize != "640x480" {
+		t.Errorf("remembered mode = %q, want the caller not to be able to change it", again[0].MinSize)
 	}
 }

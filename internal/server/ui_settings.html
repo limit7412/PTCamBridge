@@ -435,19 +435,23 @@ async function loadDevices() {
 // ffmpeg を 1 回起動する。一覧は 5 秒ごとに読んでいるので、そこに混ぜると、この画面を
 // 開いているだけで数秒おきに全カメラを掴みに行くことになる。
 //
-// 取りに行くのはカメラ名が決まったときだけ。同じ名前で 2 度は訊かない。
-let modesFor = "";
+// 取りに行くのはカメラ名が決まったときだけ。覚えるのは成功したときだけで、
+// 失敗した名前は覚えない。ffmpeg を後から入れた人やカメラの一時停止を解いた人が、
+// ページを読み直さずにもう一度試せるようにするため。
+let modesFor = null;
+let cameraModes = [];
+
+const sayModes = (text) => el("camera-modes").textContent = text || "";
 
 async function loadCameraModes() {
   const device = el("uvc-device").value.trim();
   if (device === modesFor) return;
-  modesFor = device;
 
-  const say = (text) => el("camera-modes").textContent = text || "";
   if (!device) {
-    options("camera-sizes", []);
-    options("camera-framerates", []);
-    say("");
+    modesFor = null;
+    cameraModes = [];
+    refreshModeChoices();
+    sayModes("");
     return;
   }
 
@@ -459,38 +463,88 @@ async function loadCameraModes() {
     // 候補を書き換えると、今いる名前とは無関係なモードを勧めることになる。
     if (found.device !== el("uvc-device").value.trim()) return;
 
-    const modes = found.modes || [];
-    // 大きさは範囲で答えるカメラがあるので、両端を候補に出す。間の値も使えるが、
-    // それを全部並べても選びやすくはならない。
-    const sizes = [];
-    const rates = [];
-    for (const m of modes) {
-      for (const size of [m.min_size, m.max_size]) {
-        if (size && !sizes.includes(size)) sizes.push(size);
-      }
-      for (const fps of [m.min_fps, m.max_fps]) {
-        if (fps && !rates.includes(String(fps))) rates.push(String(fps));
-      }
-    }
-    options("camera-sizes", sizes);
-    options("camera-framerates", rates);
-
+    cameraModes = found.modes || [];
     if (found.error) {
-      say(TEXT.modesUnknown + " " + found.error);
-    } else if (modes.length) {
-      say(TEXT.modesFound + " " + modes.map(describeMode).join(", "));
+      // 調べられなかった。覚えないので、原因が直れば次の機会に効く。
+      modesFor = null;
+      sayModes(TEXT.modesUnknown + " " + found.error);
     } else {
-      say("");
+      modesFor = device;
+      sayModes(cameraModes.length ? TEXT.modesFound + " " + cameraModes.map(describeMode).join(", ") : "");
     }
   } catch (err) {
-    options("camera-sizes", []);
-    options("camera-framerates", []);
-    say(TEXT.modesUnknown + " " + String(err));
+    modesFor = null;
+    cameraModes = [];
+    sayModes(TEXT.modesUnknown + " " + String(err));
   }
+  refreshModeChoices();
+}
+
+// refreshModeChoices は候補欄を今のモードから作り直します。
+//
+// フレームレートは、選んでいる解像度に合うモードからだけ取ります。両者を独立に
+// 並べると、カメラが 1920x1080@5 と 640x480@30 しか持っていない場合に、画面が
+// 1920x1080@30 を選ばせることになります。それはまさに、この機能が説明しようと
+// している "Could not set video options" です。画面がそれを誘発しては本末転倒です。
+function refreshModeChoices() {
+  const sizes = [];
+  for (const m of cameraModes) {
+    for (const size of [m.min_size, m.max_size]) {
+      if (size && !sizes.includes(size)) sizes.push(size);
+    }
+  }
+  options("camera-sizes", sizes);
+
+  const chosen = el("uvc-size").value.trim();
+  const rates = [];
+  for (const m of cameraModes) {
+    if (chosen && !modeHasSize(m, chosen)) continue;
+    for (const fps of writableRates(m)) {
+      if (!rates.includes(fps)) rates.push(fps);
+    }
+  }
+  options("camera-framerates", rates);
+}
+
+const parseSize = (s) => {
+  const m = /^(\d+)x(\d+)$/.exec(s || "");
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+};
+
+// modeHasSize は、その大きさをこのモードが受け付けるかどうかを返します。範囲で
+// 答えるカメラでは、両端の間のどの大きさも使えます。
+function modeHasSize(m, size) {
+  if (m.min_size === size || m.max_size === size) return true;
+  const want = parseSize(size), lo = parseSize(m.min_size), hi = parseSize(m.max_size);
+  if (!want || !lo || !hi) return false;
+  return want.w >= lo.w && want.w <= hi.w && want.h >= lo.h && want.h <= hi.h;
+}
+
+// writableRates は、設定に書けるフレームレートだけを返します。
+//
+// source.uvc.framerate は整数です。29.97 のような値を候補に出しても、入力欄が
+// 弾くか、保存できても設定として通りません。
+//
+// 幅のあるモードなら間の整数が使えるので、上端を切り下げた値を出します。1 つの値
+// しか持たないモードが 29.97 なら、書ける整数はありません。近い整数を勧めると、
+// カメラが持っていないフレームレートを要求させることになります。
+function writableRates(m) {
+  const out = [];
+  const add = (n) => {
+    if (Number.isInteger(n) && n > 0 && !out.includes(String(n))) out.push(String(n));
+  };
+  if (m.min_fps === m.max_fps) {
+    add(m.max_fps);
+    return out;
+  }
+  add(Math.floor(m.max_fps));
+  add(Math.ceil(m.min_fps));
+  return out;
 }
 
 // describeMode は、Go 側の Mode.String と同じ形にする。片方だけを読んだ人が
-// もう片方を見て別のカメラの話だと思わないため。
+// もう片方を見て別のカメラの話だと思わないため。ここはカメラが申告したままを
+// 見せる — 書ける値かどうかは候補欄の役目で、説明の役目ではない。
 function describeMode(m) {
   let size = m.min_size || "";
   if (m.max_size && m.max_size !== m.min_size) size += "-" + m.max_size;
@@ -504,6 +558,8 @@ function describeMode(m) {
 
 el("uvc-device").addEventListener("change", loadCameraModes);
 el("uvc-device").addEventListener("blur", loadCameraModes);
+// 解像度が変わればフレームレートの候補も変わる。組み合わせで持っているものだから。
+el("uvc-size").addEventListener("input", refreshModeChoices);
 
 // ffmpeg の取得。100 メガバイトは 1 つの応答に収まらないので、開始したら状態を
 // 見に行く。診断画面と同じ数字を同じところから読んでいる。
@@ -566,7 +622,10 @@ el("get-ffmpeg").addEventListener("click", async () => {
   }
 });
 
-load();
+// fill() の代入では change も blur も起きないので、読み込みの後に自分で呼ぶ。
+// これをしないと、設定に既にカメラ名がある人 — つまりほとんどの人 — は、
+// デバイス欄を一度触るまで候補を得られない。
+load().then(loadCameraModes);
 loadDevices();
 pollFFmpeg();
 setInterval(pollFFmpeg, 2000);
