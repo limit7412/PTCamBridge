@@ -354,8 +354,14 @@ func (b *Bridge) cancelListing(device string) {
 	}
 }
 
-// findListingLocked は、そのカメラについて走っている列挙を返します。呼び出し側が
+// findListingLocked は、その答えを共有してよい列挙を返します。呼び出し側が
 // modesMu を保持します。
+//
+// 共有には**確かに同じ 1 台**であることを求めます。sameCameraLocked の
+// 「同じ可能性がある」で合流させると、フレンドリ名を共有する 2 台があるときに、
+// 共有名の列挙 (ffmpeg が開くのは常にそのうちの 1 台) の答えを、もう一方の
+// 代替名で訊いた画面へ渡すことになります。開けないことより悪い — 別の機種の
+// 解像度を「対応している」として勧めます。
 //
 // 走っている分をそのつど素性に直して見ます。登録のときの素性を鍵にすると、その後
 // Devices が顔ぶれを数え直しただけで鍵が変わり、走っている列挙を誰も見つけられ
@@ -363,11 +369,25 @@ func (b *Bridge) cancelListing(device string) {
 // 手放させられなくなります。
 func (b *Bridge) findListingLocked(device string) *modeLookup {
 	for _, call := range b.listing {
-		if b.sameCameraLocked(call.device, device) {
+		if b.sameCameraForSureLocked(call.device, device) {
 			return call
 		}
 	}
 	return nil
+}
+
+// sameCameraForSureLocked は、2 つの名前が確かに同じ 1 台を指しているかを返します。
+// 呼び出し側が modesMu を保持します。
+//
+// sameCameraLocked との違いは、迷ったときにどちらへ倒すかです。あちらは「開きに
+// 行かない」ための判定なので、同じ可能性があれば衝突させます。こちらは「答えを
+// 渡してよいか」の判定なので、言い切れなければ渡しません。
+func (b *Bridge) sameCameraForSureLocked(a, c string) bool {
+	if strings.EqualFold(a, c) {
+		return true
+	}
+	identity := b.identityOfLocked(a)
+	return identity != "" && identity == b.identityOfLocked(c)
 }
 
 // listingsForLocked は、そのカメラについて走っている列挙をすべて返します。
@@ -1033,6 +1053,15 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 		b.modesMu.Unlock()
 		return awaitModes(ctx, call)
 	}
+	// 同じ 1 台かもしれない列挙が走っているなら、こちらは始めません。答えを
+	// 分けることもしません — 共有名が開くのはその名前を持つ 1 台だけなので、
+	// その答えが今訊かれている個体のものだとは言えません。開けば排他的な
+	// デバイスを取り合い、分ければ別の機種のモードを勧めます。断って、その 1 本が
+	// 終わってから訊き直してもらいます。
+	if exclusiveCameraAccess && len(b.listingsForLocked(device)) > 0 {
+		b.modesMu.Unlock()
+		return nil, fmt.Errorf("uvc: PTCamBridge is listing the modes of a camera that may be %s right now, so try again in a moment", device)
+	}
 	// 掴んでいるかどうかを、登録と同じロックの下でもう一度見ます。呼び出し側の
 	// 判定はロックの外なので、その後・ここへ来る前に、キャプチャがそのカメラを
 	// 予約していることがあります (launchLocked は予約してから cancelListing で
@@ -1322,12 +1351,8 @@ func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {
 	// を共有する 2 台があるとき、共有名で開かれるのは常に同じ 1 台なので、
 	// もう一方のモードを渡すと、そのカメラが持っていない値を勧めることに
 	// なります。
-	want := b.identityOfLocked(device)
-	if want == "" {
-		return nil, false
-	}
 	for key, entry := range b.modes {
-		if b.identityOfLocked(key) == want {
+		if b.sameCameraForSureLocked(key, device) {
 			return slices.Clone(entry.modes), true
 		}
 	}

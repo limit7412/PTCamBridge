@@ -4157,3 +4157,134 @@ func TestCameraModesDoesNotAnswerASharedNameWithTheOtherCamerasModes(t *testing.
 		t.Errorf("answered the shared name with %v, which was learned from a camera it cannot tie to that name", got)
 	}
 }
+
+// 曖昧な名前の列挙に、別の個体を訊いた要求を合流させてはいけない。
+//
+// 共有名で ffmpeg が開くのは、その名前を持つ 1 台だけ。その答えをもう一方の
+// 代替名で訊いた画面へ渡すと、別の機種の解像度を「対応している」として勧める
+// ことになる。かといって 2 本目を開けば、同じカメラだった場合に取り合う。
+// どちらもしない — 断る。
+func TestCameraModesDoesNotShareASharedNameLookupWithOneOfTheCameras(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return []source.Mode{{MinSize: "1280x720", MaxSize: "1280x720"}}, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{
+			{Name: "USB Camera", Alternative: "@device_pnp_one"},
+			{Name: "USB Camera", Alternative: "@device_pnp_two"},
+		}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+	b.SetPaused(true)
+
+	shared := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "USB Camera")
+		shared <- err
+	}()
+	<-running
+
+	// 期限を切って訊く。合流させる作りだと、この要求はその 1 本を待ってしまう —
+	// 期限が切れたことで、断らずに待ったと分かる。
+	ask, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	modes, err := b.CameraModes(ask, "@device_pnp_two")
+	switch {
+	case err == nil:
+		t.Errorf("answered %v from a lookup that may have opened the other camera", modes)
+	case errors.Is(err, context.DeadlineExceeded):
+		t.Error("waited on a lookup that may have opened the other camera instead of refusing")
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened a camera %d times, want 1 — the second request must neither join nor open its own", got)
+	}
+
+	close(release)
+	if err := <-shared; err != nil {
+		t.Errorf("CameraModes for the shared name: %v", err)
+	}
+}
+
+// 個体が一意に決まるなら、走っている列挙には合流しなければならない。断ると、
+// 同じ 1 台を 2 度開くか、待てば得られた答えを捨てることになる。
+func TestCameraModesJoinsTheLookupRunningUnderTheOtherNameOfTheSameCamera(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	want := []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return want, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+	b.SetPaused(true)
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		first <- err
+	}()
+	<-running
+
+	joined := make(chan []source.Mode, 1)
+	errs := make(chan error, 1)
+	go func() {
+		modes, err := b.CameraModes(context.Background(), "@device_pnp_bigeye")
+		joined <- modes
+		errs <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < 1 {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatalf("the other name did not join the running lookup; the camera was opened %d times", probes.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	if err := <-first; err != nil {
+		t.Errorf("CameraModes: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Errorf("CameraModes under the other name: %v", err)
+	}
+	if modes := <-joined; !slices.Equal(modes, want) {
+		t.Errorf("modes = %v, want the shared %v", modes, want)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened the camera %d times, want 1", got)
+	}
+}
