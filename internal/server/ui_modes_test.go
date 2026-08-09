@@ -406,6 +406,90 @@ console.log(JSON.stringify({started, afterA}));
 	}
 }
 
+// 進行中は 1 つでは足りません。
+//
+// A を待っている間に B へ変え、また A に戻すと、3 回目の A は「今 B を調べている」
+// という印をすり抜けます。同時に走り得るのは、走っている数だけあります。
+func TestSettingsPageRemembersEveryLookupStillRunning(t *testing.T) {
+	harness := modesHarness + `
+const first = loadCameraModes();
+nodes["uvc-device"].value = "B";
+const second = loadCameraModes();
+// 打ち直して A に戻る。A はまだ走っている。
+nodes["uvc-device"].value = "A";
+const third = loadCameraModes();
+const started = asked;
+release();
+await Promise.all([first, second, third]);
+console.log(JSON.stringify({started}));
+`
+	var got struct {
+		Started int `json:"started"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if got.Started != 2 {
+		t.Errorf("started %d lookups, want 2 — the one that came back to A must not start a second time", got.Started)
+	}
+}
+
+// 古い要求が転んでも、今のカメラについて得たものを捨ててはいけません。
+//
+// 成功の側には古さの判定がありますが、例外の側にもそれが要ります。無いと、
+// 入力欄は B のまま A の失敗が出て、B の候補は次に入力の合図が来るまで戻りません。
+func TestSettingsPageIgnoresTheFailureOfALookupItNoLongerNeeds(t *testing.T) {
+	harness := `
+const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking"};
+globalThis.document = { querySelector: () => ({ value: "uvc" }) };
+const nodes = {"uvc-device": {value: "A"}, "uvc-size": {value: ""}, "camera-modes": {textContent: ""}};
+const el = (id) => nodes[id] || (nodes[id] = {value: "", textContent: ""});
+const listed = {"camera-sizes": [], "camera-framerates": []};
+const options = (id, values) => { listed[id] = values; };
+
+// A は返らないまま後で転ぶ。B はすぐ答える。
+let breakA;
+globalThis.fetch = async (url) => {
+  if (decodeURIComponent(url).includes("device=A")) {
+    await new Promise((resolve, reject) => { breakA = reject; });
+  }
+  return { ok: true, json: async () => ({
+    device: "B",
+    modes: [{min_size: "1280x720", max_size: "1280x720", min_fps: 30, max_fps: 30}],
+  }) };
+};
+
+const a = loadCameraModes();
+nodes["uvc-device"].value = "B";
+await loadCameraModes();
+const afterB = listed["camera-sizes"];
+
+breakA(new Error("A broke"));
+await a;
+console.log(JSON.stringify({afterB, sizes: listed["camera-sizes"], said: nodes["camera-modes"].textContent}));
+`
+	var got struct {
+		AfterB []string `json:"afterB"`
+		Sizes  []string `json:"sizes"`
+		Said   string   `json:"said"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"1280x720"}; !equalStrings(got.AfterB, want) {
+		t.Fatalf("sizes after B answered = %v, want %v", got.AfterB, want)
+	}
+	if want := []string{"1280x720"}; !equalStrings(got.Sizes, want) {
+		t.Errorf("sizes after the stale lookup failed = %v, want B's %v", got.Sizes, want)
+	}
+	if strings.Contains(got.Said, "A broke") {
+		t.Errorf("the page said %q, want no complaint about a camera it is no longer showing", got.Said)
+	}
+}
+
 // UVC を使っていないなら、カメラを開いてはいけません。
 //
 // 設定には前に使ったカメラ名が残り、fill() はそれを隠れている入力欄にも書きます。

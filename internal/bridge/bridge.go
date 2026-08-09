@@ -109,6 +109,10 @@ type Bridge struct {
 	// 憶えたものです。CameraModes を参照。
 	modesMu sync.Mutex
 	modes   map[string][]source.Mode
+	// cameras は、最後に列挙できたカメラの顔ぶれです。camerasKnown は、それを
+	// 一度でも列挙できたかどうか。forgetModesIfCamerasChanged を参照。
+	cameras      string
+	camerasKnown bool
 
 	mu      sync.Mutex
 	cfg     config.Config
@@ -800,10 +804,15 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	var devices server.Devices
 
-	cameras, err := source.ListDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
+	cameras, err := listDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
 	if err != nil {
 		b.log.Warn("could not list capture devices", "error", err)
 		devices.CameraError = err.Error()
+	} else {
+		// 列挙できたときだけ照らし合わせる。失敗した一覧は「1 台も無い」とは
+		// 違うので、それを顔ぶれの変化として読むと、ffmpeg が一度でも転んだ
+		// 拍子に憶えを捨てることになる。
+		b.forgetModesIfCamerasChanged(cameras)
 	}
 	devices.Cameras = cameras
 
@@ -821,6 +830,9 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 // (source.ListModes を参照)、テストは Windows で走らないので、これが無いと
 // CameraModes の憶えと諦めの筋を 1 本も踏めません。
 var listModes = source.ListModes
+
+// listDevices も同じ理由で差し替えられるようにしてあります。
+var listDevices = source.ListDevices
 
 // exclusiveCameraAccess は、キャプチャ中のカメラをもう一度開けないかどうかです。
 //
@@ -895,6 +907,45 @@ func (b *Bridge) rememberModes(device string, modes []source.Mode) {
 		b.modes = make(map[string][]source.Mode)
 	}
 	b.modes[strings.ToLower(device)] = slices.Clone(modes)
+}
+
+// forgetModesIfCamerasChanged は、繋がっているカメラの顔ぶれが変わったら憶えを
+// 捨てます。
+//
+// モードが変わらないのは同じ 1 台についてだけです。憶えの鍵は名前ですが、名前は
+// 個体を指しません — "USB Camera" は次に挿した別機種にも付きます。抜き挿しで
+// 入れ替わったカメラに、前の機種のモードを勧め続けることになります。
+//
+// 個体の識別子で憶える方法は取っていません。CameraModes が受け取るのは画面が
+// 打った名前だけで、そこから個体を引くにはデバイス一覧が要り、一覧は ffmpeg を
+// 1 回起動します。顔ぶれは既に — 設定画面が 5 秒ごとに読むこの経路で — 手元に
+// あるので、それを使います。
+func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
+	seen := make([]string, 0, len(cameras))
+	for _, c := range cameras {
+		seen = append(seen, c.Name+"\x00"+c.Alternative)
+	}
+	// ffmpeg の並びに意味は無いので、並べ替えだけで顔ぶれが変わったことにしない。
+	slices.Sort(seen)
+	fingerprint := strings.Join(seen, "\x00\x00")
+
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	// 初めて数えた顔ぶれは、変化ではありません。ここで捨てると、設定画面が
+	// 5 秒ごとに読むこの経路が、憶えたものを最初の 1 回で流します。
+	if !b.camerasKnown {
+		b.camerasKnown = true
+		b.cameras = fingerprint
+		return
+	}
+	if b.cameras == fingerprint {
+		return
+	}
+	if len(b.modes) > 0 {
+		b.log.Debug("the cameras changed, forgetting the modes they reported", "cameras", len(cameras))
+	}
+	b.cameras = fingerprint
+	b.modes = nil
 }
 
 func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {

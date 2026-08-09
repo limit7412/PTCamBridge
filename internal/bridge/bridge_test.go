@@ -3140,6 +3140,106 @@ func TestCameraModesSaysWhenItIsTheOneHoldingTheCamera(t *testing.T) {
 	}
 }
 
+// カメラの顔ぶれが変わったら、憶えは捨てなければならない。
+//
+// モードが変わらないのは同じ 1 台についてだけ。憶えの鍵は名前だが、名前は個体を
+// 指さない — "USB Camera" は次に挿した別機種にも付く。抜き挿しで入れ替わった
+// カメラに、前の機種のモードを勧め続けることになる。
+func TestCameraModesForgetsWhatItLearnedWhenTheCamerasChange(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}}
+	lister.install(t)
+
+	cameras := []source.Device{{Name: "USB Camera", Alternative: "@device_pnp_first"}}
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) { return cameras, nil }
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	// 設定画面と同じ順序。まず一覧を読み、それからモードを訊く。
+	b.Devices(context.Background())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "USB Camera"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// 同じ顔ぶれのままなら憶えは残る。一覧は 5 秒ごとに読まれるので、ここで
+	// 捨てていては憶える意味が無い。
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "USB Camera"); err != nil {
+		t.Fatalf("CameraModes with the same cameras attached: %v", err)
+	}
+
+	// 別の個体に入れ替わった。名前は同じでも、答えはもう前の機種のもの。
+	cameras = []source.Device{{Name: "USB Camera", Alternative: "@device_pnp_second"}}
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "USB Camera"); err == nil {
+		t.Error("expected the modes of the camera that was unplugged to be forgotten")
+	}
+}
+
+// 初めて数えた顔ぶれは、変化ではない。
+//
+// カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、
+// 最初の一覧で捨てる作りにすると、そこで憶えたものが 5 秒後に流れる。
+func TestCameraModesKeepsItsMemoryThroughTheFirstDeviceListing(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// ここが最初の一覧。
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("the first device listing threw the memory away: %v", err)
+	}
+}
+
+// 列挙そのものに失敗したときは、顔ぶれが変わったことにしてはいけない。
+// 「1 台も見つからない」と「見に行けなかった」は違う。
+func TestCameraModesKeepsItsMemoryWhenTheDeviceListFails(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	cameras := []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}
+	var listErr error
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		if listErr != nil {
+			return nil, listErr
+		}
+		return cameras, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	// 一度は数えられている状態にしてから壊す。数える前の失敗は、初回として
+	// 素通りするので何も確かめられない。
+	b.Devices(context.Background())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	listErr = errors.New("uvc: ffmpeg is not installed")
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("a failed device listing threw the memory away: %v", err)
+	}
+}
+
 // 排他的でないプラットフォームでは、掴んでいることを理由に断ってはいけない。
 //
 // 列挙が実際にデバイスを開くのは DirectShow だけで、他では ListModes が何も

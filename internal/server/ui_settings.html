@@ -476,12 +476,16 @@ async function loadDevices() {
 // 失敗した名前は覚えない。ffmpeg を後から入れた人やカメラの一時停止を解いた人が、
 // ページを読み直さずにもう一度試せるようにするため。
 //
-// modesLoading は今調べている最中の名前。失敗を覚えない以上、これが無いと、
+// modesLoading は今調べている最中の名前ぜんぶ。失敗を覚えない以上、これが無いと、
 // 入力欄から離れたときに change と blur の両方が同じ名前で入ってきて、同じ
 // カメラへ 2 本の ffmpeg を同時に走らせることになる。排他的なデバイスなので、
 // その 2 本は互いを失敗させ得る。
+//
+// 1 つしか覚えないのでは足りない。A を待っている間に B へ変え、また A に戻せば、
+// 3 回目の A は B に上書きされた印をすり抜ける。同時に走り得るのは、走っている
+// 数だけある。
 let modesFor = null;
-let modesLoading = null;
+const modesLoading = new Set();
 let cameraModes = [];
 
 const sayModes = (text) => el("camera-modes").textContent = text || "";
@@ -499,7 +503,7 @@ async function loadCameraModes() {
   if (chosenSource() !== "uvc") return;
 
   const device = el("uvc-device").value.trim();
-  if (device === modesFor || device === modesLoading) return;
+  if (device === modesFor || modesLoading.has(device)) return;
 
   if (!device) {
     modesFor = null;
@@ -516,7 +520,7 @@ async function loadCameraModes() {
   refreshModeChoices();
   sayModes(TEXT.modesLooking);
 
-  modesLoading = device;
+  modesLoading.add(device);
   try {
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
@@ -535,14 +539,15 @@ async function loadCameraModes() {
       sayModes(cameraModes.length ? TEXT.modesFound + " " + cameraModes.map(describeMode).join(", ") : "");
     }
   } catch (err) {
+    // 成功の側と同じ判定。古い要求が転んだからといって、今のカメラについて
+    // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
+    // B の候補は次に入力の合図が来るまで戻らない。
+    if (device !== el("uvc-device").value.trim()) return;
     modesFor = null;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {
-    // 下ろすのは自分の分だけ。待っている間にカメラ名が変わると、後から始まった
-    // 問い合わせが印を持っている。それを無条件に消すと、その名前で change と blur が
-    // もう一度来たときに 2 本目が通ってしまう。
-    if (modesLoading === device) modesLoading = null;
+    modesLoading.delete(device);
   }
   refreshModeChoices();
 }
