@@ -427,15 +427,21 @@ const options = (id, names) => {
 //
 // 重複していないカメラには足しません。長くて読みにくい名前を、それが要る人に
 // だけ見せるためです。
+//
+// 数えるときは大文字小文字を無視する。DirectShow のフレンドリ名はそれを区別
+// しないので (bridge.capturing の EqualFold と同じ)、区別して数えると
+// "USB Camera" と "usb camera" が別物になり、どちらも 1 台と見なされる。
+// そのとき候補に出るのは、同じ 1 台に解決される名前だけになる。
 function cameraChoices(cameras) {
   const seen = new Map();
+  const key = (name) => String(name || "").toLowerCase();
   for (const camera of cameras) {
-    seen.set(camera.name, (seen.get(camera.name) || 0) + 1);
+    seen.set(key(camera.name), (seen.get(key(camera.name)) || 0) + 1);
   }
   const names = [];
   for (const camera of cameras) {
     names.push(camera.name);
-    if (camera.alternative && seen.get(camera.name) > 1) names.push(camera.alternative);
+    if (camera.alternative && seen.get(key(camera.name)) > 1) names.push(camera.alternative);
   }
   return names;
 }

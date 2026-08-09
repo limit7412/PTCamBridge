@@ -1109,12 +1109,17 @@ console.log(JSON.stringify({
     {name: "USB Camera", alternative: "@device_pnp_two"},
   ]),
   bare: cameraChoices([{name: "Bigeye"}]),
+  cased: cameraChoices([
+    {name: "USB Camera", alternative: "@device_pnp_one"},
+    {name: "usb camera", alternative: "@device_pnp_two"},
+  ]),
 }));
 `
 	var got struct {
 		Unique   []string `json:"unique"`
 		Collided []string `json:"collided"`
 		Bare     []string `json:"bare"`
+		Cased    []string `json:"cased"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -1129,6 +1134,11 @@ console.log(JSON.stringify({
 	}
 	if want := []string{"Bigeye"}; !equalStrings(got.Bare, want) {
 		t.Errorf("choices for a camera with no device path = %v, want %v", got.Bare, want)
+	}
+	// DirectShow のフレンドリ名は大文字小文字を区別しません。区別して数えると
+	// どちらも 1 台と見なされ、候補には同じ 1 台に解決される名前しか出ません。
+	if want := []string{"USB Camera", "@device_pnp_one", "usb camera", "@device_pnp_two"}; !equalStrings(got.Cased, want) {
+		t.Errorf("choices for two cameras whose names differ only in case = %v, want %v", got.Cased, want)
 	}
 }
 

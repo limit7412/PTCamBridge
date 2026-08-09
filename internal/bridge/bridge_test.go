@@ -3621,7 +3621,7 @@ func TestCameraModesCountsBothNamesOfACameraAsOne(t *testing.T) {
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、
 // 最初の一覧で捨てる作りにすると、そこで憶えたものが 5 秒後に流れる。
-func TestCameraModesKeepsItsMemoryThroughTheFirstDeviceListing(t *testing.T) {
+func TestCameraModesForgetsWhatItLearnedBeforeItKnewTheCameras(t *testing.T) {
 	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
 	lister.install(t)
 
@@ -3633,15 +3633,30 @@ func TestCameraModesKeepsItsMemoryThroughTheFirstDeviceListing(t *testing.T) {
 
 	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
 	b.SetPaused(true)
+	// 一覧より先に訊く。ここで憶えるものに素性は付けられない。
 	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
 		t.Fatalf("CameraModes while paused: %v", err)
 	}
 	b.SetPaused(false)
 
-	// ここが最初の一覧。
+	// ここが最初の一覧。訊いてから数えるまでの間に同じ名前の別機種へ差し替わって
+	// いても、それを言う材料は無い。今の素性を貼ると以後の照合も素通りするので、
+	// 分からないものは捨てる。
 	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("kept modes it could not tie to a camera, and stamped them with the identity it happened to find")
+	}
+
+	// 掴んでいなければ訊き直せる。捨てたことが行き止まりにはならない。
+	b.SetPaused(true)
 	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
-		t.Errorf("the first device listing threw the memory away: %v", err)
+		t.Errorf("could not learn the modes again after they were dropped: %v", err)
+	}
+	// 今度は素性が付いている。次の一覧では残る。
+	b.Devices(context.Background())
+	b.SetPaused(false)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("dropped modes that were tied to a camera it had counted: %v", err)
 	}
 }
 
@@ -3849,5 +3864,130 @@ func TestCameraModesDoesNotRememberTheModesOfACameraThatWasSwappedOut(t *testing
 	b.SetPaused(false)
 	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
 		t.Error("answered with the modes of the camera that was swapped out while they were being listed")
+	}
+}
+
+// 走っている列挙は、その最中に顔ぶれを数え直しても見つけられなければならない。
+//
+// 登録の鍵を素性にすると、登録した後に Devices が素性を埋めただけで鍵が変わり、
+// 走っているものを誰も引けなくなる。2 本目の ffmpeg が同じカメラへ向かう。
+func TestCameraModesJoinsALookupThatStartedBeforeTheCamerasWereCounted(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return nil, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	// 顔ぶれを数える前に始める。この時点で引ける素性は無い。
+	first := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		first <- err
+	}()
+	<-running
+
+	// 走っている最中に数える。ここで素性が付く。
+	b.Devices(context.Background())
+
+	second := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		second <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < 1 {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatalf("the second call did not join the running enumeration; the camera was opened %d times", probes.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	if err := <-first; err != nil {
+		t.Errorf("CameraModes: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Errorf("CameraModes: %v", err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened the camera %d times, want 1", got)
+	}
+}
+
+// 同じ列挙を、キャプチャの起動も見つけられなければならない。見つけられなければ、
+// 掴んだままの ffmpeg を残して開きに行く。
+func TestStartingCaptureTakesTheCameraFromALookupThatPredatesTheCount(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		started.Do(func() { close(running) })
+		// 諦めろと言われても、すぐには手放さない。すぐ返ると、起動が待ったのか
+		// 素通りしたのかを見分けられない。
+		<-release
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	b.SetPaused(true)
+
+	go b.CameraModes(context.Background(), "Bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	// 走っている最中に数える。鍵が変わるのはここ。
+	b.Devices(context.Background())
+
+	resumed := make(chan error, 1)
+	go func() { resumed <- b.SetPaused(false) }()
+
+	early := false
+	select {
+	case err := <-resumed:
+		early = true
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		t.Error("capture started without taking the camera from the lookup registered before the count")
+	case <-time.After(50 * time.Millisecond):
+		// 起動は列挙が手放すのを待っている。これが正しい。
+	}
+
+	close(release)
+	if !early {
+		if err := <-resumed; err != nil {
+			t.Fatalf("resume: %v", err)
+		}
 	}
 }

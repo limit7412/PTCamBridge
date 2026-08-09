@@ -109,6 +109,11 @@ type Bridge struct {
 	// 憶えたものです。identities は、最後に数えた顔ぶれ — 名前と
 	// "@device_pnp_..." のそれぞれから、その 1 台の素性を引きます。listing は
 	// 今走っている列挙です。CameraModes を参照。
+	//
+	// listing の鍵は打たれた名前 (小文字化したもの) です。素性にしないのは、
+	// 素性が後から変わるからです — 登録した後に顔ぶれを数え直すと、その鍵では
+	// 誰も引けなくなります。同じ 1 台かどうかは findListingLocked が、そのつど
+	// 素性に直して見ます。
 	modesMu    sync.Mutex
 	modes      map[string]modeMemory
 	identities map[string]string
@@ -188,6 +193,11 @@ type modeMemory struct {
 // modes と err は done を閉じる前に書き、閉じた後は読むだけです。
 type modeLookup struct {
 	done chan struct{}
+	// device は、この列挙が訊いている名前です。走っている列挙を探すときは、
+	// これを毎回そのときの素性に直して突き合わせます (findListingLocked)。
+	// 素性そのものを鍵にすると、登録の後に顔ぶれを数え直しただけで、走っている
+	// 列挙を誰も見つけられなくなります。
+	device string
 	// identity は、この列挙を始めたときにそのカメラが持っていた素性です。
 	// rememberModesLocked を参照。
 	identity string
@@ -328,14 +338,46 @@ func (b *Bridge) stopLookups() {
 // 巻き戻ります — どちらかが譲るなら、譲るのは列挙の側です。
 func (b *Bridge) cancelListing(device string) {
 	b.modesMu.Lock()
-	call, running := b.listing[b.lookupKeyLocked(device)]
-	if running {
+	// 1 本とは限りません。素性が分かる前は、同じ 1 台が名前と "@device_pnp_..."
+	// で別々に登録され得ます。1 本だけ止めても、もう 1 本がカメラを掴んだままです。
+	running := b.listingsForLocked(device)
+	for _, call := range running {
 		call.cancel()
 	}
 	b.modesMu.Unlock()
-	if running {
+	for _, call := range running {
 		<-call.done
 	}
+}
+
+// findListingLocked は、そのカメラについて走っている列挙を返します。呼び出し側が
+// modesMu を保持します。
+//
+// 走っている分をそのつど素性に直して見ます。登録のときの素性を鍵にすると、その後
+// Devices が顔ぶれを数え直しただけで鍵が変わり、走っている列挙を誰も見つけられ
+// なくなります — 2 本目の ffmpeg が同じカメラへ向かい、キャプチャの起動もそれに
+// 手放させられなくなります。
+func (b *Bridge) findListingLocked(device string) *modeLookup {
+	want := b.lookupKeyLocked(device)
+	for _, call := range b.listing {
+		if b.lookupKeyLocked(call.device) == want {
+			return call
+		}
+	}
+	return nil
+}
+
+// listingsForLocked は、そのカメラについて走っている列挙をすべて返します。
+// 呼び出し側が modesMu を保持します。
+func (b *Bridge) listingsForLocked(device string) []*modeLookup {
+	want := b.lookupKeyLocked(device)
+	var found []*modeLookup
+	for _, call := range b.listing {
+		if b.lookupKeyLocked(call.device) == want {
+			found = append(found, call)
+		}
+	}
+	return found
 }
 
 // Snapshot は現在有効な設定を返します。
@@ -973,12 +1015,11 @@ func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode,
 // 開くのはこちらなので、抑止もこちらに要ります。
 func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mode, error) {
 	b.modesMu.Lock()
-	key := b.lookupKeyLocked(device)
 	if b.lookupsStopped {
 		b.modesMu.Unlock()
 		return nil, errors.New("uvc: PTCamBridge is shutting down")
 	}
-	if call, ok := b.listing[key]; ok {
+	if call := b.findListingLocked(device); call != nil {
 		call.waiting++
 		b.modesMu.Unlock()
 		return awaitModes(ctx, call)
@@ -1002,7 +1043,8 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	}
 	runCtx, cancel := context.WithCancel(lifetime)
 
-	call := &modeLookup{done: make(chan struct{}), cancel: cancel, identity: b.identities[strings.ToLower(device)]}
+	key := strings.ToLower(device)
+	call := &modeLookup{done: make(chan struct{}), device: device, cancel: cancel, identity: b.identities[key]}
 	if b.listing == nil {
 		b.listing = make(map[string]*modeLookup)
 	}
@@ -1168,9 +1210,17 @@ func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
 		switch {
 		case entry.identity == "":
 			// 素性を知らずに憶えたもの。一覧より先にモードを訊いた場合です。
-			// ここで初めて分かったことは、変化ではありません。
-			entry.identity = now
-			b.modes[key] = entry
+			// 今の素性を貼ることはできません — 訊いてから数えるまでの間に
+			// 同じ名前の別機種へ差し替わっていても、こちらにはそれを言う材料が
+			// 無いからです。貼ってしまうと以後の照合も素通りして、他機種の
+			// モードを勧め続けます。分からないものは捨てます。
+			//
+			// 失うものは、ほぼありません。設定画面は最初の一覧を待ってから
+			// モードを訊くので (ui_settings.html の devicesListed を参照)、
+			// この経路に落ちるのは API を直に叩いた場合だけです。掴んでいない
+			// カメラなら訊き直せます。
+			b.log.Debug("forgetting modes learned before the cameras were counted", "device", key)
+			delete(b.modes, key)
 		case !listed:
 			// 今は見えないカメラ。見えないことは入れ替わったことではないので、
 			// 憶えたままにします。戻ってきたものが別の個体なら、そのとき素性で
