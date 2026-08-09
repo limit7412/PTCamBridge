@@ -484,7 +484,7 @@ func TestUIStateCarriesTheFFmpegConsentText(t *testing.T) {
 	}
 }
 
-// モードを調べるにはカメラを開く。デバイス一覧は画面が定期的に読むものなので、
+// モードを調べるにはカメラを開く。デバイス一覧は画面が開くたびに読むものなので、
 // そちらに混ぜてはいけない。要求された 1 台だけを、訊かれたときにだけ調べる。
 func TestCameraModesAsksOnlyForTheCameraNamed(t *testing.T) {
 	ctrl := &fakeController{modes: []source.Mode{

@@ -188,6 +188,9 @@ type modeMemory struct {
 // modes と err は done を閉じる前に書き、閉じた後は読むだけです。
 type modeLookup struct {
 	done chan struct{}
+	// identity は、この列挙を始めたときにそのカメラが持っていた素性です。
+	// rememberModesLocked を参照。
+	identity string
 	// cancel は、この列挙を諦めさせます。使うのは 2 つの場面だけ — 終了と、
 	// 同じカメラをキャプチャのために開くとき。要求 1 本が去っただけでは使いません。
 	cancel context.CancelFunc
@@ -949,7 +952,6 @@ func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode,
 
 	modes, err := b.listModesOnce(ctx, device)
 	if err == nil {
-		b.rememberModes(device, modes)
 		return modes, nil
 	}
 	// 掴んでいないはずのカメラでも、名前の比較は完全ではありません。設定が
@@ -1000,7 +1002,7 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	}
 	runCtx, cancel := context.WithCancel(lifetime)
 
-	call := &modeLookup{done: make(chan struct{}), cancel: cancel}
+	call := &modeLookup{done: make(chan struct{}), cancel: cancel, identity: b.identities[strings.ToLower(device)]}
 	if b.listing == nil {
 		b.listing = make(map[string]*modeLookup)
 	}
@@ -1017,6 +1019,11 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 		modes, err := listModes(runCtx, ffmpegPath, device)
 		b.modesMu.Lock()
 		delete(b.listing, key)
+		if err == nil {
+			// 憶えるのはここです。呼び出し側で憶えると、この列挙を始めたときの
+			// 素性が分からなくなります。
+			b.rememberModesLocked(device, modes, call.identity)
+		}
 		b.modesMu.Unlock()
 		call.modes, call.err = modes, err
 		close(call.done)
@@ -1087,32 +1094,44 @@ func (b *Bridge) lookupKeyLocked(device string) string {
 // 列挙を登録する直前 — すり抜けたものが実際にカメラを開く場所 — なので、
 // 素性で見ます。
 func (b *Bridge) openingLocked(device string) bool {
-	if b.capturing(device) {
-		return true
-	}
-	v := b.view.Load()
-	if v.opening == "" || device == "" {
+	if device == "" {
 		return false
 	}
-	return b.lookupKeyLocked(v.opening) == b.lookupKeyLocked(device)
+	want := b.lookupKeyLocked(device)
+	v := b.view.Load()
+	if v.opening != "" && b.lookupKeyLocked(v.opening) == want {
+		return true
+	}
+	// 既に開き終えたカメラも同じです。capturing はここでも名前しか見ないので、
+	// 動いているカメラを代替名で訊かれると「空いている」と答えます。
+	if v.paused || v.cfg.Source.Type != config.SourceUVC || v.cfg.Source.UVC.Device == "" {
+		return false
+	}
+	return b.lookupKeyLocked(v.cfg.Source.UVC.Device) == want
 }
 
-// rememberModes / recallModes は、列挙に成功した答えを憶え、思い出します。
+// rememberModesLocked / recallModes は、列挙に成功した答えを憶え、思い出します。
 //
 // mu ではなく専用のロックの下に置いてあります。設定変更中の Apply は mu をソースの
 // 検証のあいだ — 最長で startVerifyTimeout — 握るので、mu の下に置くと、設定画面が
 // カメラ名を打っただけで 30 秒待たされます。
-func (b *Bridge) rememberModes(device string, modes []source.Mode) {
-	b.modesMu.Lock()
-	defer b.modesMu.Unlock()
+//
+// started は、その列挙を始めたときにそのカメラが持っていた素性です。戻ってきた
+// 時点の素性と違えば、憶えません。調べている 15 秒の間に同じ名前の別機種へ
+// 差し替わったということなので、その答えは今そこにあるカメラのものではありません。
+// 今の素性を貼ると、後の照合も素通りして、二度と捨てられなくなります。
+func (b *Bridge) rememberModesLocked(device string, modes []source.Mode, started string) {
+	key := strings.ToLower(device)
+	if b.identities[key] != started {
+		b.log.Debug("the camera changed while its modes were being listed, not remembering them", "device", device)
+		return
+	}
 	if b.modes == nil {
 		b.modes = make(map[string]modeMemory)
 	}
-	key := strings.ToLower(device)
-	// 素性は、最後に数えた顔ぶれから引きます。載っていなければ空のまま —
-	// 次にそのカメラが一覧に現れたときに埋まります。forgetModesIfCamerasChanged
-	// を参照。
-	b.modes[key] = modeMemory{modes: slices.Clone(modes), identity: b.identities[key]}
+	// 素性が空のままのことはあります (一覧より先に訊かれた場合)。次にそのカメラが
+	// 一覧に現れたときに埋まります。forgetModesIfCamerasChanged を参照。
+	b.modes[key] = modeMemory{modes: slices.Clone(modes), identity: started}
 }
 
 // forgetModesIfCamerasChanged は、素性の変わったカメラの憶えだけを捨てます。

@@ -3764,3 +3764,90 @@ func TestCameraModesDoesNotHandOutItsOwnMemory(t *testing.T) {
 		t.Errorf("remembered mode = %q, want the caller not to be able to change it", again[0].MinSize)
 	}
 }
+
+// 動いているカメラは、代替名で訊かれても開きに行ってはいけない。
+//
+// capturing は名前しか見ないので、設定がフレンドリ名を持ち、画面が
+// "@device_pnp_..." で訊けば、そこは素通りします。素性を知っているのは登録の
+// 側なので、実際に開く手前でもう一度、素性で見なければなりません。
+func TestCameraModesDoesNotReopenTheRunningCameraUnderItsOtherName(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	// 顔ぶれを数えておく。素性はここから引く。
+	b.Devices(context.Background())
+
+	before := lister.count()
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_bigeye"); err == nil {
+		t.Error("expected the camera the bridge is holding to be left alone under its other name")
+	}
+	if got := lister.count() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times for the camera the bridge is holding, want 0", got)
+	}
+
+	// 別のカメラは今までどおり調べられる。
+	if _, err := b.CameraModes(context.Background(), "Newcomer"); err != nil {
+		t.Errorf("CameraModes for another camera: %v", err)
+	}
+}
+
+// 調べている間に差し替わったカメラの答えは、憶えてはいけない。
+//
+// 列挙は 15 秒かかることがあります。その間に同じ名前の別機種へ差し替わると、
+// 返ってきた答えは今そこにいるカメラのものではありません。今の素性を貼って
+// 憶えると、後の照合も素通りして、二度と捨てられなくなります。
+func TestCameraModesDoesNotRememberTheModesOfACameraThatWasSwappedOut(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		started.Do(func() { close(running) })
+		<-release
+		return []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	alternative := "@device_pnp_bigeye"
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: alternative}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	b.Devices(context.Background())
+
+	answered := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		answered <- err
+	}()
+	<-running
+
+	// 調べている最中に、同じ名前の別機種へ差し替わる。
+	alternative = "@device_pnp_newcomer"
+	b.Devices(context.Background())
+
+	close(release)
+	if err := <-answered; err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+
+	// 憶えていれば、掴んだ後もそれで答えてしまう。今そこにいるのは別のカメラ
+	// なので、それは他機種のモードを勧めることになる。
+	b.SetPaused(false)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("answered with the modes of the camera that was swapped out while they were being listed")
+	}
+}

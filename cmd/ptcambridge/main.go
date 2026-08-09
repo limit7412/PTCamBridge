@@ -452,17 +452,24 @@ func modeQueryName(d source.Device) string {
 // cameraModes は、カメラ 1 台のモードを、そのカメラだけの期限のもとで調べます。
 //
 // モードはカメラごとに ffmpeg を 1 回起動して調べます。デバイス一覧そのものに
-// 混ぜていないのは、設定画面がそれを定期的に読むからです (source.ListModes を
+// 混ぜていないのは、設定画面が開くたびにそれを読むからです (source.ListModes を
 // 参照)。ここは人が 1 回だけ叩くコマンドなので、その代金を払う価値があります。
 // 設定に書く値を探しているのは、まさにこれを実行している人だからです。
-func cameraModes(ffmpegPath string, d source.Device) ([]source.Mode, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), modeListTimeout)
+func cameraModes(parent context.Context, ffmpegPath string, d source.Device) ([]source.Mode, error) {
+	ctx, cancel := context.WithTimeout(parent, modeListTimeout)
 	defer cancel()
 	return listCameraModes(ctx, ffmpegPath, modeQueryName(d))
 }
 
 func listDevices(opts options) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Ctrl+C で降りられるようにします。ここは ffmpeg を何度も起動するサブコマンド
+	// で、常駐側と違って signal.NotifyContext をまだ作っていません。親が黙って
+	// 消えると、CREATE_NO_WINDOW で起動した ffmpeg にはコンソールの割り込みが
+	// 届かず、カメラを掴んだまま残り得ます (childproc_windows.go を参照)。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// ここでも設定を読む。ffmpeg を同梱せず source.uvc.ffmpeg_path で指している
@@ -485,7 +492,7 @@ func listDevices(opts options) error {
 		ffmpegPath = cfg.Source.UVC.FFmpegPath
 	}
 
-	cameras, err := source.ListDevices(ctx, ffmpegPath)
+	cameras, err := source.ListDevices(listCtx, ffmpegPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, p.S(i18n.CLINoDevices), err)
 	}
@@ -498,7 +505,7 @@ func listDevices(opts options) error {
 		if d.Alternative != "" {
 			fmt.Printf("    %s\n", d.Alternative)
 		}
-		modes, err := cameraModes(ffmpegPath, d)
+		modes, err := cameraModes(ctx, ffmpegPath, d)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "    %s %v\n", p.S(i18n.CLINoModes), err)
 			continue

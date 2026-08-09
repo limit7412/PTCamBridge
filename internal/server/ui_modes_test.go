@@ -983,6 +983,86 @@ console.log(JSON.stringify({whileSerial, afterSwitch: asked}));
 	}
 }
 
+// UVC をやめた後に届いた応答を、採り込んではいけません。
+//
+// 離れた時点で隠れた欄の拒否は解いてあります。そこへ古い応答が入ると、拒否が
+// 戻ってきます。見えない欄なので直しようがなく、別のソースの設定が保存できなく
+// なります。名前の照合だけでは足りません — 名前は離れても変わらないからです。
+func TestSettingsPageDropsTheAnswerThatArrivesAfterLeavingUVC(t *testing.T) {
+	harness := modesHarness + `
+// 応答に含まれない解像度。採り込めば必ず拒否になる。
+nodes["uvc-size"].value = "1920x1080";
+const inFlight = loadCameraModes();
+
+// 返ってくる前に別のソースへ移る。移った側の経路が拒否を解く。
+sourceType = "serial";
+await loadCameraModes();
+const afterSwitch = nodes["uvc-size"].invalid;
+
+release();
+await inFlight;
+console.log(JSON.stringify({afterSwitch, afterStaleAnswer: nodes["uvc-size"].invalid, kept: cameraModes.length}));
+`
+	var got struct {
+		AfterSwitch      string `json:"afterSwitch"`
+		AfterStaleAnswer string `json:"afterStaleAnswer"`
+		Kept             int    `json:"kept"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterSwitch != "" {
+		t.Fatalf("leaving uvc did not clear the refusal: %q", got.AfterSwitch)
+	}
+	if got.AfterStaleAnswer != "" {
+		t.Errorf("a hidden uvc field is blocking the form again after a late answer: %q", got.AfterStaleAnswer)
+	}
+	if got.Kept != 0 {
+		t.Errorf("kept %d modes of a camera the page no longer uses, want 0", got.Kept)
+	}
+}
+
+// 例外の側にも同じ判定が要ります。失敗を採り込むと、UVC を使っていない画面に
+// 「調べられませんでした」が出たままになります。
+func TestSettingsPageDropsTheFailureThatArrivesAfterLeavingUVC(t *testing.T) {
+	harness := `
+const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking", modesNoSize: "no size", modesNoRate: "no rate"};
+let sourceType = "uvc";
+globalThis.document = { querySelector: () => ({ value: sourceType }) };
+const field = (value) => ({ value, textContent: "", invalid: "", setCustomValidity(why) { this.invalid = why; } });
+const nodes = {"uvc-device": field("A"), "uvc-size": field(""), "uvc-framerate": field(""), "camera-modes": field("")};
+const el = (id) => nodes[id] || (nodes[id] = field(""));
+const listed = {"camera-sizes": [], "camera-framerates": []};
+const options = (id, values) => { listed[id] = values; };
+
+let pending = [];
+const release = () => { const waiting = pending; pending = []; for (const reject of waiting) reject(new Error("boom")); };
+globalThis.fetch = async () => {
+  await new Promise((resolve, reject) => { pending.push(reject); });
+};
+
+const inFlight = loadCameraModes();
+sourceType = "serial";
+await loadCameraModes();
+nodes["camera-modes"].textContent = "";
+release();
+await inFlight;
+console.log(JSON.stringify({said: nodes["camera-modes"].textContent}));
+`
+	var got struct {
+		Said string `json:"said"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if got.Said != "" {
+		t.Errorf("reported %q about a camera the page no longer uses", got.Said)
+	}
+}
+
 // フォームを書き直したら、候補も取り直さなければなりません。
 //
 // 代入では change も blur も起きません。読み込み時だけの話ではなく、保存のたびに

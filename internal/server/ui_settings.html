@@ -560,7 +560,9 @@ async function loadCameraModes() {
     const found = await response.json();
     // 名前が変わっていたら捨てる。入力欄は待っている間も動くので、古い応答で
     // 候補を書き換えると、今いる名前とは無関係なモードを勧めることになる。
-    if (found.device !== el("uvc-device").value.trim()) return;
+    // ソースも見る — UVC をやめた後に採り込むと、隠れた欄に拒否が戻り、
+    // 別のソースの設定が保存できなくなる。
+    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim()) return;
 
     cameraModes = found.modes || [];
     if (found.error) {
@@ -574,7 +576,7 @@ async function loadCameraModes() {
     // 成功の側と同じ判定。古い要求が転んだからといって、今のカメラについて
     // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
     // B の候補は次に入力の合図が来るまで戻らない。
-    if (device !== el("uvc-device").value.trim()) return;
+    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim()) return;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {

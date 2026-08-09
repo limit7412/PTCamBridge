@@ -342,7 +342,7 @@ func TestCameraModesGivesEachCameraItsOwnDeadline(t *testing.T) {
 	t.Cleanup(func() { listCameraModes = prev })
 
 	for _, name := range []string{"Bigeye", "Slowpoke"} {
-		if _, err := cameraModes("", source.Device{Name: name}); err != nil {
+		if _, err := cameraModes(context.Background(), "", source.Device{Name: name}); err != nil {
 			t.Fatalf("cameraModes(%q): %v", name, err)
 		}
 	}
@@ -352,5 +352,25 @@ func TestCameraModesGivesEachCameraItsOwnDeadline(t *testing.T) {
 	if !deadlines[1].After(deadlines[0]) {
 		t.Errorf("the second camera's deadline (%v) is not later than the first's (%v), so they share one budget",
 			deadlines[1], deadlines[0])
+	}
+}
+
+// 列挙は、親の期限も継がなければならない。
+//
+// -list-devices は 1 台ごとに ffmpeg を起こす。Ctrl+C で降りたときにそれが
+// 止まらないと、CREATE_NO_WINDOW で起こした子にはコンソールの割り込みが届かない
+// ので、カメラを掴んだまま残り得る (childproc_windows.go を参照)。
+func TestCameraModesFollowsTheParentContext(t *testing.T) {
+	prev := listCameraModes
+	listCameraModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listCameraModes = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cameraModes(ctx, "", source.Device{Name: "Bigeye"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("cameraModes with a cancelled parent = %v, want it to end with the parent", err)
 	}
 }
