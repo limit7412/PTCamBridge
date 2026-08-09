@@ -398,10 +398,12 @@ el("settings").addEventListener("submit", async (event) => {
 for (const radio of document.querySelectorAll('input[name="source-type"]')) {
   radio.addEventListener("change", () => {
     showSource(radio.value);
-    // UVC を選んだ、まさにその瞬間が、そのカメラを調べてよくなる瞬間。
-    // loadCameraModes は他のソースでは何もしないので、ここで呼ばなければ、
-    // 切り替えた人はカメラ名の欄に触るまで候補を見られない。
-    if (radio.value === "uvc") loadCameraModes();
+    // どのソースを選んでも呼ぶ。UVC を選んだ瞬間は、そのカメラを調べてよくなる
+    // 瞬間 — ここで呼ばなければ、切り替えた人はカメラ名の欄に触るまで候補を
+    // 見られない。UVC をやめた瞬間は、隠れた欄の拒否を解く瞬間 — 解かなければ、
+    // 見えない欄のせいで保存そのものが始まらない。どちらの判断も
+    // loadCameraModes の中にある。
+    loadCameraModes();
   });
 }
 

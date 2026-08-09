@@ -3551,6 +3551,72 @@ func TestCameraModesRechecksTheReservationWhenItRegisters(t *testing.T) {
 	}
 }
 
+// 同じ 1 台は、どちらの名前で指されても同じ列挙として数えなければならない。
+//
+// 画面は "@device_pnp_..." でも訊けるので、打たれた文字列をそのまま鍵にすると、
+// 別々の鍵で同じカメラを 2 回開く。画面が代替名で調べている最中に Apply が
+// フレンドリ名で起動する、という形が実際に起こる。
+func TestCameraModesCountsBothNamesOfACameraAsOne(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	// 顔ぶれを数えておく。素性はここから引く。
+	b.Devices(context.Background())
+	b.SetPaused(true)
+
+	// 画面は代替名で調べている。
+	go b.CameraModes(context.Background(), "@device_pnp_bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	// キャプチャはフレンドリ名で起動する。走っている列挙を見つけられなければ、
+	// 手放させないまま開きに行く。
+	resumed := make(chan error, 1)
+	go func() { resumed <- b.SetPaused(false) }()
+
+	early := false
+	select {
+	case err := <-resumed:
+		early = true
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		t.Error("capture started without taking the camera from the lookup running under the other name")
+	case <-time.After(50 * time.Millisecond):
+		// 起動は列挙が手放すのを待っている。これが正しい。
+	}
+
+	close(release)
+	if !early {
+		if err := <-resumed; err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened the camera %d times, want 1", got)
+	}
+}
+
 // 初めて数えた顔ぶれは、変化ではない。
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、

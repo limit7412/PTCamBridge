@@ -744,6 +744,19 @@ console.log(JSON.stringify({refused, fixed, afterSwitch: nodes["uvc-framerate"].
 	}
 }
 
+// ソースを切り替えたら、どちらへ切り替えても loadCameraModes を通さなければ
+// なりません。UVC を選んだ瞬間はそのカメラを調べてよくなる瞬間であり、UVC を
+// やめた瞬間は隠れた欄の拒否を解く瞬間です。どちらの判断も中にあります。
+func TestSettingsPageRunsTheModeLogicOnEverySourceChange(t *testing.T) {
+	body := settingsFunction(t, `for (const radio of document.querySelectorAll('input[name="source-type"]')) {`)
+	if strings.Contains(body, `if (radio.value === "uvc") loadCameraModes()`) {
+		t.Error("the source switch must call loadCameraModes for every source; the branch that clears the refusals lives inside it")
+	}
+	if !strings.Contains(body, "loadCameraModes();") {
+		t.Error("the source switch does not run the mode logic at all")
+	}
+}
+
 // フレームレートの欄も、打っている最中に聞いていなければなりません。聞かなければ、
 // 直しても拒否が残り、解像度を触るまで保存できません。
 func TestSettingsPageListensToTheFramerateField(t *testing.T) {

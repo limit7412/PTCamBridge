@@ -325,7 +325,7 @@ func (b *Bridge) stopLookups() {
 // 巻き戻ります — どちらかが譲るなら、譲るのは列挙の側です。
 func (b *Bridge) cancelListing(device string) {
 	b.modesMu.Lock()
-	call, running := b.listing[strings.ToLower(device)]
+	call, running := b.listing[b.lookupKeyLocked(device)]
 	if running {
 		call.cancel()
 	}
@@ -970,9 +970,8 @@ func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode,
 // ffmpeg が 2 本向かいます。排他的なデバイスなので、その 2 本は互いを失敗させ得ます。
 // 開くのはこちらなので、抑止もこちらに要ります。
 func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mode, error) {
-	key := strings.ToLower(device)
-
 	b.modesMu.Lock()
+	key := b.lookupKeyLocked(device)
 	if b.lookupsStopped {
 		b.modesMu.Unlock()
 		return nil, errors.New("uvc: PTCamBridge is shutting down")
@@ -987,7 +986,7 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	// 予約していることがあります (launchLocked は予約してから cancelListing で
 	// modesMu を取ります)。ここで見なければ、その予約をすり抜けた列挙が 1 本
 	// 登録され、起動と取り合います。
-	if exclusiveCameraAccess && b.capturing(device) {
+	if exclusiveCameraAccess && b.openingLocked(device) {
 		b.modesMu.Unlock()
 		return nil, fmt.Errorf("uvc: PTCamBridge is opening %s right now", device)
 	}
@@ -1006,10 +1005,12 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 		b.listing = make(map[string]*modeLookup)
 	}
 	b.listing[key] = call
+	// 数えるのは登録と同じロックの下です。解いた後に足すと、その隙間に入った
+	// Stop が「走っているものは無い」と見て待ち終え、その後で列挙が始まります。
+	b.listingWG.Add(1)
 	b.modesMu.Unlock()
 
 	ffmpegPath := b.Snapshot().Source.UVC.FFmpegPath
-	b.listingWG.Add(1)
 	go func() {
 		defer b.listingWG.Done()
 		defer cancel()
@@ -1057,6 +1058,43 @@ func (b *Bridge) capturing(device string) bool {
 		return false
 	}
 	return strings.EqualFold(v.cfg.Source.UVC.Device, device)
+}
+
+// lookupKeyLocked は、走っている列挙を数えるときの鍵です。呼び出し側が modesMu を
+// 保持します。
+//
+// 同じ 1 台をフレンドリ名でも "@device_pnp_..." でも指せるので、打たれた文字列を
+// そのまま鍵にすると、別々の鍵で同じカメラを 2 回開きます。画面が代替名で調べて
+// いる最中に Apply がフレンドリ名で起動する、という形が実際に起こります。素性は
+// 顔ぶれを数えたときに両方から引けるようにしてあるので、それを使います
+// (forgetModesIfCamerasChanged を参照)。
+//
+// 一覧に無い名前は、打たれたまま小文字にして使います。知らないものを勝手に
+// 束ねることはできません。
+func (b *Bridge) lookupKeyLocked(device string) string {
+	name := strings.ToLower(device)
+	if identity, ok := b.identities[name]; ok {
+		return identity
+	}
+	return name
+}
+
+// openingLocked は、今まさに開こうとしているカメラかどうかを、素性まで見て
+// 答えます。呼び出し側が modesMu を保持します。
+//
+// capturing は名前を突き合わせるだけなので、設定がフレンドリ名を持ち、画面が
+// "@device_pnp_..." で訊いた (あるいはその逆の) ときにすり抜けます。ここは
+// 列挙を登録する直前 — すり抜けたものが実際にカメラを開く場所 — なので、
+// 素性で見ます。
+func (b *Bridge) openingLocked(device string) bool {
+	if b.capturing(device) {
+		return true
+	}
+	v := b.view.Load()
+	if v.opening == "" || device == "" {
+		return false
+	}
+	return b.lookupKeyLocked(v.opening) == b.lookupKeyLocked(device)
 }
 
 // rememberModes / recallModes は、列挙に成功した答えを憶え、思い出します。
