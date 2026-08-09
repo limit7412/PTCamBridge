@@ -354,7 +354,7 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 			// いません。ERROR で「ソースを起動できなかった」と書くと、終了のたびに
 			// 記録が 2 行残り、後からログを読む人はカメラを疑うことになります。
 			// 巻き戻しはどちらでも同じように行います。違うのは何と呼ぶかだけです。
-			if errors.Is(err, context.Canceled) {
+			if requestEnded(err) {
 				b.log.Info("the request ended before the new settings could be verified, reverting", "error", err)
 			} else {
 				b.log.Error("new settings could not start a source, reverting", "error", err)
@@ -1027,6 +1027,17 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	b.proven = true
 	b.log.Info("source started", "source", drv.Name())
 	return nil
+}
+
+// requestEnded は、この失敗が「待っていた相手が居なくなった」ことによるものかどうかを
+// 返します。
+//
+// コンテキストの終わり方は 2 つあり、どちらもカメラについては何も語りません。
+// キャンセルは呼び出し側が去ったかアプリが終了した場合、期限切れは呼び出し側が
+// 待つ時間を先に決めていた場合です。前者だけを見ていると、期限を付けた
+// クライアント — HTTP のタイムアウトはその形 — がソースの失敗として記録されます。
+func requestEnded(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // verifyOutcome は、変更を求めたリクエストとブリッジ自身がまだ健在かを踏まえて、

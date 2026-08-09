@@ -2936,7 +2936,8 @@ func TestVerifyOutcomeCarriesTheCancellation(t *testing.T) {
 		requestErr error
 		shutdown   error
 	}{
-		{name: "the request ended", requestErr: context.Canceled},
+		{name: "the request was cancelled", requestErr: context.Canceled},
+		{name: "the request ran out of time", requestErr: context.DeadlineExceeded},
 		{name: "the bridge is shutting down", shutdown: context.Canceled},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2944,8 +2945,8 @@ func TestVerifyOutcomeCarriesTheCancellation(t *testing.T) {
 			if err == nil {
 				t.Fatal("verifyOutcome = nil, want the frame rejected")
 			}
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("error = %v, want it to carry the cancellation", err)
+			if !requestEnded(err) && !errors.Is(err, context.Canceled) {
+				t.Errorf("error = %v, want it to carry why nobody is waiting any more", err)
 			}
 		})
 	}
@@ -2954,5 +2955,34 @@ func TestVerifyOutcomeCarriesTheCancellation(t *testing.T) {
 	err := verifyOutcome("mjpeg", errors.New("not a JPEG"), nil, nil)
 	if errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want a real failure kept apart from a cancellation", err)
+	}
+}
+
+// コンテキストの終わり方は 2 つあり、どちらもカメラについては何も語らない。
+// キャンセルだけを見ていると、期限を付けたクライアント — HTTP のタイムアウトは
+// その形 — がソースの失敗として記録される。
+func TestRequestEndedCoversBothWaysAContextEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "cancelled", err: context.Canceled, want: true},
+		{name: "out of time", err: context.DeadlineExceeded, want: true},
+		{
+			name: "wrapped the way verifyStartLocked wraps it",
+			err:  fmt.Errorf("bridge: mjpeg was still starting when the request ended: %w", context.DeadlineExceeded),
+			want: true,
+		},
+		// 本当の失敗を巻き込んではいけない。これを降格すると、カメラが壊れていても
+		// ログには何も残らない。
+		{name: "a real failure", err: errors.New("uvc: no camera configured"), want: false},
+		{name: "no failure at all", err: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requestEnded(tc.err); got != tc.want {
+				t.Errorf("requestEnded(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

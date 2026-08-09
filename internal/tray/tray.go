@@ -217,9 +217,13 @@ func (q *commandQueue) close() { close(q.cmds) }
 // 後からログを読む人は最後の 2 行を見て、あるはずのない不具合を探すことになります。
 //
 // 黙って捨てもしません。要求は確かに行われず、それは debug で追える事実です。
+//
+// 期限切れも同じ扱いです。コンテキストの終わり方は 2 つあり、どちらもブリッジや
+// カメラについては何も語りません。今のところトレイが渡すのは期限の無いアプリの
+// コンテキストだけですが、片方しか見ていない判定は、期限が付いた日に黙ってずれます。
 func reportCommandFailure(log *slog.Logger, msg string, err error, args ...any) {
 	args = append(args, "error", err)
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		log.Debug(msg+" (the application was shutting down)", args...)
 		return
 	}

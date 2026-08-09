@@ -433,6 +433,19 @@ func TestShutdownDoesNotLookLikeAFailure(t *testing.T) {
 	}
 }
 
+// 期限切れもコンテキストの終わり方の 1 つで、ブリッジやカメラについては何も語らない。
+// 片方しか見ていない判定は、期限が付いた日に黙ってずれる。
+func TestARequestThatRanOutOfTimeIsNotAFailureEither(t *testing.T) {
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	reportCommandFailure(log, "could not switch source", fmt.Errorf("bridge: mjpeg was still starting when the request ended: %w", context.DeadlineExceeded), "source", "mjpeg")
+
+	if strings.Contains(logged.String(), "level=ERROR") {
+		t.Errorf("a request that ran out of time was reported as an error:\n%s", logged.String())
+	}
+}
+
 // 本当の失敗は今までどおり ERROR。中断と混ぜてはいけない。
 func TestARealFailureIsStillAnError(t *testing.T) {
 	var logged bytes.Buffer
