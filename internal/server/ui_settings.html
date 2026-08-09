@@ -307,21 +307,49 @@ function say(message, bad) {
   result.classList.toggle("bad", !!bad);
 }
 
+// getConfig は設定と、その版を返します。
+//
+// 版を一緒に返すのは、別々に読めないからです。設定を読んでから版を読むと、その
+// 隙間に入った変更のせいで、古い設定に新しい版が付きます。その組で条件を付けた
+// 保存は、防ぐはずの上書きをそのまま通します。
 async function getConfig() {
   const response = await fetch("/api/v1/config", { cache: "no-store" });
   if (!response.ok) throw new Error(response.status);
-  return await response.json();
+  return { cfg: await response.json(), revision: response.headers.get("ETag") || "" };
 }
 
 async function load() {
   try {
-    fill(await getConfig());
+    fill((await getConfig()).cfg);
     el("offline").style.display = "none";
     el("save").disabled = false;
   } catch (err) {
     el("offline").style.display = "block";
     el("save").disabled = true;
   }
+}
+
+// save は 1 回の PUT です。版を添えるのは、読んでから書くまでの間に別の
+// クライアントが確定させた変更を、黙って消さないためです。
+const save = (cfg, revision) => fetch("/api/v1/config", {
+  method: "PUT",
+  headers: revision
+    ? { "Content-Type": "application/json", "If-Match": revision }
+    : { "Content-Type": "application/json" },
+  body: JSON.stringify(cfg),
+});
+
+// conflictMessage は、こちらが土台にした設定と、いまの設定の違いを名前で並べます。
+//
+// 画面に無い項目 (追加ヘッダーなど) も版を進めるので、名前が 1 つも挙がらない
+// ことはあります。そのときも「何かが変わった」ことは言います — 黙って上書きするか
+// どうかを訊いている場面で、変わっていないかのように見せるわけにはいきません。
+function conflictMessage(mine, theirs) {
+  const changed = FIELDS
+    .filter((field) => JSON.stringify(at(mine, field.path)) !== JSON.stringify(at(theirs, field.path)))
+    .map((field) => field.path.join("."));
+  const what = changed.length ? TEXT.conflict + " " + changed.join(", ") : TEXT.conflictElse;
+  return what + "\n\n" + TEXT.conflictAsk;
 }
 
 el("settings").addEventListener("submit", async (event) => {
@@ -338,21 +366,39 @@ el("settings").addEventListener("submit", async (event) => {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
     // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
     // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
-    const cfg = await getConfig();
-    const now = readForm();
-    FIELDS.forEach((field, i) => {
-      if (now[i] !== baseline[i]) {
-        dirty.add(i);
-        put(cfg, field.path, now[i]);
-      }
-    });
+    let base = await getConfig();
+    // 重ねる前の写し。競合したときに「他の誰かが何を変えたか」を言うには、こちらが
+    // 土台にした設定が要ります。重ねた後の cfg と比べると、自分の変更まで数えます。
+    let theirs = JSON.parse(JSON.stringify(base.cfg));
+    const overlay = (cfg) => {
+      const now = readForm();
+      FIELDS.forEach((field, i) => {
+        if (now[i] !== baseline[i]) {
+          dirty.add(i);
+          put(cfg, field.path, now[i]);
+        }
+      });
+      return cfg;
+    };
+    const cfg = overlay(base.cfg);
 
     sent = true;
-    const response = await fetch("/api/v1/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cfg),
-    });
+    let response = await save(cfg, base.revision);
+    if (response.status === 412) {
+      // 読んでから書くまでの間に、別のクライアントが変更を確定させた。黙って
+      // 上書きはしない — それがこの条件を付けている理由そのもの。
+      const fresh = await getConfig();
+      if (!confirm(conflictMessage(theirs, fresh.cfg))) {
+        say(TEXT.conflictKept);
+        rebase(fresh.cfg, dirty);
+        return;
+      }
+      // 送り直すのは、取り直した設定に同じ変更を重ねたもの。さっきの本体をその
+      // まま投げ直すと、承知したはずの相手の変更を消すことになる。
+      base = fresh;
+      theirs = JSON.parse(JSON.stringify(fresh.cfg));
+      response = await save(overlay(fresh.cfg), fresh.revision);
+    }
     const text = await response.text();
     if (!response.ok) {
       // ブリッジの言葉をそのまま出す。どの項目が悪いかを名指ししているのは
@@ -361,7 +407,7 @@ el("settings").addEventListener("submit", async (event) => {
       // 失敗しても値が動作中の設定に入っていることはある。基準を取り直さないと、
       // 元へ戻す操作が変更として見えなくなる。rebase を参照。
       try {
-        rebase(await getConfig(), dirty);
+        rebase((await getConfig()).cfg, dirty);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }
@@ -385,7 +431,7 @@ el("settings").addEventListener("submit", async (event) => {
     // 取り直せばユーザーの編集を 1 つ残らずサーバの値で塗り潰すことになる。
     if (sent) {
       try {
-        rebase(await getConfig(), dirty);
+        rebase((await getConfig()).cfg, dirty);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }

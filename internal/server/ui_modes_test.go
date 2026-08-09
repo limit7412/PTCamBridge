@@ -1153,3 +1153,59 @@ func equalStrings(got, want []string) bool {
 	}
 	return true
 }
+
+// 保存には、土台にした設定の版を添えなければなりません。
+//
+// 設定は全体で 1 つの値として受け渡されるので、この画面は必ず「読んで、触った葉を
+// 重ねて、書く」という往復をします。その 2 つの要求の間に別のクライアントが変更を
+// 確定させても、条件を付けなければ誰にも分かりません。後から書いたこちらが黙って
+// 消します。
+func TestSettingsPageSendsTheVersionItBuiltTheChangeOn(t *testing.T) {
+	body := settingsFunction(t, "const save = (cfg, revision) => fetch(")
+	if !strings.Contains(body, `"If-Match": revision`) {
+		t.Error("the save request does not carry the version the change was built on")
+	}
+	if !strings.Contains(body, "revision\n    ?") && !strings.Contains(body, "revision ?") {
+		t.Error("the save request must still go through when there is no version to send")
+	}
+}
+
+// 412 は「読んでから書くまでの間に、別のクライアントが確定させた」ということです。
+// 黙って上書きしてはいけません — それがこの条件を付けている理由そのものです。
+// 何が変わったのかを伝えてから、送り直すかどうかを選ばせます。
+func TestSettingsPageAsksBeforeWritingOverSomeoneElsesChange(t *testing.T) {
+	body := settingsFunction(t, `el("settings").addEventListener("submit", async (event) => {`)
+	if !strings.Contains(body, "412") {
+		t.Fatal("the save flow does not notice that the settings moved on")
+	}
+	if !strings.Contains(body, "confirm(conflictMessage(") {
+		t.Error("the save flow overwrites someone else's change without asking")
+	}
+	// 送り直すのは、取り直した設定に同じ変更を重ねたもの。さっきの本体をそのまま
+	// 投げ直すと、承知したはずの相手の変更を消すことになる。
+	if !strings.Contains(body, "save(overlay(fresh.cfg), fresh.revision)") {
+		t.Error("the retry does not rebuild the change on top of the settings it just re-read")
+	}
+	if !strings.Contains(body, "rebase(fresh.cfg, dirty)") {
+		t.Error("declining the overwrite must leave the page showing the current settings with the user's edits")
+	}
+}
+
+// 何が変わったかを言うときに比べる相手は、こちらが土台にした設定です。重ねた後の
+// ものと比べると、自分の変更まで「相手が変えたもの」として数えます。
+func TestSettingsPageNamesOnlyTheSettingsSomeoneElseChanged(t *testing.T) {
+	body := settingsFunction(t, "function conflictMessage(mine, theirs) {")
+	if !strings.Contains(body, "TEXT.conflictElse") {
+		t.Error("a change to a setting this page does not show would be reported as no change at all")
+	}
+	if !strings.Contains(body, "field.path.join(\".\")") {
+		t.Error("the changed settings are not named")
+	}
+
+	// 重ねる前の写しを取っていること。JSON を通すのは、重ねる操作が土台の
+	// オブジェクトをその場で書き換えるため。
+	save := settingsFunction(t, `el("settings").addEventListener("submit", async (event) => {`)
+	if !strings.Contains(save, "JSON.parse(JSON.stringify(base.cfg))") {
+		t.Error("the page keeps no copy of what it built the change on, so it cannot say what someone else changed")
+	}
+}

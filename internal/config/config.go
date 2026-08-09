@@ -326,6 +326,19 @@ func LanguageWithoutLoading(path string, getenv func(string) string) i18n.Lang {
 // 違いが、管理 API とトレイまで届く間に失われません。
 var ErrNotSaved = errors.New("the settings are active but could not be saved")
 
+// AnyRevision は「版を問わない」ことを表します。条件を付けない呼び出し —
+// curl やトレイ — はこれを渡します。
+const AnyRevision uint64 = 0
+
+// ErrRevisionMismatch は、変更が土台にした設定が、もう動作中のものではないことを
+// 表します。
+//
+// 設定は全体で 1 つの値として受け渡されるので、呼び出し側は必ず「読んで、変えたい
+// 葉を重ねて、書く」という往復をします。その 2 つの要求の間に別のクライアントが
+// 変更を確定させると、後から書いた側が黙ってそれを消します。版を添えた要求だけが、
+// その消し方を拒めます。
+var ErrRevisionMismatch = errors.New("the settings changed since they were read")
+
 // Save は設定ファイルを書きます。必要ならフォルダも作ります。
 //
 // これは現在の設定をそのまま符号化したものなので、生成されたファイルが最初に持って

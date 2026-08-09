@@ -381,6 +381,10 @@ type fakeController struct {
 	modesErr   error
 	modesFor   string
 	modesCalls int
+	// revision は、この設定が何度目のものか。Apply が条件を見るのに使い、
+	// 通れば進める。askedRevision は最後に要求された条件。
+	revision      uint64
+	askedRevision uint64
 }
 
 func (c *fakeController) CameraModes(_ context.Context, device string) ([]source.Mode, error) {
@@ -391,14 +395,21 @@ func (c *fakeController) CameraModes(_ context.Context, device string) ([]source
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
 
+func (c *fakeController) Revised() (config.Config, uint64) { return c.cfg, c.revision }
+
 func (c *fakeController) Overridden() []string { return c.overridden }
 
-func (c *fakeController) Apply(_ context.Context, cfg config.Config) (config.Config, []string, error) {
+func (c *fakeController) Apply(_ context.Context, cfg config.Config, ifRevision uint64) (config.Config, []string, error) {
+	c.askedRevision = ifRevision
+	if ifRevision != config.AnyRevision && ifRevision != c.revision {
+		return c.cfg, nil, fmt.Errorf("%w: it was read at revision %d and is now at %d", config.ErrRevisionMismatch, ifRevision, c.revision)
+	}
 	if c.applyErr != nil {
 		return config.Config{}, nil, c.applyErr
 	}
 	c.cfg = cfg
 	c.applied = true
+	c.revision++
 	return c.cfg, c.deferred, nil
 }
 
@@ -1278,4 +1289,106 @@ func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
 	if got := ctrl.cfg.UI.Language; got != "en" {
 		t.Errorf("language = %q, want the explicit en", got)
 	}
+}
+
+// 設定は全体で 1 つの値として受け渡されるので、呼び出し側は「読んで、変えたい葉を
+// 重ねて、書く」という往復をする。その 2 つの要求の間に別のクライアントが変更を
+// 確定させても、条件を付けなければ誰にも分からない。後から書いた側が黙って消す。
+func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
+	ctrl := &fakeController{cfg: config.Default(), revision: 7}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	put := func(t *testing.T, ifMatch string) *http.Response {
+		t.Helper()
+		body, _ := json.Marshal(config.Default())
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+
+	t.Run("the version comes back with the settings", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v1/config")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		if got, want := resp.Header.Get("ETag"), `"7"`; got != want {
+			t.Errorf("ETag = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a stale version is refused", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `"6"`)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied even though the caller was working from an older version")
+		}
+	})
+
+	t.Run("the current version is accepted and a new one is issued", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `"7"`)
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("the settings were not applied")
+		}
+		// 応答にも版を載せる。載せなければ、続けて変更する呼び出し側は、自分が
+		// たった今起こした変更のためにもう一度読み直すことになる。
+		if got, want := resp.Header.Get("ETag"), `"8"`; got != want {
+			t.Errorf("ETag = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no condition is still accepted", func(t *testing.T) {
+		ctrl.applied, ctrl.askedRevision = false, 999
+		if resp := put(t, ""); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that asked for no condition was refused")
+		}
+		if ctrl.askedRevision != config.AnyRevision {
+			t.Errorf("asked for revision %d, want no condition", ctrl.askedRevision)
+		}
+	})
+
+	t.Run("* is accepted", func(t *testing.T) {
+		ctrl.applied = false
+		if resp := put(t, "*"); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if !ctrl.applied {
+			t.Error("If-Match: * was refused")
+		}
+	})
+
+	// 読めない条件は落とさずに断る。黙って落とすと、競合を防いだつもりの要求が、
+	// 防がないまま通る。
+	t.Run("an unreadable condition is refused", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `"not-a-revision"`)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied even though the condition could not be read")
+		}
+	})
 }

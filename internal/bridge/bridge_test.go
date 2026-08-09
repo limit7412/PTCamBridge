@@ -288,7 +288,7 @@ func TestBridgeApplyRevertsWhenTheNewSourceCannotStart(t *testing.T) {
 	broken.Source.Type = config.SourceUVC
 	broken.Source.UVC.Device = "" // no device: the driver refuses to build
 
-	if _, _, err := b.Apply(ctx, broken); err == nil {
+	if _, _, err := b.Apply(ctx, broken, config.AnyRevision); err == nil {
 		t.Fatal("expected Apply to fail for a source that cannot start")
 	}
 	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
@@ -330,7 +330,7 @@ func TestBridgeApplyRevertsWhenTheNewSourceFailsAsynchronously(t *testing.T) {
 	broken.Source.UVC.Device = "camera"
 	broken.Source.UVC.FFmpegPath = filepath.Join(t.TempDir(), "no-such-ffmpeg")
 
-	if _, _, err := b.Apply(ctx, broken); err == nil {
+	if _, _, err := b.Apply(ctx, broken, config.AnyRevision); err == nil {
 		t.Fatal("expected Apply to fail for a driver that cannot run")
 	}
 	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
@@ -371,7 +371,7 @@ func TestBridgeApplyReportsASaveFailure(t *testing.T) {
 	updated := b.Snapshot()
 	updated.Transform.Rotate = 180
 
-	_, _, err := b.Apply(ctx, updated)
+	_, _, err := b.Apply(ctx, updated, config.AnyRevision)
 	if !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("Apply error = %v, want one wrapping config.ErrNotSaved", err)
 	}
@@ -397,7 +397,7 @@ func TestBridgeApplyRejectsSettingsThatNeedARestart(t *testing.T) {
 	moved := b.Snapshot()
 	moved.Server.Listen = "127.0.0.1:19999"
 
-	_, deferred, err := b.Apply(ctx, moved)
+	_, deferred, err := b.Apply(ctx, moved, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestBridgeApplyReconfiguresTheStream(t *testing.T) {
 	updated := b.Snapshot()
 	updated.Server.Boundary = "othermark"
 	updated.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -466,7 +466,7 @@ func TestBridgeApplyPersistsSettings(t *testing.T) {
 
 	updated := b.Snapshot()
 	updated.Transform.Rotate = 180
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -484,7 +484,7 @@ func TestBridgeApplyRejectsInvalidSettings(t *testing.T) {
 
 	invalid := config.Default()
 	invalid.Server.Listen = "not-an-address"
-	if _, _, err := b.Apply(context.Background(), invalid); err == nil {
+	if _, _, err := b.Apply(context.Background(), invalid, config.AnyRevision); err == nil {
 		t.Fatal("expected invalid settings to be rejected")
 	}
 }
@@ -565,7 +565,7 @@ func TestBridgeApplyRevertsWhenTheNewSourceNeverDelivers(t *testing.T) {
 	broken := b.Snapshot()
 	broken.Source.MJPEG.URL = silent.URL
 
-	if _, _, err := b.Apply(ctx, broken); err == nil {
+	if _, _, err := b.Apply(ctx, broken, config.AnyRevision); err == nil {
 		t.Fatal("expected Apply to fail for a source that never produced a frame")
 	}
 	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
@@ -619,7 +619,7 @@ func TestBridgeApplyStopsWhenTheRequestIsCancelled(t *testing.T) {
 	broken.Source.MJPEG.URL = silent.URL
 
 	done := make(chan error, 1)
-	go func() { _, _, err := b.Apply(req, broken); done <- err }()
+	go func() { _, _, err := b.Apply(req, broken, config.AnyRevision); done <- err }()
 
 	select {
 	case err := <-done:
@@ -727,7 +727,7 @@ func TestBridgeApplyRollsBackASourceThatCameUpTooLate(t *testing.T) {
 	next.Source.MJPEG.URL = late.URL
 
 	done := make(chan error, 1)
-	go func() { _, _, err := b.Apply(req, next); done <- err }()
+	go func() { _, _, err := b.Apply(req, next, config.AnyRevision); done <- err }()
 
 	select {
 	case <-connected:
@@ -777,7 +777,7 @@ func TestBridgeApplyRejectsAnAlreadyCancelledRequest(t *testing.T) {
 	dead, cancelDead := context.WithCancel(context.Background())
 	cancelDead()
 
-	if _, _, err := b.Apply(dead, next); !errors.Is(err, context.Canceled) {
+	if _, _, err := b.Apply(dead, next, config.AnyRevision); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Apply error = %v, want context.Canceled", err)
 	}
 	if b.Snapshot().Server.HoldOnSourceLoss {
@@ -808,7 +808,7 @@ func TestBridgeApplyRejectsASourceSendingUndecodableFrames(t *testing.T) {
 	broken := b.Snapshot()
 	broken.Source.MJPEG.URL = hollow.URL
 
-	_, _, err := b.Apply(ctx, broken)
+	_, _, err := b.Apply(ctx, broken, config.AnyRevision)
 	if err == nil {
 		t.Fatal("expected a source with no decodable image to be refused")
 	}
@@ -871,7 +871,7 @@ func TestBridgeApplyValidatesTheDriverWhilePaused(t *testing.T) {
 	unbuildable.Source.Type = config.SourceUVC
 	unbuildable.Source.UVC.Device = "" // no device: the driver refuses to build
 
-	if _, _, err := b.Apply(ctx, unbuildable); err == nil {
+	if _, _, err := b.Apply(ctx, unbuildable, config.AnyRevision); err == nil {
 		t.Fatal("expected settings that cannot build a driver to be rejected while paused")
 	}
 	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
@@ -913,7 +913,7 @@ func TestBridgeApplyDoesNotRestartCaptureForServerOnlySettings(t *testing.T) {
 
 	updated := b.Snapshot()
 	updated.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply of a server-only change: %v", err)
 	}
 
@@ -961,7 +961,7 @@ func TestBridgeApplyRevertsWhenTheTransformDropsEveryFrame(t *testing.T) {
 	broken := b.Snapshot()
 	broken.Source.MJPEG.URL = huge.URL
 
-	if _, _, err := b.Apply(ctx, broken); err == nil {
+	if _, _, err := b.Apply(ctx, broken, config.AnyRevision); err == nil {
 		t.Fatal("expected Apply to fail when no frame survives the transform")
 	}
 	if got := b.Snapshot().Source.MJPEG.URL; got != good.URL {
@@ -1002,7 +1002,7 @@ func TestBridgeApplyFailsWhenShutdownInterruptsVerification(t *testing.T) {
 
 	unverified := b.Snapshot()
 	unverified.Source.MJPEG.URL = silent.URL
-	if _, _, err := b.Apply(ctx, unverified); err == nil {
+	if _, _, err := b.Apply(ctx, unverified, config.AnyRevision); err == nil {
 		t.Fatal("expected a shutdown during verification to fail the apply")
 	}
 
@@ -1043,7 +1043,7 @@ func TestBridgeApplySavesOnlyWhatChanged(t *testing.T) {
 	// まったく別のものを変更する。
 	updated := b.Snapshot()
 	updated.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -1081,7 +1081,7 @@ func TestBridgeApplySavesADeliberateChangeToAnOverriddenField(t *testing.T) {
 
 	updated := b.Snapshot()
 	updated.Source.UVC.Device = "picked in the tray"
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -1150,7 +1150,7 @@ func startWithAnUnwritableConfig(t *testing.T, ctx context.Context) (*Bridge, st
 
 	lost := b.Snapshot()
 	lost.Server.Boundary = "unwritable"
-	if _, _, err := b.Apply(ctx, lost); !errors.Is(err, config.ErrNotSaved) {
+	if _, _, err := b.Apply(ctx, lost, config.AnyRevision); !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("Apply error = %v, want config.ErrNotSaved", err)
 	}
 
@@ -1169,7 +1169,7 @@ func TestBridgeApplyRetryPersistsAChangeThatFailedToSave(t *testing.T) {
 	defer cancel()
 	b, path := startWithAnUnwritableConfig(t, ctx)
 
-	if _, _, err := b.Apply(ctx, b.Snapshot()); err != nil {
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err != nil {
 		t.Fatalf("retrying the same settings: %v", err)
 	}
 
@@ -1192,7 +1192,7 @@ func TestBridgeApplyCarriesAnUnsavedChangeIntoTheNextSave(t *testing.T) {
 
 	next := b.Snapshot()
 	next.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, next); err != nil {
+	if _, _, err := b.Apply(ctx, next, config.AnyRevision); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 
@@ -1242,7 +1242,7 @@ func TestBridgeApplyKeepsAnEditMadeToTheFileWhileRunning(t *testing.T) {
 	// そして再起動する前に、トレイから無関係なものを変更する。
 	updated := b.Snapshot()
 	updated.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -1295,7 +1295,7 @@ func TestBridgeApplyKeepsHeadersAddedToTheFileByHand(t *testing.T) {
 	// 編集より前のもの。
 	updated := b.Snapshot()
 	updated.Server.ExtraHeaders = map[string]string{"X-Original": "changed"}
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -1335,7 +1335,7 @@ func TestBridgeApplyRemovesAHeaderTheCallerDropped(t *testing.T) {
 
 	updated := b.Snapshot()
 	updated.Server.ExtraHeaders = map[string]string{"X-One": "1"}
-	if _, _, err := b.Apply(ctx, updated); err != nil {
+	if _, _, err := b.Apply(ctx, updated, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -1380,7 +1380,7 @@ func TestBridgeApplyRejectsASourceChangeWhilePaused(t *testing.T) {
 
 	next := b.Snapshot()
 	next.Source.MJPEG.URL = other.URL
-	if _, _, err := b.Apply(ctx, next); err == nil {
+	if _, _, err := b.Apply(ctx, next, config.AnyRevision); err == nil {
 		t.Fatal("expected a source change to be refused while paused")
 	}
 	if got := b.Snapshot().Source.MJPEG.URL; got != upstream.URL {
@@ -1415,7 +1415,7 @@ func TestBridgeApplyAllowsAServerChangeWhilePaused(t *testing.T) {
 
 	next := b.Snapshot()
 	next.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, next); err != nil {
+	if _, _, err := b.Apply(ctx, next, config.AnyRevision); err != nil {
 		t.Fatalf("Apply a server-only change while paused: %v", err)
 	}
 	if !b.Snapshot().Server.HoldOnSourceLoss {
@@ -1453,7 +1453,7 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 
 	next := b.Snapshot()
 	next.Server.HoldOnSourceLoss = true
-	_, _, err := b.Apply(ctx, next)
+	_, _, err := b.Apply(ctx, next, config.AnyRevision)
 	if !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("Apply error = %v, want config.ErrNotSaved", err)
 	}
@@ -1474,7 +1474,7 @@ func TestBridgeApplyWillNotOverwriteAnUnparsableFile(t *testing.T) {
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("Save the finished edit: %v", err)
 	}
-	if _, _, err := b.Apply(ctx, b.Snapshot()); err != nil {
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err != nil {
 		t.Fatalf("retry after the edit was finished: %v", err)
 	}
 	saved, err := config.LoadFile(path)
@@ -1546,7 +1546,7 @@ func TestBridgeApplyRestartsASourceThatDiedOnItsOwn(t *testing.T) {
 
 	// 原因に対処し、ユーザーが同じソースをもう一度選ぶ。
 	serving.Store(true)
-	if _, _, err := b.Apply(ctx, b.Snapshot()); err != nil {
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err != nil {
 		t.Fatalf("re-applying the same settings after a fatal stop: %v", err)
 	}
 	waitForFrame(t, frames, 5*time.Second)
@@ -1615,13 +1615,13 @@ func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 
 	first := b.Snapshot()
 	first.Server.Boundary = "first-change"
-	if _, _, err := b.Apply(ctx, first); !errors.Is(err, config.ErrNotSaved) {
+	if _, _, err := b.Apply(ctx, first, config.AnyRevision); !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("first Apply = %v, want config.ErrNotSaved", err)
 	}
 
 	second := b.Snapshot()
 	second.Server.HoldOnSourceLoss = true
-	if _, _, err := b.Apply(ctx, second); !errors.Is(err, config.ErrNotSaved) {
+	if _, _, err := b.Apply(ctx, second, config.AnyRevision); !errors.Is(err, config.ErrNotSaved) {
 		t.Fatalf("second Apply = %v, want config.ErrNotSaved", err)
 	}
 
@@ -1629,7 +1629,7 @@ func TestBridgeKeepsEveryUnsavedChangeWhileTheFileIsBroken(t *testing.T) {
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("repair the file: %v", err)
 	}
-	if _, _, err := b.Apply(ctx, b.Snapshot()); err != nil {
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err != nil {
 		t.Fatalf("Apply once the file is readable again: %v", err)
 	}
 
@@ -1923,7 +1923,7 @@ func TestApplyDefersALanguageChangeWhileRunning(t *testing.T) {
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
 
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -1958,7 +1958,7 @@ func TestApplyCanTakeBackADeferredChange(t *testing.T) {
 
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
-	if _, _, err := b.Apply(context.Background(), cfg); err != nil {
+	if _, _, err := b.Apply(context.Background(), cfg, config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	// 保存した値は読み返せる。見えないものは取り消せない。
@@ -1968,7 +1968,7 @@ func TestApplyCanTakeBackADeferredChange(t *testing.T) {
 
 	back := b.Snapshot()
 	back.UI.Language = before
-	if _, _, err := b.Apply(context.Background(), back); err != nil {
+	if _, _, err := b.Apply(context.Background(), back, config.AnyRevision); err != nil {
 		t.Fatalf("Apply (taking it back): %v", err)
 	}
 	saved, err := config.LoadFile(path)
@@ -2009,7 +2009,7 @@ func TestApplySavesStartupOnlyChangesWhileTheSourceIsBroken(t *testing.T) {
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
 	cfg.Log.Level = "debug"
-	_, deferred, err := b.Apply(ctx, cfg)
+	_, deferred, err := b.Apply(ctx, cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply while the source is broken: %v", err)
 	}
@@ -2050,7 +2050,7 @@ func TestApplyStillRestartsWhenNothingStartupOnlyMoved(t *testing.T) {
 	// 同じ設定をそのまま適用する。ドライバを起こし直そうとして、上流がまだ 404 な
 	// ので失敗するのが正しい。黙って成功を返せば、/healthz が 503 のままなのに
 	// 直ったことになる。
-	if _, _, err := b.Apply(ctx, b.Snapshot()); err == nil {
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err == nil {
 		t.Error("re-applying the same settings reported success without reviving the source")
 	}
 }
@@ -2071,7 +2071,7 @@ func TestDeferredNamesFollowWhatIsRunning(t *testing.T) {
 
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2083,7 +2083,7 @@ func TestDeferredNamesFollowWhatIsRunning(t *testing.T) {
 	// ならない。直前の設定と比べていると、ここで黙る。
 	next := b.Snapshot()
 	next.Server.HoldOnSourceLoss = !next.Server.HoldOnSourceLoss
-	_, deferred, err = b.Apply(context.Background(), next)
+	_, deferred, err = b.Apply(context.Background(), next, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply (unrelated change): %v", err)
 	}
@@ -2095,7 +2095,7 @@ func TestDeferredNamesFollowWhatIsRunning(t *testing.T) {
 	// 設定と比べていると、ここで逆に名前が出る。
 	back := b.Snapshot()
 	back.UI.Language = running
-	_, deferred, err = b.Apply(context.Background(), back)
+	_, deferred, err = b.Apply(context.Background(), back, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply (taking it back): %v", err)
 	}
@@ -2121,7 +2121,7 @@ func TestApplyDefersOnlyWhatItMust(t *testing.T) {
 	cfg.Server.HoldOnSourceLoss = !cfg.Server.HoldOnSourceLoss // 今すぐ効くもの
 	want := cfg.Server.HoldOnSourceLoss
 
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2237,7 +2237,7 @@ func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T
 
 	// 接続はするが何も届けない変更。検証はこれを拒否する。
 	silent := mjpegConfig(silentUpstream(t).URL)
-	_, _, err := b.Apply(ctx, silent)
+	_, _, err := b.Apply(ctx, silent, config.AnyRevision)
 	if err == nil {
 		t.Fatal("expected the silent upstream to fail verification")
 	}
@@ -2247,7 +2247,7 @@ func TestBridgeStaysReachableWhenTheSettingsItRevertsToNeverStarted(t *testing.T
 
 	// すべての目的はここ。別のソースを選べること。
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
-	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL), config.AnyRevision); err != nil {
 		t.Fatalf("could not switch to a working source afterwards: %v", err)
 	}
 	waitForFrame(t, frames, 5*time.Second)
@@ -2292,7 +2292,7 @@ func TestBridgeResumesEvenWhenTheSourceCannotStart(t *testing.T) {
 
 	// そして出口は開いている。動くソースを選べる。
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
-	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL), config.AnyRevision); err != nil {
 		t.Fatalf("could not switch to a working source after resuming: %v", err)
 	}
 }
@@ -2317,7 +2317,7 @@ func TestBridgeAcceptsASourceChangeWhilePausedWithNothingRunning(t *testing.T) {
 	}
 
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
-	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL), config.AnyRevision); err != nil {
 		t.Fatalf("changing source while paused with nothing running: %v", err)
 	}
 	if got := b.Snapshot().Source.Type; got != config.SourceMJPEG {
@@ -2354,7 +2354,7 @@ func TestBridgeStillRefusesASourceChangeWhilePausedWithAWorkingSource(t *testing
 	}
 
 	other := mjpegConfig(mjpegUpstream(t, testJPEG(t, 32, 32)).URL)
-	_, _, err := b.Apply(ctx, other)
+	_, _, err := b.Apply(ctx, other, config.AnyRevision)
 	if err == nil {
 		t.Fatal("a working source was traded for an unproven one while paused")
 	}
@@ -2397,7 +2397,7 @@ func TestBridgeAcceptsAChangeWhilePausedAfterTheSourceDiedOnItsOwn(t *testing.T)
 	}
 
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
-	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL)); err != nil {
+	if _, _, err := b.Apply(ctx, mjpegConfig(working.URL), config.AnyRevision); err != nil {
 		t.Fatalf("changing source while paused after the old one died: %v", err)
 	}
 	if err := b.SetPaused(false); err != nil {
@@ -2428,7 +2428,7 @@ func TestBridgeKeepsTheDiagnosisWhenTheRevertCannotStartEither(t *testing.T) {
 		t.Fatal("the starting point has no diagnosis to keep")
 	}
 
-	if _, _, err := b.Apply(ctx, mjpegConfig(silentUpstream(t).URL)); err == nil {
+	if _, _, err := b.Apply(ctx, mjpegConfig(silentUpstream(t).URL), config.AnyRevision); err == nil {
 		t.Fatal("expected the silent upstream to fail verification")
 	}
 
@@ -2460,7 +2460,7 @@ func TestBridgeNamesTheNewSourceWhenItIsChangedWhilePaused(t *testing.T) {
 	if err := b.SetPaused(true); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	if _, _, err := b.Apply(ctx, mjpegConfig(mjpegUpstream(t, testJPEG(t, 32, 32)).URL)); err != nil {
+	if _, _, err := b.Apply(ctx, mjpegConfig(mjpegUpstream(t, testJPEG(t, 32, 32)).URL), config.AnyRevision); err != nil {
 		t.Fatalf("changing source while paused: %v", err)
 	}
 
@@ -2487,7 +2487,7 @@ func TestApplyReturnsTheSettlingConfigWithTheNames(t *testing.T) {
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
 
-	applied, deferred, err := b.Apply(context.Background(), cfg)
+	applied, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2536,7 +2536,7 @@ func TestApplyFlushesAnEarlierUnsavedChangeWhenTheSourceIsBroken(t *testing.T) {
 
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
-	if _, _, err := b.Apply(ctx, cfg); err == nil {
+	if _, _, err := b.Apply(ctx, cfg, config.AnyRevision); err == nil {
 		t.Fatal("saving to an unwritable path reported success")
 	}
 	b.mu.Lock()
@@ -2549,7 +2549,7 @@ func TestApplyFlushesAnEarlierUnsavedChangeWhenTheSourceIsBroken(t *testing.T) {
 
 	// 書ける場所に戻して同じ設定を送り直す。カメラはまだ壊れているので、この要求
 	// そのものは失敗する。それでも保留は書かれなければならない。
-	if _, _, err := b.Apply(ctx, b.Snapshot()); err == nil {
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err == nil {
 		t.Error("re-applying reported success while the source was still broken")
 	}
 	saved, err := config.LoadFile(path)
@@ -2588,7 +2588,7 @@ func TestSnapshotDoesNotShowAnUnverifiedSource(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, _, err := b.Apply(ctx, next); err == nil {
+		if _, _, err := b.Apply(ctx, next, config.AnyRevision); err == nil {
 			t.Error("a source that never sent a frame was accepted")
 		}
 	}()
@@ -2621,7 +2621,7 @@ func TestDeferredNamesFollowWhatWasSaved(t *testing.T) {
 	defer b.Stop()
 
 	// まず 1 度保存して、ファイルを作る。
-	if _, _, err := b.Apply(context.Background(), b.Snapshot()); err != nil {
+	if _, _, err := b.Apply(context.Background(), b.Snapshot(), config.AnyRevision); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -2638,7 +2638,7 @@ func TestDeferredNamesFollowWhatWasSaved(t *testing.T) {
 	// API からは無関係な項目だけを変える。
 	cfg := b.Snapshot()
 	cfg.Server.HoldOnSourceLoss = !cfg.Server.HoldOnSourceLoss
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2687,7 +2687,7 @@ func TestOverriddenSettingsAreNotPending(t *testing.T) {
 	// 食い違うが、次の起動でも環境変数が勝つので保留ではない。
 	cfg := b.Snapshot()
 	cfg.Server.HoldOnSourceLoss = !cfg.Server.HoldOnSourceLoss
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2721,7 +2721,7 @@ func TestOverriddenSettingsAreNotPendingEvenWithTheSameValue(t *testing.T) {
 
 	cfg := b.Snapshot()
 	cfg.UI.Language = "ja"
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2753,7 +2753,7 @@ func TestOverriddenLeavesDoNotHideTheirNeighbours(t *testing.T) {
 
 	cfg := b.Snapshot()
 	cfg.PaperTracker.WriteCache = true
-	_, deferred, err := b.Apply(context.Background(), cfg)
+	_, deferred, err := b.Apply(context.Background(), cfg, config.AnyRevision)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -2856,7 +2856,7 @@ func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
 	reqCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := b.Apply(reqCtx, mjpegConfig(silent.URL))
+		_, _, err := b.Apply(reqCtx, mjpegConfig(silent.URL), config.AnyRevision)
 		done <- err
 	}()
 	waitForVerify(t, connected)
@@ -2908,7 +2908,7 @@ func TestShuttingDownTheBridgeIsNotASourceFailure(t *testing.T) {
 	// 確実に通す形。
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := b.Apply(context.Background(), mjpegConfig(silent.URL))
+		_, _, err := b.Apply(context.Background(), mjpegConfig(silent.URL), config.AnyRevision)
 		done <- err
 	}()
 	waitForVerify(t, connected)
@@ -4286,5 +4286,116 @@ func TestCameraModesJoinsTheLookupRunningUnderTheOtherNameOfTheSameCamera(t *tes
 	}
 	if got := probes.Load(); got != 1 {
 		t.Errorf("opened the camera %d times, want 1", got)
+	}
+}
+
+// 版は「設定がどれか」を指す。動いたときだけ進める。
+//
+// 同じ設定をそのまま送り直すのは珍しくない — 死んだドライバを起こす手段でもあり、
+// 書けなかった保存のやり直しでもある。そのたびに進めると、何も変えていない要求が、
+// 他のクライアントの持っている版を無効にする。
+func TestApplyAdvancesTheRevisionOnlyWhenTheSettingsMove(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	_, first := b.Revised()
+	if first == config.AnyRevision {
+		t.Fatalf("revision = %d, want a value that can be used as a condition", first)
+	}
+
+	changed := b.Snapshot()
+	changed.Transform.Rotate = 180
+	if _, _, err := b.Apply(ctx, changed, config.AnyRevision); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	_, second := b.Revised()
+	if second == first {
+		t.Errorf("the revision did not move when the settings did (%d)", second)
+	}
+
+	if _, _, err := b.Apply(ctx, b.Snapshot(), config.AnyRevision); err != nil {
+		t.Fatalf("Apply the same settings: %v", err)
+	}
+	if _, third := b.Revised(); third != second {
+		t.Errorf("revision = %d after applying the same settings, want it to stay at %d", third, second)
+	}
+}
+
+// 条件が食い違えば、何もせずに断る。判定は適用と同じロックの下でなければならない。
+// 呼び出し側が先に版を読んで比べても、比べ終えてから適用するまでの間に別の変更が
+// 入る。
+func TestApplyRefusesAChangeBuiltOnSettingsThatMovedOn(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	// 2 つのクライアントが同じ設定を読む。
+	mine, read := b.Revised()
+	theirs := mine
+
+	// 相手が先に確定させる。
+	theirs.Transform.Rotate = 90
+	if _, _, err := b.Apply(ctx, theirs, read); err != nil {
+		t.Fatalf("the first change: %v", err)
+	}
+
+	// こちらは、もう動作中ではない設定を土台にしている。
+	mine.Transform.FlipH = true
+	_, _, err := b.Apply(ctx, mine, read)
+	if !errors.Is(err, config.ErrRevisionMismatch) {
+		t.Fatalf("Apply on a stale revision = %v, want config.ErrRevisionMismatch", err)
+	}
+	if got := b.Snapshot(); got.Transform.Rotate != 90 || got.Transform.FlipH {
+		t.Errorf("settings = %+v, want the first change kept and the second refused", got.Transform)
+	}
+
+	// 取り直せば通る。
+	fresh, now := b.Revised()
+	fresh.Transform.FlipH = true
+	if _, _, err := b.Apply(ctx, fresh, now); err != nil {
+		t.Fatalf("Apply after re-reading: %v", err)
+	}
+	if got := b.Snapshot(); got.Transform.Rotate != 90 || !got.Transform.FlipH {
+		t.Errorf("settings = %+v, want both changes", got.Transform)
+	}
+}
+
+// 巻き戻る変更は、他のクライアントが読んだ設定を古くしない。
+func TestApplyDoesNotAdvanceTheRevisionWhenItRollsBack(t *testing.T) {
+	upstream := mjpegUpstream(t, testJPEG(t, 16, 16))
+	b := New(mjpegConfig(upstream.URL), "", hub.New(), status.New(), discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+
+	_, before := b.Revised()
+
+	// 1 フレームも返さないソース。検証に落ちて巻き戻る。
+	if _, _, err := b.Apply(ctx, mjpegConfig(silentUpstream(t).URL), config.AnyRevision); err == nil {
+		t.Fatal("expected the settings that cannot start a source to be refused")
+	}
+	if _, after := b.Revised(); after != before {
+		t.Errorf("revision = %d after a change that rolled back, want it to stay at %d", after, before)
+	}
+
+	// 前に読んだ版は、まだ使える。
+	fresh := b.Snapshot()
+	fresh.Transform.Rotate = 270
+	if _, _, err := b.Apply(ctx, fresh, before); err != nil {
+		t.Errorf("a version read before a rolled-back change is no longer accepted: %v", err)
 	}
 }

@@ -416,6 +416,10 @@ func uiText(p i18n.Printer) map[string]string {
 		"saved":          i18n.UISaved,
 		"savedPending":   i18n.UISavedPending,
 		"saveFailed":     i18n.UISaveFailed,
+		"conflict":       i18n.UIConflict,
+		"conflictElse":   i18n.UIConflictElse,
+		"conflictAsk":    i18n.UIConflictAsk,
+		"conflictKept":   i18n.UIConflictKept,
 		"getFFmpeg":      i18n.UIGetFFmpeg,
 	}
 	text := make(map[string]string, len(keys))
