@@ -1009,8 +1009,14 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	case <-b.root.Done():
 		// 停止中であることは、何かが機能する証拠ではない。ここで成功を報告すると、
 		// 誰も検証していない設定が保存され、次回の実行はその上で始まる。
+		//
+		// 原因を包むのは、これが「中断であって失敗ではない」と呼び出し側が判断
+		// できるようにするため。トレイからの切替は Start と同じコンテキストを渡すので、
+		// 終了時には verifyCtx.Done() とこの case が同時に準備完了になり、select は
+		// どちらを選んでもおかしくない。片方だけが context.Canceled を運んでいると、
+		// 正常な終了が半分の確率で ERROR として記録される。
 		b.stopLocked()
-		return errors.New("bridge: shutting down before the new source produced a frame")
+		return fmt.Errorf("bridge: shutting down before %s produced a frame: %w", drv.Name(), b.root.Err())
 	}
 
 	if err := verifyOutcome(drv.Name(), frameErr, verifyCtx.Err(), b.root.Err()); err != nil {
@@ -1043,7 +1049,10 @@ func verifyOutcome(name string, frameErr, requestErr, shutdownErr error) error {
 	if shutdownErr != nil {
 		// ブリッジが止まる直前に実力を示した設定も、結局その上で何も動いていない
 		// 設定であり、次の起動は未検証のままそれで立ち上がることになる。
-		return errors.New("bridge: shutting down as the new source produced its first frame")
+		//
+		// 上の case と同じ理由で原因を包む。終了の経路がどれも同じ分類になって
+		// いなければ、呼び出し側は「中断」と「本当の失敗」を見分けられない。
+		return fmt.Errorf("bridge: shutting down as %s produced its first frame: %w", name, shutdownErr)
 	}
 	return nil
 }

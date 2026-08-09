@@ -2835,3 +2835,81 @@ func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
 		t.Errorf("url = %q, want it back at %q", got, working.URL)
 	}
 }
+
+// 終了の経路は 2 つある。トレイからの Switch は Start と同じコンテキストを渡すので、
+// 終了時には verifyCtx.Done() と b.root.Done() が同時に準備完了になり、select は
+// どちらを選んでもおかしくない。片方だけが原因を運んでいると、正常な終了が半分の
+// 確率で ERROR として記録される。
+func TestShuttingDownTheBridgeIsNotASourceFailure(t *testing.T) {
+	shortenVerify(t, 5*time.Second)
+	working := mjpegUpstream(t, testJPEG(t, 32, 32))
+	silent := silentUpstream(t)
+
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	b := New(mjpegConfig(working.URL), "", hub.New(), status.New(), log)
+	root, shutdown := context.WithCancel(context.Background())
+	if err := b.Start(root); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer b.Stop()
+	waitFor(t, 5*time.Second, "the first source to prove itself", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.provenLocked()
+	})
+
+	// 要求そのものは生きたまま、ブリッジの方を止める。b.root.Done() の case を
+	// 確実に通す形。
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := b.Apply(context.Background(), mjpegConfig(silent.URL))
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	shutdown()
+
+	err := <-done
+	if err == nil {
+		t.Fatal("Apply reported success while the bridge was shutting down")
+	}
+	// 呼び出し側 — トレイの reportCommandFailure — が中断だと見分けられなければ、
+	// この経路を通った終了はやはり ERROR として記録される。
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to carry the cancellation so callers can tell it apart", err)
+	}
+	if strings.Contains(logged.String(), "level=ERROR") {
+		t.Errorf("shutting down was reported as a source failure:\n%s", logged.String())
+	}
+}
+
+// verifyOutcome は純粋関数なので、フレームと終了が同時に起きる — 実際に起こすのが
+// 難しい — 場合をここで直接押さえられる。
+func TestVerifyOutcomeCarriesTheCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		frameErr   error
+		requestErr error
+		shutdown   error
+	}{
+		{name: "the request ended", requestErr: context.Canceled},
+		{name: "the bridge is shutting down", shutdown: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyOutcome("mjpeg", tc.frameErr, tc.requestErr, tc.shutdown)
+			if err == nil {
+				t.Fatal("verifyOutcome = nil, want the frame rejected")
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("error = %v, want it to carry the cancellation", err)
+			}
+		})
+	}
+
+	// 本当の失敗は中断と混ざってはいけない。
+	err := verifyOutcome("mjpeg", errors.New("not a JPEG"), nil, nil)
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want a real failure kept apart from a cancellation", err)
+	}
+}
