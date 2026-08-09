@@ -3178,6 +3178,97 @@ func TestCameraModesForgetsWhatItLearnedWhenTheCamerasChange(t *testing.T) {
 	}
 }
 
+// 関係のないカメラが増えても、素性の変わっていないカメラの憶えは残さなければ
+// ならない。顔ぶれ全体で一致を見ると、1 台挿しただけで全部消える。そのとき今
+// キャプチャしているカメラはもう調べ直せないので、正しかった答えを二度と出せない。
+func TestCameraModesKeepsWhatItLearnedAboutTheCamerasThatDidNotChange(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	cameras := []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) { return cameras, nil }
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// 別のカメラを挿した。Bigeye は何も変わっていない。
+	cameras = append(cameras, source.Device{Name: "Webcam", Alternative: "@device_pnp_webcam"})
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("plugging in another camera threw away what Bigeye said: %v", err)
+	}
+}
+
+// 同じカメラを同時に訊かれても、開くのは 1 回でなければならない。
+//
+// 画面の側にも同じ抑止があるが、あちらが知っているのはそのページの中だけ。
+// タブを 2 つ開けば、同じカメラへ ffmpeg が 2 本向かう。開くのはこちらなので、
+// 抑止もこちらに要る。
+func TestCameraModesOpensACameraOnceForConcurrentCallers(t *testing.T) {
+	onWindowsCameraRules(t)
+	want := []source.Mode{{MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+
+	var calls atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return want, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	const callers = 4
+	got := make(chan []source.Mode, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			modes, err := b.CameraModes(context.Background(), "Bigeye")
+			got <- modes
+			errs <- err
+		}()
+	}
+
+	// 1 本目が走り出し、残りがその答えを待つところまで進めてから解放する。
+	// 先に解放すると 4 本が順番に走るだけで、重なりを一度も作らない。
+	<-started
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < callers-1 {
+		if time.Now().After(deadline) {
+			// 待っていないということは、それぞれが自分でカメラを開いたということ。
+			close(release)
+			t.Fatalf("only %d of %d callers waited for the running enumeration", b.listingWaitersForTest(), callers-1)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Errorf("CameraModes: %v", err)
+		}
+		if modes := <-got; !slices.Equal(modes, want) {
+			t.Errorf("modes = %v, want %v", modes, want)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("opened the camera %d times for %d concurrent callers, want 1", n, callers)
+	}
+}
+
 // 初めて数えた顔ぶれは、変化ではない。
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、

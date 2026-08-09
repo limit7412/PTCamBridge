@@ -479,11 +479,17 @@ async function loadDevices() {
 // modesLoading は今調べている最中の名前ぜんぶ。失敗を覚えない以上、これが無いと、
 // 入力欄から離れたときに change と blur の両方が同じ名前で入ってきて、同じ
 // カメラへ 2 本の ffmpeg を同時に走らせることになる。排他的なデバイスなので、
-// その 2 本は互いを失敗させ得る。
+// その 2 本は互いを失敗させ得る。1 つしか覚えないのでは足りない — A を待っている
+// 間に B へ変え、また A に戻せば、3 回目の A は上書きされた印をすり抜ける。
 //
-// 1 つしか覚えないのでは足りない。A を待っている間に B へ変え、また A に戻せば、
-// 3 回目の A は B に上書きされた印をすり抜ける。同時に走り得るのは、走っている
-// 数だけある。
+// modesFor は、今出ている候補がどのカメラのものか。候補を捨てるときは一緒に
+// 下ろす。下ろさないと、B を調べ始めた後に A へ戻った人が行き場を失う: A は
+// 「調べ済み」なので訊き直さず、候補は B のために消えたまま残る。
+//
+// カメラごとに結果を貯めておく手もあるが、取らない。名前は個体を指さないので、
+// 貯めた分にはブリッジ側と同じ無効化が要る (bridge.forgetModesIfCamerasChanged
+// を参照)。同じ判断を 2 つの言語で持つより、訊き直すほうが安い — 訊く先の
+// ブリッジは既に憶えていて、掴んでいるカメラならカメラを開かずに答える。
 let modesFor = null;
 const modesLoading = new Set();
 let cameraModes = [];
@@ -505,19 +511,17 @@ async function loadCameraModes() {
   const device = el("uvc-device").value.trim();
   if (device === modesFor || modesLoading.has(device)) return;
 
-  if (!device) {
-    modesFor = null;
-    cameraModes = [];
-    refreshModeChoices();
-    sayModes("");
-    return;
-  }
-
   // 前のカメラの候補はここで捨てる。列挙には 15 秒かかることがあり、その間ずっと
   // 前のカメラの解像度を選べたままにすると、今のカメラが持っていない組み合わせを
   // 保存できてしまう。
+  modesFor = null;
   cameraModes = [];
   refreshModeChoices();
+
+  if (!device) {
+    sayModes("");
+    return;
+  }
   sayModes(TEXT.modesLooking);
 
   modesLoading.add(device);
@@ -532,7 +536,6 @@ async function loadCameraModes() {
     cameraModes = found.modes || [];
     if (found.error) {
       // 調べられなかった。覚えないので、原因が直れば次の機会に効く。
-      modesFor = null;
       sayModes(TEXT.modesUnknown + " " + found.error);
     } else {
       modesFor = device;
@@ -543,7 +546,6 @@ async function loadCameraModes() {
     // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
     // B の候補は次に入力の合図が来るまで戻らない。
     if (device !== el("uvc-device").value.trim()) return;
-    modesFor = null;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {
@@ -600,15 +602,17 @@ function modeHasSize(m, size) {
 // 幅のあるモードなら間の整数が使えるので、上端を切り下げた値を出します。1 つの値
 // しか持たないモードが 29.97 なら、書ける整数はありません。近い整数を勧めると、
 // カメラが持っていないフレームレートを要求させることになります。
+//
+// 幅があっても、その間に整数があるとは限りません。29.5-29.7fps のようなモードでは
+// 切り下げも切り上げも範囲の外に出ます。丸めた後に、それが本当にそのモードの値か
+// どうかを見ます。
 function writableRates(m) {
   const out = [];
   const add = (n) => {
-    if (Number.isInteger(n) && n > 0 && !out.includes(String(n))) out.push(String(n));
+    if (!Number.isInteger(n) || n <= 0) return;
+    if (n < m.min_fps || n > m.max_fps) return;
+    if (!out.includes(String(n))) out.push(String(n));
   };
-  if (m.min_fps === m.max_fps) {
-    add(m.max_fps);
-    return out;
-  }
   add(Math.floor(m.max_fps));
   add(Math.ceil(m.min_fps));
   return out;

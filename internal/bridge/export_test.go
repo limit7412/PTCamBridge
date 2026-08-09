@@ -25,3 +25,15 @@ func (b *Bridge) saveBaseForTest() (config.Config, error) {
 	defer b.mu.Unlock()
 	return b.saveBaseLocked()
 }
+
+// listingWaitersForTest は、走っている列挙の答えを待っている呼び出しの数を返す。
+// 通常はロックの下にしか無い。
+func (b *Bridge) listingWaitersForTest() int {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	waiting := 0
+	for _, call := range b.listing {
+		waiting += call.waiting
+	}
+	return waiting
+}

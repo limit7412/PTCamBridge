@@ -114,12 +114,14 @@ console.log(JSON.stringify({
   exact: rates({min_size: "640x480", max_size: "640x480", min_fps: 30, max_fps: 30}),
   fractional: rates({min_size: "640x480", max_size: "640x480", min_fps: 29.97, max_fps: 29.97}),
   ranged: rates({min_size: "160x120", max_size: "1280x720", min_fps: 5, max_fps: 29.97}),
+  narrow: rates({min_size: "640x480", max_size: "640x480", min_fps: 29.5, max_fps: 29.7}),
 }));
 `
 	var got struct {
 		Exact      []string `json:"exact"`
 		Fractional []string `json:"fractional"`
 		Ranged     []string `json:"ranged"`
+		Narrow     []string `json:"narrow"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -134,6 +136,10 @@ console.log(JSON.stringify({
 	}
 	if want := []string{"29", "5"}; !equalStrings(got.Ranged, want) {
 		t.Errorf("framerates of a 5-29.97fps mode = %v, want %v", got.Ranged, want)
+	}
+	// 幅があっても、その間に整数があるとは限らない。切り下げも切り上げも外へ出る。
+	if len(got.Narrow) != 0 {
+		t.Errorf("framerates of a 29.5-29.7fps mode = %v, want none — neither end rounds into the range", got.Narrow)
 	}
 }
 
@@ -279,14 +285,16 @@ const options = (id, values) => { listed[id] = values; };
 let pending = [];
 const release = () => { const waiting = pending; pending = []; for (const resolve of waiting) resolve(); };
 let asked = 0;
-globalThis.fetch = async () => {
+globalThis.fetch = async (url) => {
   asked++;
+  // 訊かれたカメラについて答える。応答が返る頃の入力欄を見て答えると、答えが
+  // 勝手に「今のカメラのもの」になり、古さの判定を試せなくなる。
+  const device = decodeURIComponent(String(url).split("device=")[1]);
+  const size = device === "A" ? "640x480" : "1280x720";
   await new Promise((resolve) => { pending.push(resolve); });
   return { ok: true, json: async () => ({
-    device: nodes["uvc-device"].value,
-    modes: [{min_size: nodes["uvc-device"].value === "A" ? "640x480" : "1280x720",
-             max_size: nodes["uvc-device"].value === "A" ? "640x480" : "1280x720",
-             min_fps: 30, max_fps: 30}],
+    device,
+    modes: [{min_size: size, max_size: size, min_fps: 30, max_fps: 30}],
   }) };
 };
 `
@@ -403,6 +411,60 @@ console.log(JSON.stringify({started, afterA}));
 	}
 	if got.AfterA != 2 {
 		t.Errorf("started %d lookups in total, want the one still running to keep its mark", got.AfterA)
+	}
+}
+
+// 前のカメラへ戻ったら、候補も戻らなければなりません。
+//
+// B を調べ始めた時点で A の候補は消えます。そこで A へ戻ったとき「A は調べ済み」
+// として何もしないと、入力欄は A なのに候補は空、表示は「調べています…」のまま
+// 取り残されます (B の応答は名前が違うので捨てられます)。
+func TestSettingsPageBringsBackTheCandidatesWhenTheCameraComesBack(t *testing.T) {
+	harness := modesHarness + `
+// A を調べ終える。
+const a = loadCameraModes();
+release();
+await a;
+const afterA = listed["camera-sizes"];
+
+// B を調べ始める。ここで A の候補は消える。
+nodes["uvc-device"].value = "B";
+const b = loadCameraModes();
+const duringB = listed["camera-sizes"];
+
+// A へ戻る。
+nodes["uvc-device"].value = "A";
+const back = loadCameraModes();
+release();
+await Promise.all([b, back]);
+console.log(JSON.stringify({
+  afterA, duringB,
+  backSizes: listed["camera-sizes"],
+  said: nodes["camera-modes"].textContent,
+}));
+`
+	var got struct {
+		AfterA    []string `json:"afterA"`
+		DuringB   []string `json:"duringB"`
+		BackSizes []string `json:"backSizes"`
+		Said      string   `json:"said"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"640x480"}; !equalStrings(got.AfterA, want) {
+		t.Fatalf("sizes after looking up A = %v, want %v", got.AfterA, want)
+	}
+	if len(got.DuringB) != 0 {
+		t.Fatalf("sizes while looking up B = %v, want A's candidates gone", got.DuringB)
+	}
+	if want := []string{"640x480"}; !equalStrings(got.BackSizes, want) {
+		t.Errorf("sizes after coming back to A = %v, want %v", got.BackSizes, want)
+	}
+	if got.Said == "looking" {
+		t.Errorf("the page is still saying %q after coming back to A", got.Said)
 	}
 }
 

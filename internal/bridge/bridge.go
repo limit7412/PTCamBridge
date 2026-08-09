@@ -106,13 +106,13 @@ type Bridge struct {
 	view atomic.Pointer[view]
 
 	// modes は、列挙に成功したカメラのモードを、名前 (小文字化したもの) ごとに
-	// 憶えたものです。CameraModes を参照。
-	modesMu sync.Mutex
-	modes   map[string][]source.Mode
-	// cameras は、最後に列挙できたカメラの顔ぶれです。camerasKnown は、それを
-	// 一度でも列挙できたかどうか。forgetModesIfCamerasChanged を参照。
-	cameras      string
-	camerasKnown bool
+	// 憶えたものです。identities は、最後に数えた顔ぶれ — 名前と
+	// "@device_pnp_..." のそれぞれから、その 1 台の素性を引きます。listing は
+	// 今走っている列挙です。CameraModes を参照。
+	modesMu    sync.Mutex
+	modes      map[string]modeMemory
+	identities map[string]string
+	listing    map[string]*modeLookup
 
 	mu      sync.Mutex
 	cfg     config.Config
@@ -159,6 +159,24 @@ type Bridge struct {
 type pendingSave struct {
 	want config.Config
 	from config.Config
+}
+
+// modeMemory は、1 台のカメラについて憶えたモードと、憶えたときのその個体の
+// 素性です。素性は「同じカメラかどうか」を後から言えるようにするためだけにあります。
+type modeMemory struct {
+	modes    []source.Mode
+	identity string
+}
+
+// modeLookup は、走っている列挙 1 つと、その答えを待っている側への受け渡しです。
+// modes と err は done を閉じる前に書き、閉じた後は読むだけです。
+type modeLookup struct {
+	done chan struct{}
+	// waiting は、この 1 本の答えを待っている呼び出しの数です。modesMu の下で
+	// 数えます。
+	waiting int
+	modes   []source.Mode
+	err     error
 }
 
 // view は、呼び出し側が読むだけで決して変更しないもののロックフリーな写しです。
@@ -869,7 +887,7 @@ func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode,
 		return nil, fmt.Errorf("uvc: PTCamBridge is capturing %s right now and a UVC camera cannot be opened twice, so pause capture from the tray to look at its modes", device)
 	}
 
-	modes, err := listModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
+	modes, err := b.listModesOnce(ctx, device)
 	if err == nil {
 		b.rememberModes(device, modes)
 		return modes, nil
@@ -882,6 +900,48 @@ func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode,
 		return modes, nil
 	}
 	return nil, err
+}
+
+// listModesOnce は、1 台のカメラについて同時に 1 つだけ列挙を走らせます。
+// 同じカメラを訊いている他の呼び出しは、その 1 つの答えを待って共有します。
+//
+// 画面の側にも同じ抑止がありますが、あちらが知っているのはそのページの中だけです。
+// 設定画面を 2 つのタブで開く、あるいは管理 API を並べて叩くと、同じカメラへ
+// ffmpeg が 2 本向かいます。排他的なデバイスなので、その 2 本は互いを失敗させ得ます。
+// 開くのはこちらなので、抑止もこちらに要ります。
+func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mode, error) {
+	key := strings.ToLower(device)
+
+	b.modesMu.Lock()
+	if call, ok := b.listing[key]; ok {
+		call.waiting++
+		b.modesMu.Unlock()
+		select {
+		case <-call.done:
+			// 先に走っている方の答えをそのまま使う。写しを渡すのは、憶えと同じ
+			// 理由 — 待っていた全員が同じ 1 本を書き換え合わないため。
+			return slices.Clone(call.modes), call.err
+		case <-ctx.Done():
+			// こちらの要求だけが終わった。走っている列挙は他の待ち手のもの。
+			return nil, ctx.Err()
+		}
+	}
+	call := &modeLookup{done: make(chan struct{})}
+	if b.listing == nil {
+		b.listing = make(map[string]*modeLookup)
+	}
+	b.listing[key] = call
+	b.modesMu.Unlock()
+
+	modes, err := listModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
+
+	b.modesMu.Lock()
+	delete(b.listing, key)
+	b.modesMu.Unlock()
+	call.modes, call.err = modes, err
+	close(call.done)
+
+	return modes, err
 }
 
 // capturing は、名前で指定されたカメラを今このブリッジが握っているかどうかを
@@ -904,58 +964,71 @@ func (b *Bridge) rememberModes(device string, modes []source.Mode) {
 	b.modesMu.Lock()
 	defer b.modesMu.Unlock()
 	if b.modes == nil {
-		b.modes = make(map[string][]source.Mode)
+		b.modes = make(map[string]modeMemory)
 	}
-	b.modes[strings.ToLower(device)] = slices.Clone(modes)
+	key := strings.ToLower(device)
+	// 素性は、最後に数えた顔ぶれから引きます。載っていなければ空のまま —
+	// 次にそのカメラが一覧に現れたときに埋まります。forgetModesIfCamerasChanged
+	// を参照。
+	b.modes[key] = modeMemory{modes: slices.Clone(modes), identity: b.identities[key]}
 }
 
-// forgetModesIfCamerasChanged は、繋がっているカメラの顔ぶれが変わったら憶えを
-// 捨てます。
+// forgetModesIfCamerasChanged は、素性の変わったカメラの憶えだけを捨てます。
 //
 // モードが変わらないのは同じ 1 台についてだけです。憶えの鍵は名前ですが、名前は
 // 個体を指しません — "USB Camera" は次に挿した別機種にも付きます。抜き挿しで
 // 入れ替わったカメラに、前の機種のモードを勧め続けることになります。
 //
-// 個体の識別子で憶える方法は取っていません。CameraModes が受け取るのは画面が
+// 個体の識別子だけで憶える方法は取っていません。CameraModes が受け取るのは画面が
 // 打った名前だけで、そこから個体を引くにはデバイス一覧が要り、一覧は ffmpeg を
 // 1 回起動します。顔ぶれは既に — 設定画面が 5 秒ごとに読むこの経路で — 手元に
-// あるので、それを使います。
+// あるので、憶えるときにそこから素性を添えます。
+//
+// 捨てるのは素性が変わったものだけです。顔ぶれ全体で一致を見ると、無関係な
+// カメラを 1 台挿しただけで全部消えます。そのとき今キャプチャしているカメラは
+// もう調べ直せないので、正しかった答えを二度と出せなくなります。
 func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
-	seen := make([]string, 0, len(cameras))
+	// 名前でも "@device_pnp_..." でも引けるようにします。画面はどちらでも
+	// 訊けるので、憶えの鍵もどちらにもなり得ます。
+	identities := make(map[string]string, len(cameras)*2)
 	for _, c := range cameras {
-		seen = append(seen, c.Name+"\x00"+c.Alternative)
+		identity := c.Name + "\x00" + c.Alternative
+		identities[strings.ToLower(c.Name)] = identity
+		if c.Alternative != "" {
+			identities[strings.ToLower(c.Alternative)] = identity
+		}
 	}
-	// ffmpeg の並びに意味は無いので、並べ替えだけで顔ぶれが変わったことにしない。
-	slices.Sort(seen)
-	fingerprint := strings.Join(seen, "\x00\x00")
 
 	b.modesMu.Lock()
 	defer b.modesMu.Unlock()
-	// 初めて数えた顔ぶれは、変化ではありません。ここで捨てると、設定画面が
-	// 5 秒ごとに読むこの経路が、憶えたものを最初の 1 回で流します。
-	if !b.camerasKnown {
-		b.camerasKnown = true
-		b.cameras = fingerprint
-		return
+	b.identities = identities
+	for key, entry := range b.modes {
+		now, listed := identities[key]
+		switch {
+		case entry.identity == "":
+			// 素性を知らずに憶えたもの。一覧より先にモードを訊いた場合です。
+			// ここで初めて分かったことは、変化ではありません。
+			entry.identity = now
+			b.modes[key] = entry
+		case !listed:
+			// 今は見えないカメラ。見えないことは入れ替わったことではないので、
+			// 憶えたままにします。戻ってきたものが別の個体なら、そのとき素性で
+			// 分かります。
+		case now != entry.identity:
+			b.log.Debug("a camera was replaced, forgetting the modes the old one reported", "device", key)
+			delete(b.modes, key)
+		}
 	}
-	if b.cameras == fingerprint {
-		return
-	}
-	if len(b.modes) > 0 {
-		b.log.Debug("the cameras changed, forgetting the modes they reported", "cameras", len(cameras))
-	}
-	b.cameras = fingerprint
-	b.modes = nil
 }
 
 func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {
 	b.modesMu.Lock()
 	defer b.modesMu.Unlock()
-	modes, ok := b.modes[strings.ToLower(device)]
+	entry, ok := b.modes[strings.ToLower(device)]
 	if !ok {
 		return nil, false
 	}
-	return slices.Clone(modes), true
+	return slices.Clone(entry.modes), true
 }
 
 // SetPaused はキャプチャを停止または再開します。一時停止はカメラを解放します。
