@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -47,6 +48,20 @@ const previewBytes = 16
 // いると分かるには数回で十分ですし、debug 行にはその全部が残ります。
 const maxWarnedStreams = 3
 
+// maxGuessAttempts は、既知ベンダーに一致しないポートを推測で開く回数の上限です。
+//
+// 上限が要るのは、これが推測だからです。既知の VID に一致しないポートは、そもそも
+// カメラですらないかもしれません。実際に踏んだ例が Valve の VR 機器 (28DE:2102) で、
+// ブリッジはそれを 7 秒おきに永久に開き直していました。他人の機器のポートを
+// 掴み続けるのは、ログを汚す以上のことをしています — そのデバイスを使う別のソフトが
+// ポートを取れなくなり得ますし、こちらにはそれを知る手立てがありません。
+//
+// 0 回ではなく数回なのは、未知の VID を持つ本物のボードがあり得るからです。新しい
+// 版のボードや、ここに載っていないブリッジ IC を使ったもの。しかも起動が遅い
+// ボードは、最初の 5 秒では何も出しません。既定のバックオフ (1・2・4 秒) と合わせて
+// 20 秒あまりの猶予になり、立ち上がるものは立ち上がります。
+const maxGuessAttempts = 3
+
 // knownCameraVIDs は、Babble や OpenIris のボードに載っているブリッジや MCU の
 // USB ベンダー ID です。Espressif、Silicon Labs、QinHeng、FTDI、Raspberry Pi。
 var knownCameraVIDs = map[string]string{
@@ -55,6 +70,24 @@ var knownCameraVIDs = map[string]string{
 	"1A86": "QinHeng CH340",
 	"0403": "FTDI",
 	"2E8A": "Raspberry Pi",
+}
+
+// guessRecord は、あるポート名について推測が何回外れたかと、そのとき居たデバイスを
+// 覚えています。
+//
+// デバイスを覚えるのは、ポート名が使い回されるからです。Linux の /dev/ttyUSB0 は
+// 抜き差しで別のデバイスに付け直されますし、Windows の COM 番号も同じことが
+// 起こります。名前だけで数えていると、3 回外した未知のデバイスを抜いて、同じ名前で
+// 現れた別の未知のボードが、一度も開かれないまま拒まれます。別のデバイスなら
+// 別の推測です。
+type guessRecord struct {
+	// device は describePort が返す文字列です。列挙が言えることの全部で、
+	// VID:PID と製品名が入ります。
+	device string
+	// opened は、このデバイスを実際に開いた回数です。選んだ回数ではありません。
+	// 開けなかった試行 — 別のプロセスが掴んでいた、権限が無かった — は、
+	// そのポートがフレームを出すかどうかについて何も語らないので数えません。
+	opened int
 }
 
 // ErrNoSerialPort は、カメラボードであり得るものが探索で 1 つも見つからなかった
@@ -88,6 +121,19 @@ type Serial struct {
 	// どちらに触れるのも Run だけで、Run は単一スレッドです。
 	tried  map[string]struct{}
 	proven string
+
+	// guessed は、既知ベンダーに一致しないポートを推測で「開いた」回数を、ポート
+	// ごとに数えています。maxGuessAttempts に達したポートは、それ以上開きません。
+	//
+	// tried とは別に持ちます。tried は 1 巡の中での位置を表すもので、巡回のたびに
+	// 消えます。こちらは「このポートは推測として何回外したか」で、巡回をまたいで
+	// 残らなければ意味がありません。フレームが 1 枚でも出ればそのポートは推測では
+	// なくなるので、そこで消します。
+	guessed map[string]guessRecord
+
+	// guessing は、いま解決したポート名が推測だった場合のその名前です。数えるのは
+	// 実際に開けたときだけなので、resolvePort と session の間でこれを渡します。
+	guessing string
 
 	// tail は、直近のパケットの終端より後ろにあるとパーサーが最後に報告した量です。
 	// なぜここに持つのかは splitPackets を参照してください。
@@ -143,6 +189,7 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 		log:       log,
 		reporter:  reporter,
 		tried:     map[string]struct{}{},
+		guessed:   map[string]guessRecord{},
 		warned:    map[string][]string{},
 		listPorts: ListSerialPorts,
 		openPort: func(name string, baud int) (serialPort, error) {
@@ -172,6 +219,15 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 		return fmt.Errorf("serial: open %s at %d baud: %w", name, s.cfg.Baud, err)
 	}
 	defer port.Close()
+
+	// 開けた。ここで初めて推測を 1 回使ったことになる。開けなかった試行を数えると、
+	// 別のプロセスが掴んでいる間に持ち点を使い切り、解放された頃には一度も読めて
+	// いないのに打ち切られる。
+	if s.guessing == name {
+		rec := s.guessed[name]
+		rec.opened++
+		s.guessed[name] = rec
+	}
 
 	if err := port.SetReadTimeout(serialReadTimeout); err != nil {
 		return fmt.Errorf("serial: set read timeout: %w", err)
@@ -226,6 +282,11 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 				// 今は動いている。後で解析できなくなれば、以前どう言われていようと
 				// それは改めて新しい知らせになる。
 				delete(s.warned, name)
+				// もう推測ではない。フレームを出したのだから、次に切れたときも
+				// 開き直す価値がある。既知の VID に載っていないだけのボードは
+				// 実在する。
+				delete(s.guessed, name)
+				s.guessing = ""
 				s.reporter.Connected(s.Name())
 			}
 			count++
@@ -324,6 +385,10 @@ func (s *Serial) splitPackets(buf []byte, _ int) ([][]byte, []byte) {
 // 隣にあるカメラは一度も試されません。そこで各候補は 1 回ずつ使い、次の再接続では
 // その次へ進みます。
 func (s *Serial) resolvePort() (string, error) {
+	// 推測かどうかは、この解決 1 回ごとの答え。前回の答えを持ち越すと、明示された
+	// ポートや既知ベンダーのボードを開いたときに、無関係な推測の回数が増える。
+	s.guessing = ""
+
 	if !strings.EqualFold(s.cfg.Port, AutoPort) {
 		return s.cfg.Port, nil
 	}
@@ -331,6 +396,18 @@ func (s *Serial) resolvePort() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("serial: enumerate ports: %w", err)
 	}
+
+	// 列挙から消えた名前の記録は捨てる。ポートが抜かれた以上、次に同じ名前で現れる
+	// ものが同じデバイスとは限らないし、こちらにはそれを見分ける材料が無いことが
+	// ある。USB のメタデータを持たないデバイスは describePort が揃って "unknown" を
+	// 返すので、デバイスの比較だけでは交換に気づけない。名前が使い回される環境
+	// (/dev/ttyUSB0) は、まさにその材料が乏しい環境でもある。
+	//
+	// 抜き差しは人の操作なので、そこで数え直すのは高くつかない。数え直さないと、
+	// メタデータの無いボードを挿し替えた人は、アプリを再起動するまで復帰できない。
+	maps.DeleteFunc(s.guessed, func(name string, _ guessRecord) bool {
+		return !slices.ContainsFunc(ports, func(p SerialPort) bool { return p.Name == name })
+	})
 
 	candidates, guessed := autoCandidates(ports)
 	if len(candidates) == 0 {
@@ -351,6 +428,10 @@ func (s *Serial) resolvePort() (string, error) {
 		}
 	}
 
+	if guessed {
+		return s.resolveGuess(candidates[0], ports)
+	}
+
 	name, ok := s.firstUntried(candidates)
 	if !ok {
 		// すべての候補が一巡した。諦めずに巡回をやり直す。ボードは抜き差しされ得る
@@ -360,16 +441,46 @@ func (s *Serial) resolvePort() (string, error) {
 		name, _ = s.firstUntried(candidates)
 	}
 	s.tried[name] = struct{}{}
-	if guessed {
-		// 省略せず全部言う。これは推測であり、前回の推測は誰かの午後を丸ごと
-		// 奪ったから。そのポートは VR ヘッドセットで、ログはポートが
-		// "auto-selected" されたとしか言っていなかった。この分岐で開くものは
-		// そもそもカメラですらないかもしれないので、それが実際に何なのかを行に書く。
-		s.log.Warn("no serial port matches a known camera board; trying the only port there is, which may not be a camera",
-			"port", name, "device", describePort(ports, name))
-	} else {
-		s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	s.log.Info("auto-selected serial port", "port", name, "candidates", len(candidates))
+	return name, nil
+}
+
+// resolveGuess は、既知ベンダーに一致するポートが 1 つも無いときに、唯一あった
+// ポートを開いてよいかどうかを答えます。autoCandidates がこの形を返すのは候補が
+// ちょうど 1 本のときだけなので、巡回する相手はいません。回数だけで決めます。
+//
+// 上限を超えたら開くのをやめますが、再試行のループは止めません。止めると、後から
+// 本物のボードを挿したユーザーがアプリを再起動する羽目になります。次の試行も列挙
+// からやり直すので、既知ベンダーのボードが現れればそちらへ移ります。列挙するだけなら
+// 誰の邪魔にもなりません。開くことが邪魔になるのです。
+func (s *Serial) resolveGuess(name string, ports []SerialPort) (string, error) {
+	device := describePort(ports, name)
+	rec := s.guessed[name]
+	if rec.device != device {
+		// この名前に居るのは、前に数えていたのとは別のデバイス。前の回数は、その
+		// デバイスについての判断だったので持ち越さない。
+		rec = guessRecord{device: device}
 	}
+	if rec.opened >= maxGuessAttempts {
+		// ポート名を別に書く。describePort が返すのは列挙が言っていることだけで、
+		// そこに名前が入っているとは限らない。設定に書く文字列がこの行に無ければ、
+		// 「明示的に設定してください」という案内は宙に浮く。
+		return "", fmt.Errorf("%w (%s, %s, was opened %d times and produced no frames, so it is not being opened again)",
+			ErrNoSerialPort, name, device, rec.opened)
+	}
+	// 数えるのは session が実際に開けたとき。ここで数えると、別のプロセスが
+	// 掴んでいて開けなかった試行まで持ち点を使い、ポートが解放された頃には
+	// 一度も読めていないのに打ち切られる。
+	s.guessed[name] = rec
+	s.guessing = name
+	s.tried[name] = struct{}{}
+	// 省略せず全部言う。これは推測であり、前回の推測は誰かの午後を丸ごと
+	// 奪ったから。そのポートは VR ヘッドセットで、ログはポートが
+	// "auto-selected" されたとしか言っていなかった。この分岐で開くものは
+	// そもそもカメラですらないかもしれないので、それが実際に何なのかを行に書く。
+	s.log.Warn("no serial port matches a known camera board; trying the only port there is, which may not be a camera",
+		"port", name, "device", describePort(ports, name),
+		"attempt", s.guessed[name], "attempts_allowed", maxGuessAttempts)
 	return name, nil
 }
 
