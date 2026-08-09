@@ -113,8 +113,10 @@ type Bridge struct {
 	modes      map[string]modeMemory
 	identities map[string]string
 	listing    map[string]*modeLookup
-	// listingWG は走っている列挙です。Stop が終わりを待ちます。
-	listingWG sync.WaitGroup
+	// listingWG は走っている列挙です。Stop が終わりを待ちます。stopped は、その
+	// 待ちが済んだ後です — 以降は新しい列挙を始めません。
+	listingWG      sync.WaitGroup
+	lookupsStopped bool
 
 	// lifetime は、このアプリケーションが動いている間だけ生きているコンテキスト
 	// です (Start が受け取るもの)。列挙はこれの下で走ります — 要求 1 本より長く、
@@ -306,6 +308,9 @@ func (b *Bridge) Stop() {
 // stopLookups は、走っている列挙をすべて諦めさせ、終わるまで待ちます。
 func (b *Bridge) stopLookups() {
 	b.modesMu.Lock()
+	// 印を立てるのは待つ前です。待っている間に始まった列挙は、この Wait では
+	// 拾えません。拾えないものを止める唯一の方法は、始めさせないことです。
+	b.lookupsStopped = true
 	for _, call := range b.listing {
 		call.cancel()
 	}
@@ -968,10 +973,23 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	key := strings.ToLower(device)
 
 	b.modesMu.Lock()
+	if b.lookupsStopped {
+		b.modesMu.Unlock()
+		return nil, errors.New("uvc: PTCamBridge is shutting down")
+	}
 	if call, ok := b.listing[key]; ok {
 		call.waiting++
 		b.modesMu.Unlock()
 		return awaitModes(ctx, call)
+	}
+	// 掴んでいるかどうかを、登録と同じロックの下でもう一度見ます。呼び出し側の
+	// 判定はロックの外なので、その後・ここへ来る前に、キャプチャがそのカメラを
+	// 予約していることがあります (launchLocked は予約してから cancelListing で
+	// modesMu を取ります)。ここで見なければ、その予約をすり抜けた列挙が 1 本
+	// 登録され、起動と取り合います。
+	if exclusiveCameraAccess && b.capturing(device) {
+		b.modesMu.Unlock()
+		return nil, fmt.Errorf("uvc: PTCamBridge is opening %s right now", device)
 	}
 	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
 	// 同じ答えを待っている他の要求まで巻き添えになります。だから要求の期限からは

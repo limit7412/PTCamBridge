@@ -3506,6 +3506,51 @@ func TestStartingCaptureHoldsTheCameraForTheWholeLaunch(t *testing.T) {
 	}
 }
 
+// 止め終えた後に、新しい列挙を始めてはいけない。
+//
+// Stop が待つのは、待ち始めた時点で走っていたものだけ。その後に登録されたものは
+// 拾えないので、始めさせない。拾えないまま終わると、ffmpeg が残ってカメラを
+// 掴んだままになり得る。
+func TestCameraModesRefusesToStartAfterTheBridgeStopped(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	b.SetPaused(true)
+	b.Stop()
+
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("expected a stopped bridge to refuse a new lookup")
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times after the bridge stopped, want 0", got)
+	}
+}
+
+// 予約の確認と登録は、同じロックの下で行わなければならない。
+//
+// 呼び出し側の判定はロックの外なので、その後・登録の前に、キャプチャがカメラを
+// 予約していることがある。登録のところで見なければ、その予約をすり抜けた列挙が
+// 1 本走り、起動と取り合う。
+func TestCameraModesRechecksTheReservationWhenItRegisters(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	// 呼び出し側の判定 (capturing) を通った後に、キャプチャが予約した状況。
+	// listModesOnce を直に呼んで、その順序を作る。
+	b.openingCameraForTest("Bigeye")
+	if _, err := b.listModesOnceForTest(context.Background(), "Bigeye"); err == nil {
+		t.Error("expected the registration to see the reservation the caller missed")
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera already reserved, want 0", got)
+	}
+}
+
 // 初めて数えた顔ぶれは、変化ではない。
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、

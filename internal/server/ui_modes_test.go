@@ -650,14 +650,153 @@ console.log(JSON.stringify({ok, mismatch, cleared, unknownSize, unknownCamera: s
 	}
 }
 
+// 判定はモードの範囲そのもので行わなければなりません。
+//
+// 候補は「書ける整数」に絞ってあるので、そちらと突き合わせると、5-30fps の
+// カメラに入っている 15 のような正しい値まで弾きます。しかも保存できなくなるのは
+// その欄だけではありません — 無関係な項目も一緒に止まります。逆に 29.97fps しか
+// 持たないカメラでは候補が空になるので、候補で見ると 30 が素通りします。
+func TestSettingsPageJudgesFrameratesByTheModeNotTheShortlist(t *testing.T) {
+	harness := modesHarness + `
+const check = (modes, size, fps) => {
+  cameraModes = modes;
+  nodes["uvc-size"].value = size;
+  nodes["uvc-framerate"].value = fps;
+  refreshModeChoices();
+  return nodes["uvc-framerate"].invalid;
+};
+
+const ranged = [{min_size: "640x480", max_size: "640x480", min_fps: 5, max_fps: 30}];
+const fractional = [{min_size: "640x480", max_size: "640x480", min_fps: 29.97, max_fps: 29.97}];
+console.log(JSON.stringify({
+  inside: check(ranged, "640x480", "15"),
+  atTheEdge: check(ranged, "640x480", "30"),
+  outside: check(ranged, "640x480", "60"),
+  aboveAFractionalOnly: check(fractional, "640x480", "30"),
+}));
+`
+	var got struct {
+		Inside               string `json:"inside"`
+		AtTheEdge            string `json:"atTheEdge"`
+		Outside              string `json:"outside"`
+		AboveAFractionalOnly string `json:"aboveAFractionalOnly"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Inside != "" {
+		t.Errorf("15fps on a 5-30fps camera was refused (%q); it is inside the range even though it is not on the shortlist", got.Inside)
+	}
+	if got.AtTheEdge != "" {
+		t.Errorf("30fps on a 5-30fps camera was refused: %q", got.AtTheEdge)
+	}
+	if got.Outside == "" {
+		t.Error("60fps on a 5-30fps camera was accepted")
+	}
+	if got.AboveAFractionalOnly == "" {
+		t.Error("30fps on a camera that only offers 29.97fps was accepted; its shortlist is empty, which is not the same as anything goes")
+	}
+}
+
+// 拒否は、直したその場で解けなければなりません。カスタムエラーが残っている
+// フォームは submit そのものが起きないので、聞いていない欄に拒否を置くと、
+// 保存の入口が閉じたままになります。
+func TestSettingsPageLetsGoOfTheRefusalWhenTheValueIsFixed(t *testing.T) {
+	harness := modesHarness + `
+cameraModes = [{min_size: "640x480", max_size: "640x480", min_fps: 5, max_fps: 30}];
+nodes["uvc-size"].value = "640x480";
+nodes["uvc-framerate"].value = "60";
+refreshModeChoices();
+const refused = nodes["uvc-framerate"].invalid;
+
+// フレームレートだけを直す。解像度には触らない。
+nodes["uvc-framerate"].value = "15";
+refreshModeChoices();
+const fixed = nodes["uvc-framerate"].invalid;
+
+// UVC を使わなくなったら、隠れた欄の拒否も解く。
+nodes["uvc-framerate"].value = "60";
+refreshModeChoices();
+sourceType = "serial";
+await loadCameraModes();
+console.log(JSON.stringify({refused, fixed, afterSwitch: nodes["uvc-framerate"].invalid}));
+`
+	var got struct {
+		Refused     string `json:"refused"`
+		Fixed       string `json:"fixed"`
+		AfterSwitch string `json:"afterSwitch"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Refused == "" {
+		t.Fatal("60fps on a 5-30fps camera was accepted")
+	}
+	if got.Fixed != "" {
+		t.Errorf("the refusal survived the fix: %q", got.Fixed)
+	}
+	if got.AfterSwitch != "" {
+		t.Errorf("a hidden UVC field is still blocking the form after switching to another source: %q", got.AfterSwitch)
+	}
+}
+
+// フレームレートの欄も、打っている最中に聞いていなければなりません。聞かなければ、
+// 直しても拒否が残り、解像度を触るまで保存できません。
+func TestSettingsPageListensToTheFramerateField(t *testing.T) {
+	if !strings.Contains(uiSettingsHTML, `el("uvc-framerate").addEventListener("input", refreshModeChoices)`) {
+		t.Error("the settings page must re-check the framerate as it is typed; a refusal it never revisits blocks the whole form")
+	}
+}
+
 // 初回のモード取得は、デバイス一覧を読んだ後でなければなりません。
 //
 // ブリッジが「カメラが入れ替わった」ことを知るのは、一覧を数えたときです。先に
-// モードを訊くと、入れ替わったカメラの古い答えを受け取り、そのまま持ち続けます —
+// モードを訊くと、入れ替わったカメラの古い答えを受け取り、成功として覚えます —
 // ページを読み直しても直りません。
-func TestSettingsPageReadsTheDeviceListBeforeAskingForModes(t *testing.T) {
-	if !strings.Contains(uiSettingsHTML, "loadDevices().then(load)") {
-		t.Error("the settings page must list the devices before it fills the form; filling it is what asks for the modes")
+//
+// ただし待たせるのはモードの問い合わせだけです。デバイスの列挙は ffmpeg を
+// 起動するので遅ければ 15 秒かかり、設定の表示までそれを待たせると、カメラと
+// 無関係な項目を直したい人まで足止めされます。
+func TestSettingsPageWaitsForTheDeviceListBeforeAskingForModes(t *testing.T) {
+	harness := modesHarness + `
+let finishList;
+devicesListed = new Promise((resolve) => { finishList = resolve; });
+
+const first = loadCameraModes();
+await new Promise((r) => setTimeout(r, 0));
+const beforeList = asked;
+
+finishList();
+await new Promise((r) => setTimeout(r, 0));
+const afterList = asked;
+
+release();
+await first;
+console.log(JSON.stringify({beforeList, afterList}));
+`
+	var got struct {
+		BeforeList int `json:"beforeList"`
+		AfterList  int `json:"afterList"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.BeforeList != 0 {
+		t.Errorf("asked for the modes %d times before the device list came back, want 0", got.BeforeList)
+	}
+	if got.AfterList != 1 {
+		t.Errorf("asked for the modes %d times after the device list came back, want 1", got.AfterList)
+	}
+
+	// フォームの読み込みは一覧を待ちません。
+	if !strings.Contains(uiSettingsHTML, "devicesListed = loadDevices();\nload();") {
+		t.Error("the settings page must load the form alongside the device list, not after it")
 	}
 }
 

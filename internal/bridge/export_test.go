@@ -1,6 +1,11 @@
 package bridge
 
-import "github.com/limit7412/PTCamBridge/internal/config"
+import (
+	"context"
+
+	"github.com/limit7412/PTCamBridge/internal/config"
+	"github.com/limit7412/PTCamBridge/internal/source"
+)
 
 // captureRunningForTest は、キャプチャの goroutine がまだ生きているかを返す。
 // これは通常ロックの下でしか見えない。
@@ -50,4 +55,10 @@ func (b *Bridge) openingCameraForTest(device string) {
 // isOpeningForTest は、開いている最中と記録されているカメラを返す。
 func (b *Bridge) isOpeningForTest() string {
 	return b.view.Load().opening
+}
+
+// listModesOnceForTest は、CameraModes の手前の判定を通り越して、登録のところ
+// だけを踏む。呼び出し側の判定と登録の間に割り込まれた状況を作るために要る。
+func (b *Bridge) listModesOnceForTest(ctx context.Context, device string) ([]source.Mode, error) {
+	return b.listModesOnce(ctx, device)
 }
