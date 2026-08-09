@@ -626,6 +626,56 @@ func TestSerialAutoGuessStartsOverWhenTheDeviceBehindTheNameChanges(t *testing.T
 	}
 }
 
+// 抜かれた名前の記録は捨てる。USB のメタデータを持たないデバイスは describePort が
+// 揃って "unknown" を返すので、デバイスの比較だけでは交換に気づけない。しかも名前が
+// 使い回される環境 (/dev/ttyUSB0) は、まさにその材料が乏しい環境でもある。
+// 数え直さないと、そういうボードを挿し替えた人はアプリを再起動するまで復帰できない。
+func TestSerialAutoGuessForgetsAPortThatWasUnplugged(t *testing.T) {
+	// メタデータが無いので describePort はどちらも "unknown" になる。交換を
+	// 見分けられないのはこの形。
+	bare := SerialPort{Name: "/dev/ttyUSB0"}
+	ports := []SerialPort{bare}
+	s, opened := guessSerial(t, &ports)
+
+	for i := 1; i <= maxGuessAttempts; i++ {
+		runUntilStall(t, s)
+	}
+	if err := runUntilStall(t, s); err == nil {
+		t.Fatal("the guess was not exhausted")
+	}
+
+	// 抜いた。
+	ports = nil
+	if err := runUntilStall(t, s); err == nil {
+		t.Fatal("session returned nil, want no port at all")
+	}
+
+	// 挿し直した。別のボードかもしれないし、同じものかもしれない。こちらには
+	// 見分ける材料が無いので、改めて試す。
+	ports = []SerialPort{bare}
+	before := len(*opened)
+	if err := runUntilStall(t, s); err == nil {
+		t.Fatal("session returned nil, want a stall")
+	}
+	if len(*opened) != before+1 {
+		t.Errorf("opened %v, want the port to be tried again after it was unplugged", *opened)
+	}
+}
+
+// 抜かれてはいないポートは、数え直さない。挿さったままのものを開き続けるのは、
+// この上限が防ごうとしていることそのもの。
+func TestSerialAutoGuessKeepsCountingAPortThatStayedPlugged(t *testing.T) {
+	ports := []SerialPort{{Name: "COM4", VID: "28DE", PID: "2102", Product: "Valve Controller"}}
+	s, opened := guessSerial(t, &ports)
+
+	for i := 0; i < maxGuessAttempts+3; i++ {
+		runUntilStall(t, s)
+	}
+	if len(*opened) != maxGuessAttempts {
+		t.Errorf("opened %v, want it to stop at %d: the port never went away", *opened, maxGuessAttempts)
+	}
+}
+
 // 打ち切るのは「開くこと」だけで、「待つこと」ではない。後からボードを挿した
 // ユーザーが、アプリを再起動せずに拾われなければならない。
 func TestSerialAutoGuessStillFindsABoardPluggedInLater(t *testing.T) {

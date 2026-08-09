@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -395,6 +396,18 @@ func (s *Serial) resolvePort() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("serial: enumerate ports: %w", err)
 	}
+
+	// 列挙から消えた名前の記録は捨てる。ポートが抜かれた以上、次に同じ名前で現れる
+	// ものが同じデバイスとは限らないし、こちらにはそれを見分ける材料が無いことが
+	// ある。USB のメタデータを持たないデバイスは describePort が揃って "unknown" を
+	// 返すので、デバイスの比較だけでは交換に気づけない。名前が使い回される環境
+	// (/dev/ttyUSB0) は、まさにその材料が乏しい環境でもある。
+	//
+	// 抜き差しは人の操作なので、そこで数え直すのは高くつかない。数え直さないと、
+	// メタデータの無いボードを挿し替えた人は、アプリを再起動するまで復帰できない。
+	maps.DeleteFunc(s.guessed, func(name string, _ guessRecord) bool {
+		return !slices.ContainsFunc(ports, func(p SerialPort) bool { return p.Name == name })
+	})
 
 	candidates, guessed := autoCandidates(ports)
 	if len(candidates) == 0 {
