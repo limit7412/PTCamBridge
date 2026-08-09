@@ -3855,15 +3855,16 @@ func TestCameraModesDoesNotRememberTheModesOfACameraThatWasSwappedOut(t *testing
 	b.Devices(context.Background())
 
 	close(release)
-	if err := <-answered; err != nil {
-		t.Fatalf("CameraModes: %v", err)
+	// 訊いた人にも渡してはいけない。憶えないだけでは、画面が名前の変わらない
+	// まま受け取って、今そこにいるカメラが持っていない候補を並べる。
+	if err := <-answered; err == nil {
+		t.Error("handed back the modes of the camera that was swapped out while they were being listed")
 	}
 
-	// 憶えていれば、掴んだ後もそれで答えてしまう。今そこにいるのは別のカメラ
-	// なので、それは他機種のモードを勧めることになる。
+	// 憶えてもいないこと。憶えていれば、掴んだ後もそれで答えてしまう。
 	b.SetPaused(false)
 	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
-		t.Error("answered with the modes of the camera that was swapped out while they were being listed")
+		t.Error("remembered the modes of the camera that was swapped out while they were being listed")
 	}
 }
 
@@ -3989,5 +3990,82 @@ func TestStartingCaptureTakesTheCameraFromALookupThatPredatesTheCount(t *testing
 		if err := <-resumed; err != nil {
 			t.Fatalf("resume: %v", err)
 		}
+	}
+}
+
+// フレンドリ名が重複しているとき、その名前はどの個体でもあり得る。
+//
+// どれか 1 台に決めると、決めなかった側を「別のカメラ」と答えることになる。
+// 設定が共有名を持ち、画面がもう一方の代替名で訊けば、動いているカメラへ列挙が
+// 向かう。排他の判定で迷ったときは、衝突する側へ倒さなければならない。
+func TestCameraModesTreatsASharedNameAsEveryCameraThatHasIt(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{
+			{Name: "USB Camera", Alternative: "@device_pnp_one"},
+			{Name: "USB Camera", Alternative: "@device_pnp_two"},
+		}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	// 設定は共有名を持っている。既存の設定も API もそれを使える。
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+
+	// どちらの個体を訊かれても、掴んでいる可能性がある。
+	for _, name := range []string{"@device_pnp_one", "@device_pnp_two", "USB Camera"} {
+		before := lister.count()
+		if _, err := b.CameraModes(context.Background(), name); err == nil {
+			t.Errorf("CameraModes(%q) went ahead while a camera of that name is being captured", name)
+		}
+		if got := lister.count() - before; got != 0 {
+			t.Errorf("ffmpeg ran %d times for %q, want 0", got, name)
+		}
+	}
+
+	// 名前を共有していないカメラは、今までどおり調べられる。
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("CameraModes for a camera with its own name: %v", err)
+	}
+}
+
+// 憶えは、同じ 1 台を指す別名からも引けなければならない。
+//
+// 憶えるのは訊かれた名前だが、訊く名前は場面で変わる。一時停止中にフレンドリ名で
+// 憶えたものを、キャプチャ中に "@device_pnp_..." で訊かれる形が実際に起こる。
+// そこで引けないと、掴んでいて調べ直せないカメラについて、答えを持っているのに
+// エラーを返すことになる。
+func TestCameraModesAnswersUnderTheOtherNameOfTheSameCamera(t *testing.T) {
+	want := []source.Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: want}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+
+	// 一時停止中にフレンドリ名で憶える。
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// キャプチャ中に代替名で訊かれる。開きに行けない — その判定は素性で正しく
+	// 効く — ので、憶えから答えられなければ何も出せない。
+	got, err := b.CameraModes(context.Background(), "@device_pnp_bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes under the other name: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("modes = %v, want the remembered %v", got, want)
 	}
 }

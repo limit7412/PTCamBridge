@@ -1,6 +1,7 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -525,29 +526,101 @@ var dshowModeLine = regexp.MustCompile(
 // 順序は ffmpeg が並べたとおりに保ちます。カメラが先に挙げるものには意味があり、
 // 並べ替えるとその手がかりを捨てることになります。
 func parseDshowModes(out string) []Mode {
-	var modes []Mode
-	seen := map[Mode]struct{}{}
+	var scan modeScanner
 	for _, line := range strings.Split(out, "\n") {
-		m := dshowModeLine.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		minFPS, err := strconv.ParseFloat(m[3], 64)
-		if err != nil {
-			continue
-		}
-		maxFPS, err := strconv.ParseFloat(m[5], 64)
-		if err != nil {
-			continue
-		}
-		mode := Mode{Format: m[1], MinSize: m[2], MaxSize: m[4], MinFPS: minFPS, MaxFPS: maxFPS}
-		if _, dup := seen[mode]; dup {
-			continue
-		}
-		seen[mode] = struct{}{}
-		modes = append(modes, mode)
+		scan.line(line)
 	}
-	return modes
+	return scan.Modes()
+}
+
+// parseModeLine は、1 行からモードを 1 つ取り出します。
+func parseModeLine(line string) (Mode, bool) {
+	m := dshowModeLine.FindStringSubmatch(line)
+	if m == nil {
+		return Mode{}, false
+	}
+	minFPS, err := strconv.ParseFloat(m[3], 64)
+	if err != nil {
+		return Mode{}, false
+	}
+	maxFPS, err := strconv.ParseFloat(m[5], 64)
+	if err != nil {
+		return Mode{}, false
+	}
+	return Mode{Format: m[1], MinSize: m[2], MaxSize: m[4], MinFPS: minFPS, MaxFPS: maxFPS}, true
+}
+
+// modeScanner は、ffmpeg が書きながら並べるモードを、書かれたそばから拾う
+// io.Writer です。
+//
+// 診断用の tailWriter に任せて後から読むことはできません。あちらは末尾しか
+// 持たないので、モードの多いカメラ — 出力ピンが複数あるものなど — では先頭側の
+// 行が落ちます。落ちても残った行が解析できてしまうため、欠けたことは誰にも
+// 分からず、設定画面はそのカメラが実際に持っている解像度を候補から外し、
+// 打ち込まれても不正な値として保存を拒みます。
+//
+// 重複は畳み、順序は ffmpeg が並べたとおりに保ちます。カメラが先に挙げるものには
+// 意味があり、並べ替えるとその手がかりを捨てることになります。
+type modeScanner struct {
+	mu      sync.Mutex
+	partial []byte
+	seen    map[Mode]struct{}
+	modes   []Mode
+}
+
+// scannerLineLimit は、改行の来ない書き込みを溜め込む上限です。ここを超えたら
+// 諦めて捨てます — 1 行がこれより長いモードの行はありません。
+const scannerLineLimit = 64 << 10
+
+func (s *modeScanner) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.partial = append(s.partial, p...)
+	for {
+		i := bytes.IndexByte(s.partial, '\n')
+		if i < 0 {
+			break
+		}
+		s.lineLocked(string(s.partial[:i]))
+		s.partial = s.partial[i+1:]
+	}
+	if len(s.partial) > scannerLineLimit {
+		s.partial = nil
+	}
+	return len(p), nil
+}
+
+func (s *modeScanner) line(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lineLocked(line)
+}
+
+func (s *modeScanner) lineLocked(line string) {
+	mode, ok := parseModeLine(line)
+	if !ok {
+		return
+	}
+	if _, dup := s.seen[mode]; dup {
+		return
+	}
+	if s.seen == nil {
+		s.seen = map[Mode]struct{}{}
+	}
+	s.seen[mode] = struct{}{}
+	s.modes = append(s.modes, mode)
+}
+
+// Modes は、これまでに拾ったモードを返します。改行で終わらない最後の 1 行も
+// 見ます — ffmpeg が最後の行を書き終えた直後に終わることがあります。
+func (s *modeScanner) Modes() []Mode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.partial) > 0 {
+		s.lineLocked(string(s.partial))
+		s.partial = nil
+	}
+	return s.modes
 }
 
 // dshowDeviceLine は ffmpeg のデバイス一覧に一致します。たとえば次の形です。
@@ -624,8 +697,12 @@ func ListModes(ctx context.Context, ffmpegPath, device string) ([]Mode, error) {
 	_, input := platformInput(device)
 	cmd := exec.CommandContext(ctx, path, "-hide_banner", "-f", "dshow", "-list_options", "true", "-i", input)
 	configureChildProcess(cmd)
+	// モードは書かれたそばから拾います。tailWriter は診断の文面のためだけに
+	// 持ちます — あちらは末尾しか残さないので、モードの多いカメラでは先頭側の
+	// 行が黙って落ちます (modeScanner を参照)。
+	scan := &modeScanner{}
 	diag := &tailWriter{max: 64 << 10}
-	cmd.Stderr = diag
+	cmd.Stderr = io.MultiWriter(scan, diag)
 	runErr := cmd.Run()
 
 	if ctx.Err() != nil {
@@ -638,7 +715,7 @@ func ListModes(ctx context.Context, ffmpegPath, device string) ([]Mode, error) {
 		return nil, fmt.Errorf("uvc: run ffmpeg to list the modes of %q: %w", device, runErr)
 	}
 
-	modes := parseDshowModes(diag.String())
+	modes := scan.Modes()
 	if len(modes) == 0 {
 		// 開けなかったか、この ffmpeg が別の形で書いている。どちらにせよ黙って
 		// 空を返すと、呼び出し側は「モードが 1 つも無いカメラ」と受け取る。

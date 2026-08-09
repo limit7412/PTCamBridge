@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -387,5 +388,65 @@ func TestExplainRefusedModeLeavesSuccessAlone(t *testing.T) {
 	u := &UVC{cfg: UVCConfig{Device: "USB Camera", Size: "240x240"}, log: discardLogger()}
 	if err := u.explainRefusedMode(context.Background(), "Could not set video options", nil); err != nil {
 		t.Errorf("explainRefusedMode = %v, want nil when the attempt did not fail", err)
+	}
+}
+
+// モードは書かれたそばから拾わなければならない。診断用の末尾バッファに任せると、
+// モードの多いカメラ — 出力ピンが複数あるものなど — では先頭側の行が落ちる。
+// 落ちても残りが解析できてしまうので、欠けたことは誰にも分からない。設定画面は
+// そのカメラが実際に持っている解像度を候補から外し、打ち込まれても拒む。
+func TestModeScannerKeepsWhatWouldNotFitInTheDiagnosticTail(t *testing.T) {
+	scan := &modeScanner{}
+	tail := &tailWriter{max: 64 << 10}
+	out := io.MultiWriter(scan, tail)
+
+	// 最初に本物のモードを 1 つ。この後、末尾バッファを溢れさせる。
+	first := "[dshow @ 01]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30\n"
+	if _, err := out.Write([]byte(first)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	filler := "[dshow @ 01] Immediate exit requested\n"
+	for range (64 << 10 / len(filler)) + 2 {
+		if _, err := out.Write([]byte(filler)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	// ffmpeg は少しずつ書く。1 回の書き込みが行の途中で切れることもある。
+	last := "[dshow @ 01]   pixel_format=yuyv422  min s=640x480 fps=5 max s=640"
+	if _, err := out.Write([]byte(last)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := out.Write([]byte("x480 fps=30\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// 前提: この量なら、末尾バッファからは最初の行が消えている。消えていなければ
+	// このテストは何も確かめていない。
+	if strings.Contains(tail.String(), "1280x720") {
+		t.Fatal("the diagnostic tail still holds the first mode; this test proves nothing")
+	}
+
+	modes := scan.Modes()
+	if len(modes) != 2 {
+		t.Fatalf("got %d modes, want 2: %v", len(modes), modes)
+	}
+	if modes[0].MinSize != "1280x720" {
+		t.Errorf("modes[0] = %+v, want the mode that scrolled out of the diagnostic tail", modes[0])
+	}
+	// 書き込みの途中で切れた行も、繋いで読めなければならない。
+	if modes[1].MinSize != "640x480" || modes[1].MaxFPS != 30 {
+		t.Errorf("modes[1] = %+v, want the mode that arrived across two writes", modes[1])
+	}
+}
+
+// 改行で終わらない最後の 1 行も見なければならない。ffmpeg は最後の行を書き終えた
+// 直後に終わることがある。
+func TestModeScannerReadsTheLastLineWithoutANewline(t *testing.T) {
+	scan := &modeScanner{}
+	if _, err := scan.Write([]byte("[dshow @ 01]   vcodec=mjpeg  min s=640x480 fps=30 max s=640x480 fps=30")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if modes := scan.Modes(); len(modes) != 1 || modes[0].MinSize != "640x480" {
+		t.Errorf("modes = %v, want the unterminated last line read", modes)
 	}
 }

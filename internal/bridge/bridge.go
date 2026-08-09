@@ -116,7 +116,7 @@ type Bridge struct {
 	// 素性に直して見ます。
 	modesMu    sync.Mutex
 	modes      map[string]modeMemory
-	identities map[string]string
+	identities map[string][]string
 	listing    map[string]*modeLookup
 	// listingWG は走っている列挙です。Stop が終わりを待ちます。stopped は、その
 	// 待ちが済んだ後です — 以降は新しい列挙を始めません。
@@ -358,9 +358,8 @@ func (b *Bridge) cancelListing(device string) {
 // なくなります — 2 本目の ffmpeg が同じカメラへ向かい、キャプチャの起動もそれに
 // 手放させられなくなります。
 func (b *Bridge) findListingLocked(device string) *modeLookup {
-	want := b.lookupKeyLocked(device)
 	for _, call := range b.listing {
-		if b.lookupKeyLocked(call.device) == want {
+		if b.sameCameraLocked(call.device, device) {
 			return call
 		}
 	}
@@ -370,10 +369,9 @@ func (b *Bridge) findListingLocked(device string) *modeLookup {
 // listingsForLocked は、そのカメラについて走っている列挙をすべて返します。
 // 呼び出し側が modesMu を保持します。
 func (b *Bridge) listingsForLocked(device string) []*modeLookup {
-	want := b.lookupKeyLocked(device)
 	var found []*modeLookup
 	for _, call := range b.listing {
-		if b.lookupKeyLocked(call.device) == want {
+		if b.sameCameraLocked(call.device, device) {
 			found = append(found, call)
 		}
 	}
@@ -1044,7 +1042,7 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	runCtx, cancel := context.WithCancel(lifetime)
 
 	key := strings.ToLower(device)
-	call := &modeLookup{done: make(chan struct{}), device: device, cancel: cancel, identity: b.identities[key]}
+	call := &modeLookup{done: make(chan struct{}), device: device, cancel: cancel, identity: b.identityOfLocked(device)}
 	if b.listing == nil {
 		b.listing = make(map[string]*modeLookup)
 	}
@@ -1062,9 +1060,16 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 		b.modesMu.Lock()
 		delete(b.listing, key)
 		if err == nil {
+			changed := b.cameraChangedLocked(device, call.identity)
 			// 憶えるのはここです。呼び出し側で憶えると、この列挙を始めたときの
 			// 素性が分からなくなります。
 			b.rememberModesLocked(device, modes, call.identity)
+			if changed {
+				// 憶えないだけでは足りません。待っている要求へ成功として返せば、
+				// 画面は名前が変わっていないのでそれを受け取り、今そこにいる
+				// カメラが持っていない候補を並べ、それ以外を保存できなくします。
+				modes, err = nil, fmt.Errorf("uvc: %s changed while its modes were being listed", device)
+			}
 		}
 		b.modesMu.Unlock()
 		call.modes, call.err = modes, err
@@ -1109,23 +1114,44 @@ func (b *Bridge) capturing(device string) bool {
 	return strings.EqualFold(v.cfg.Source.UVC.Device, device)
 }
 
-// lookupKeyLocked は、走っている列挙を数えるときの鍵です。呼び出し側が modesMu を
-// 保持します。
+// sameCameraLocked は、2 つの名前が同じ 1 台を指しているかを返します。
+// 呼び出し側が modesMu を保持します。
 //
-// 同じ 1 台をフレンドリ名でも "@device_pnp_..." でも指せるので、打たれた文字列を
-// そのまま鍵にすると、別々の鍵で同じカメラを 2 回開きます。画面が代替名で調べて
+// 同じ 1 台をフレンドリ名でも "@device_pnp_..." でも指せるので、文字列を突き
+// 合わせるだけだと、別々の名前で同じカメラを 2 回開きます。画面が代替名で調べて
 // いる最中に Apply がフレンドリ名で起動する、という形が実際に起こります。素性は
-// 顔ぶれを数えたときに両方から引けるようにしてあるので、それを使います
+// 顔ぶれを数えたときに両方から引けるようにしてあります
 // (forgetModesIfCamerasChanged を参照)。
 //
-// 一覧に無い名前は、打たれたまま小文字にして使います。知らないものを勝手に
+// フレンドリ名が重複しているときは、その名前は**どの個体でもあり得ます**。
+// どれか 1 つに決めると、決めなかった側を「別のカメラ」と答えることになり、
+// 動いているカメラへ列挙を向けます。だから候補が 1 つでも重なれば同じ 1 台と
+// 見ます — 排他の判定で迷ったときは、衝突する側へ倒します。
+//
+// 一覧に無い名前は、打たれたまま小文字で突き合わせます。知らないものを勝手に
 // 束ねることはできません。
-func (b *Bridge) lookupKeyLocked(device string) string {
-	name := strings.ToLower(device)
-	if identity, ok := b.identities[name]; ok {
-		return identity
+func (b *Bridge) sameCameraLocked(a, c string) bool {
+	la, lc := strings.ToLower(a), strings.ToLower(c)
+	if la == lc {
+		return true
 	}
-	return name
+	mine, theirs := b.identities[la], b.identities[lc]
+	for _, identity := range mine {
+		if slices.Contains(theirs, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+// identityOfLocked は、その名前が指す個体を 1 つに決められるならそれを返します。
+// 決められなければ空を返します — 一覧に無い名前と、フレンドリ名が重複していて
+// どの個体か言えない名前です。呼び出し側が modesMu を保持します。
+func (b *Bridge) identityOfLocked(device string) string {
+	if found := b.identities[strings.ToLower(device)]; len(found) == 1 {
+		return found[0]
+	}
+	return ""
 }
 
 // openingLocked は、今まさに開こうとしているカメラかどうかを、素性まで見て
@@ -1139,9 +1165,8 @@ func (b *Bridge) openingLocked(device string) bool {
 	if device == "" {
 		return false
 	}
-	want := b.lookupKeyLocked(device)
 	v := b.view.Load()
-	if v.opening != "" && b.lookupKeyLocked(v.opening) == want {
+	if v.opening != "" && b.sameCameraLocked(v.opening, device) {
 		return true
 	}
 	// 既に開き終えたカメラも同じです。capturing はここでも名前しか見ないので、
@@ -1149,7 +1174,7 @@ func (b *Bridge) openingLocked(device string) bool {
 	if v.paused || v.cfg.Source.Type != config.SourceUVC || v.cfg.Source.UVC.Device == "" {
 		return false
 	}
-	return b.lookupKeyLocked(v.cfg.Source.UVC.Device) == want
+	return b.sameCameraLocked(v.cfg.Source.UVC.Device, device)
 }
 
 // rememberModesLocked / recallModes は、列挙に成功した答えを憶え、思い出します。
@@ -1164,8 +1189,8 @@ func (b *Bridge) openingLocked(device string) bool {
 // 今の素性を貼ると、後の照合も素通りして、二度と捨てられなくなります。
 func (b *Bridge) rememberModesLocked(device string, modes []source.Mode, started string) {
 	key := strings.ToLower(device)
-	if b.identities[key] != started {
-		b.log.Debug("the camera changed while its modes were being listed, not remembering them", "device", device)
+	if b.identityOfLocked(device) != started {
+		b.log.Debug("the camera it was told about changed while its modes were being listed, not remembering them", "device", device)
 		return
 	}
 	if b.modes == nil {
@@ -1174,6 +1199,17 @@ func (b *Bridge) rememberModesLocked(device string, modes []source.Mode, started
 	// 素性が空のままのことはあります (一覧より先に訊かれた場合)。次にそのカメラが
 	// 一覧に現れたときに埋まります。forgetModesIfCamerasChanged を参照。
 	b.modes[key] = modeMemory{modes: slices.Clone(modes), identity: started}
+}
+
+// cameraChangedLocked は、その列挙を始めてから、その名前が別の個体を指すように
+// なったかを返します。呼び出し側が modesMu を保持します。
+//
+// 始めた時点で素性を知らなかった (started が空) 場合は「変わった」とは言いません。
+// 後から分かったことは変化ではなく、そこで得たモードは、たった今そのカメラが
+// 申告したものです。憶えはしません — 同じ 1 台だったと確かめられないので —
+// が、訊いた人には返します。
+func (b *Bridge) cameraChangedLocked(device, started string) bool {
+	return started != "" && b.identityOfLocked(device) != started
 }
 
 // forgetModesIfCamerasChanged は、素性の変わったカメラの憶えだけを捨てます。
@@ -1193,12 +1229,21 @@ func (b *Bridge) rememberModesLocked(device string, modes []source.Mode, started
 func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
 	// 名前でも "@device_pnp_..." でも引けるようにします。画面はどちらでも
 	// 訊けるので、憶えの鍵もどちらにもなり得ます。
-	identities := make(map[string]string, len(cameras)*2)
+	//
+	// フレンドリ名が重複しているときは、その名前に**両方**を並べます。どれか 1 つ
+	// に決めると、決めなかった側を別のカメラと答えることになります。
+	identities := make(map[string][]string, len(cameras)*2)
+	add := func(name, identity string) {
+		key := strings.ToLower(name)
+		if !slices.Contains(identities[key], identity) {
+			identities[key] = append(identities[key], identity)
+		}
+	}
 	for _, c := range cameras {
 		identity := c.Name + "\x00" + c.Alternative
-		identities[strings.ToLower(c.Name)] = identity
+		add(c.Name, identity)
 		if c.Alternative != "" {
-			identities[strings.ToLower(c.Alternative)] = identity
+			add(c.Alternative, identity)
 		}
 	}
 
@@ -1206,7 +1251,7 @@ func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
 	defer b.modesMu.Unlock()
 	b.identities = identities
 	for key, entry := range b.modes {
-		now, listed := identities[key]
+		now, listed := b.identityOfLocked(key), len(identities[key]) > 0
 		switch {
 		case entry.identity == "":
 			// 素性を知らずに憶えたもの。一覧より先にモードを訊いた場合です。
@@ -1232,14 +1277,25 @@ func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
 	}
 }
 
+// recallModes は、そのカメラについて憶えているモードを返します。
+//
+// 打たれた名前だけでなく、同じ 1 台を指す別名でも引きます。憶えるのは訊かれた
+// 名前ですが、訊く名前は場面ごとに変わります — 一時停止中にフレンドリ名で憶えた
+// ものを、キャプチャ中に "@device_pnp_..." で訊かれる、という形が実際に起こります。
+// そこで引けないと、掴んでいて調べ直せないカメラについて、答えを持っているのに
+// エラーを返すことになります。
 func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {
 	b.modesMu.Lock()
 	defer b.modesMu.Unlock()
-	entry, ok := b.modes[strings.ToLower(device)]
-	if !ok {
-		return nil, false
+	if entry, ok := b.modes[strings.ToLower(device)]; ok {
+		return slices.Clone(entry.modes), true
 	}
-	return slices.Clone(entry.modes), true
+	for key, entry := range b.modes {
+		if b.sameCameraLocked(key, device) {
+			return slices.Clone(entry.modes), true
+		}
+	}
+	return nil, false
 }
 
 // SetPaused はキャプチャを停止または再開します。一時停止はカメラを解放します。
