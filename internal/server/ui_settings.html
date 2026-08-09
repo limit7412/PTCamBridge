@@ -646,8 +646,19 @@ const parseSize = (s) => {
   return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
 };
 
-// modeHasSize は、その大きさをこのモードが受け付けるかどうかを返します。範囲で
-// 答えるカメラでは、両端の間のどの大きさも使えます。
+// modeHasSize は、その大きさをこのモードが受け付け得るかどうかを返します。範囲で
+// 答えるカメラでは、両端の間の大きさも使えます。
+//
+// 「使え得る」までしか言えません。DirectShow の範囲には刻み幅 (OutputGranularity)
+// があり、間のどの値でも良いとは限りませんが、ffmpeg の -list_options はそれを
+// 書きません。手元にない情報です。
+//
+// それでも間を受け付けるのは、ここが**拒否するかどうか**を決める場所だからです。
+// 両端しか認めないと、160x120-1280x720 のカメラで 640x480 を拒否します。それは
+// ほぼ確実に使える値で、しかも拒否はフォーム全体の保存を止めます。分からない
+// ことを理由に、動くはずの設定を止めるほうが害が大きい。刻み幅に外れた値は
+// カメラが開かず、そのときはエラーがモードの一覧を添えます — この PR がまさに
+// 足した経路です。
 function modeHasSize(m, size) {
   if (m.min_size === size || m.max_size === size) return true;
   const want = parseSize(size), lo = parseSize(m.min_size), hi = parseSize(m.max_size);
