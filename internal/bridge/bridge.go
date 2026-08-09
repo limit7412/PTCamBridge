@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -821,6 +822,17 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 // CameraModes の憶えと諦めの筋を 1 本も踏めません。
 var listModes = source.ListModes
 
+// exclusiveCameraAccess は、キャプチャ中のカメラをもう一度開けないかどうかです。
+//
+// Windows だけです。列挙が実際にデバイスを開くのは DirectShow だけで、他の
+// プラットフォームの ListModes は何も開かずに空を返します (相当する仕組みが
+// 無いことを、エラーではなく無言で表しています。source.ListModes を参照)。
+// そこで掴んでいることを理由に断ると、無言のはずの機能が、Windows でしか意味の
+// 無い — トレイも一時停止も無い環境の — エラーになります。
+//
+// var なのはテストのためです。テストは Windows で走りません。
+var exclusiveCameraAccess = runtime.GOOS == "windows"
+
 // CameraModes は、1 台のカメラが申告するモードを返します。
 //
 // 列挙はカメラを開きます。UVC デバイスは排他的なので、ブリッジが今キャプチャして
@@ -838,7 +850,7 @@ var listModes = source.ListModes
 // 列挙が自前の 15 秒を使い切ってから同じ答えに辿り着くだけです。しかも失敗は
 // 憶えないので、画面がカメラ名に触れるたびにそれを払うことになります。
 func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode, error) {
-	if b.capturing(device) {
+	if exclusiveCameraAccess && b.capturing(device) {
 		if modes, ok := b.recallModes(device); ok {
 			return modes, nil
 		}

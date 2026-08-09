@@ -242,6 +242,11 @@ function fill(cfg) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
+  // 代入では change も blur も起きないので、候補はここから取りに行くしかない。
+  // 初回の読み込みだけでなく、保存のたびに通るこの経路でも要る — 別のクライアント
+  // やトレイがカメラを変えていれば、応答がこの欄をそちらへ書き換えるので、欄と
+  // 候補が別のカメラを指すことになる。名前が変わっていなければ何もしない。
+  loadCameraModes();
 }
 
 // rebase は、基準を cfg のものへ取り直し、ユーザーが触った項目だけを画面に残します。
@@ -269,6 +274,10 @@ function rebase(cfg, keep) {
   FIELDS.forEach((field, i) => {
     if (keep.has(i)) field.write(mine[i]);
   });
+  // fill と同じ理由。こちらは失敗した保存の後始末なので、欄に残るのがユーザーの
+  // 打った名前かサーバの名前かは keep 次第で、どちらでも候補は合っていなければ
+  // ならない。
+  loadCameraModes();
 }
 
 // 保存中はフォームを触らせない。ソースの変更は最初のフレームを待つので最大 30 秒
@@ -407,6 +416,28 @@ const options = (id, names) => {
   }
 };
 
+// cameraChoices は、カメラ名の候補を作ります。
+//
+// フレンドリ名が重複しているカメラだけ、"@device_pnp_..." の方も候補に足します。
+// 同じ名前が 2 つある状態では、どちらを選んでも ffmpeg にとっては同じ要求で、
+// モードの問い合わせもキャプチャも、開くのは常に同じ 1 台になります。見分けて
+// いるのはそちらの名前だけなので、選べる場所に置きます。
+//
+// 重複していないカメラには足しません。長くて読みにくい名前を、それが要る人に
+// だけ見せるためです。
+function cameraChoices(cameras) {
+  const seen = new Map();
+  for (const camera of cameras) {
+    seen.set(camera.name, (seen.get(camera.name) || 0) + 1);
+  }
+  const names = [];
+  for (const camera of cameras) {
+    names.push(camera.name);
+    if (camera.alternative && seen.get(camera.name) > 1) names.push(camera.alternative);
+  }
+  return names;
+}
+
 // デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
 // 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
 async function loadDevices() {
@@ -425,7 +456,7 @@ async function loadDevices() {
       if (!response.ok) throw new Error(response.status);
       return await response.json();
     })();
-    options("camera-names", (devices.cameras || []).map((d) => d.name));
+    options("camera-names", cameraChoices(devices.cameras || []));
     options("port-names", (devices.serial_ports || []).map((p) => p.name));
     failure("camera-error", devices.camera_error);
     failure("serial-error", devices.serial_error);
@@ -508,7 +539,10 @@ async function loadCameraModes() {
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {
-    modesLoading = null;
+    // 下ろすのは自分の分だけ。待っている間にカメラ名が変わると、後から始まった
+    // 問い合わせが印を持っている。それを無条件に消すと、その名前で change と blur が
+    // もう一度来たときに 2 本目が通ってしまう。
+    if (modesLoading === device) modesLoading = null;
   }
   refreshModeChoices();
 }
@@ -655,10 +689,7 @@ el("get-ffmpeg").addEventListener("click", async () => {
   }
 });
 
-// fill() の代入では change も blur も起きないので、読み込みの後に自分で呼ぶ。
-// これをしないと、設定に既にカメラ名がある人 — つまりほとんどの人 — は、
-// デバイス欄を一度触るまで候補を得られない。
-load().then(loadCameraModes);
+load();
 loadDevices();
 pollFFmpeg();
 setInterval(pollFFmpeg, 2000);

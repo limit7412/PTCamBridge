@@ -35,7 +35,7 @@ func runSettingsScript(t *testing.T, body string) string {
 	// 画面から切り出す範囲。候補欄を作る一続きの部分です。見つからなければ
 	// 黙って通さず失敗させます。名前が変わったのに何も試さないテストは、
 	// 通っていることのほうが害になります。
-	const from = "let modesFor = null;"
+	const from = "function cameraChoices("
 	const to = "\nel(\"uvc-device\").addEventListener"
 	start := strings.Index(uiSettingsHTML, from)
 	end := strings.Index(uiSettingsHTML, to)
@@ -362,6 +362,50 @@ console.log(JSON.stringify({asking, total: asked}));
 	}
 }
 
+// 進行中の印を下ろすのは、その要求自身だけです。
+//
+// A を待っている間に B を打てば B も走り出します。そこで先に返ってきた A が印を
+// 無条件に消すと、B の欄で change と blur がもう一度来たときに 2 本目が通り、
+// 排他的なカメラへ 2 本の ffmpeg が向かいます。
+func TestSettingsPageKeepsTheLoadingMarkOfTheRequestStillRunning(t *testing.T) {
+	harness := modesHarness + `
+// A を走らせたまま B を始める。
+const a = loadCameraModes();
+nodes["uvc-device"].value = "B";
+const b = loadCameraModes();
+const started = asked;
+
+// A だけを返す。B はまだ走っている。
+const waitingForB = pending.slice(1);
+pending = pending.slice(0, 1);
+release();
+await a;
+pending = waitingForB;
+
+// ここで B の欄がもう一度 change/blur を起こす。
+const again = loadCameraModes();
+const afterA = asked;
+release();
+await Promise.all([b, again]);
+console.log(JSON.stringify({started, afterA}));
+`
+	var got struct {
+		Started int `json:"started"`
+		AfterA  int `json:"afterA"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Started != 2 {
+		t.Fatalf("started %d lookups for two different cameras, want 2", got.Started)
+	}
+	if got.AfterA != 2 {
+		t.Errorf("started %d lookups in total, want the one still running to keep its mark", got.AfterA)
+	}
+}
+
 // UVC を使っていないなら、カメラを開いてはいけません。
 //
 // 設定には前に使ったカメラ名が残り、fill() はそれを隠れている入力欄にも書きます。
@@ -399,14 +443,72 @@ console.log(JSON.stringify({whileSerial, afterSwitch: asked}));
 	}
 }
 
-// 設定を読み込んだ直後にも候補を取りに行かなければなりません。
+// フォームを書き直したら、候補も取り直さなければなりません。
 //
-// 既にカメラ名が設定にある人は、入力欄に触りません。触らなければ change も blur も
-// 起きないので、その人 — 画面を開く理由が最もある人 — だけが候補を見られない、
-// ということになります。
-func TestSettingsPageAsksForModesOfTheCameraAlreadyConfigured(t *testing.T) {
-	if !strings.Contains(uiSettingsHTML, "load().then(loadCameraModes)") {
-		t.Error("the settings page must look up the modes after it fills the form; the events it listens for do not fire when the form fills itself")
+// 代入では change も blur も起きません。読み込み時だけの話ではなく、保存のたびに
+// 通る経路でもあります — トレイや別のクライアントがカメラを変えていれば、応答が
+// この欄をそちらへ書き換えるので、欄と候補が別のカメラを指したままになります。
+func TestSettingsPageLooksUpTheModesWheneverItRewritesTheForm(t *testing.T) {
+	for _, name := range []string{"function fill(cfg) {", "function rebase(cfg, keep) {"} {
+		body := settingsFunction(t, name)
+		if !strings.Contains(body, "loadCameraModes()") {
+			t.Errorf("%s does not look up the camera modes; the events the page listens for do not fire when the form fills itself", name)
+		}
+	}
+}
+
+// settingsFunction は、画面のスクリプトから 1 つの関数の中身を切り出します。
+// 終わりは行頭の "}" — このファイルの関数はすべてその形で閉じています。
+func settingsFunction(t *testing.T, header string) string {
+	t.Helper()
+	start := strings.Index(uiSettingsHTML, header)
+	if start < 0 {
+		t.Fatalf("could not find %q in the settings page", header)
+	}
+	rest := uiSettingsHTML[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatalf("could not find the end of %q", header)
+	}
+	return rest[:end]
+}
+
+// 同じフレンドリ名のカメラが 2 台あるときは、見分けられる名前も候補に出さなければ
+// なりません。どちらを選んでも同じ要求になり、モードの問い合わせもキャプチャも
+// 常に同じ 1 台を開くためです。重複していないカメラには足しません — 長い名前は、
+// それが要る人にだけ見せます。
+func TestSettingsPageOffersTheDevicePathOnlyWhenNamesCollide(t *testing.T) {
+	harness := `
+console.log(JSON.stringify({
+  unique: cameraChoices([
+    {name: "Bigeye", alternative: "@device_pnp_one"},
+    {name: "Webcam", alternative: "@device_pnp_two"},
+  ]),
+  collided: cameraChoices([
+    {name: "USB Camera", alternative: "@device_pnp_one"},
+    {name: "USB Camera", alternative: "@device_pnp_two"},
+  ]),
+  bare: cameraChoices([{name: "Bigeye"}]),
+}));
+`
+	var got struct {
+		Unique   []string `json:"unique"`
+		Collided []string `json:"collided"`
+		Bare     []string `json:"bare"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"Bigeye", "Webcam"}; !equalStrings(got.Unique, want) {
+		t.Errorf("choices for cameras with their own names = %v, want %v", got.Unique, want)
+	}
+	if want := []string{"USB Camera", "@device_pnp_one", "USB Camera", "@device_pnp_two"}; !equalStrings(got.Collided, want) {
+		t.Errorf("choices for two cameras sharing a name = %v, want %v", got.Collided, want)
+	}
+	if want := []string{"Bigeye"}; !equalStrings(got.Bare, want) {
+		t.Errorf("choices for a camera with no device path = %v, want %v", got.Bare, want)
 	}
 }
 

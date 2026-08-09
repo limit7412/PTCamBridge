@@ -3007,8 +3007,18 @@ type fakeModeLister struct {
 	err     error
 }
 
+// onWindowsCameraRules は、カメラが排他的なプラットフォームの規則で走らせる。
+// テストは Windows で走らないので、これが無いと掴んでいるカメラの筋を踏めない。
+func onWindowsCameraRules(t *testing.T) {
+	t.Helper()
+	prev := exclusiveCameraAccess
+	exclusiveCameraAccess = true
+	t.Cleanup(func() { exclusiveCameraAccess = prev })
+}
+
 func (f *fakeModeLister) install(t *testing.T) {
 	t.Helper()
+	onWindowsCameraRules(t)
 	prev := listModes
 	listModes = func(_ context.Context, _, device string) ([]source.Mode, error) {
 		f.mu.Lock()
@@ -3127,6 +3137,29 @@ func TestCameraModesSaysWhenItIsTheOneHoldingTheCamera(t *testing.T) {
 	}
 	if got := lister.count(); got != 0 {
 		t.Errorf("ffmpeg ran %d times for a camera the bridge is holding, want 0", got)
+	}
+}
+
+// 排他的でないプラットフォームでは、掴んでいることを理由に断ってはいけない。
+//
+// 列挙が実際にデバイスを開くのは DirectShow だけで、他では ListModes が何も
+// 開かずに空を返す。そこで断ると、無言のはずの機能が、案内した先 — トレイの
+// 一時停止 — が存在しない環境で、直しようのないエラーになる。
+func TestCameraModesDoesNotClaimExclusivityWhereThereIsNone(t *testing.T) {
+	lister := &fakeModeLister{}
+	lister.install(t)
+	exclusiveCameraAccess = false
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	modes, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+	if len(modes) != 0 {
+		t.Errorf("modes = %v, want the silent empty answer", modes)
+	}
+	if got := lister.count(); got != 1 {
+		t.Errorf("asked %d times, want the platform's own answer to decide", got)
 	}
 }
 
