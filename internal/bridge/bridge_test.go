@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2155,6 +2156,48 @@ func waitFor(t *testing.T, timeout time.Duration, what string, want func() bool)
 
 // silentUpstream は応答した後に何も言わない。ドライバは接続して待ち続け、検証は
 // そこで待てない。
+// silentUpstreamConnected は silentUpstream に「繋がった」合図を足したもの。
+//
+// 検証の最中にキャンセルするテストには、固定の sleep ではなくこれが要る。applyLocked は
+// 冒頭で ctx を見て、既に終わっていれば検証へ進まずに返す。負荷の高い CI で goroutine が
+// sleep の間に検証まで辿り着けないと、実装が正しくてもテストが落ちる。
+//
+// 上流に接続が来たことは、ドライバが起動して applyLocked が verifyStartLocked の中で
+// 待っていることを意味する。ドライバが起動する経路は、その冒頭の判定を通った先にしか
+// 無いため。
+func silentUpstreamConnected(t *testing.T) (*httptest.Server, <-chan struct{}) {
+	t.Helper()
+	connected := make(chan struct{})
+	var once sync.Once
+	done := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// 再接続で複数回来るので once。閉じるのは最初の 1 回だけ。
+		once.Do(func() { close(connected) })
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(done); ts.Close() })
+	return ts, connected
+}
+
+// waitForVerify は、新しいソースが上流に繋がるまで待つ。ここから先でキャンセルすれば、
+// 検証の最中に割り込んだことになる。
+func waitForVerify(t *testing.T, connected <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the new source never reached the upstream, so nothing was interrupted mid-verification")
+	}
+}
+
 func silentUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	done := make(chan struct{})
@@ -2791,7 +2834,7 @@ func TestRestartOnlyLeavesMatchWhatCanBeDeferred(t *testing.T) {
 func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
 	shortenVerify(t, 5*time.Second)
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
-	silent := silentUpstream(t)
+	silent, connected := silentUpstreamConnected(t)
 
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -2815,7 +2858,7 @@ func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
 		_, _, err := b.Apply(reqCtx, mjpegConfig(silent.URL))
 		done <- err
 	}()
-	time.Sleep(200 * time.Millisecond)
+	waitForVerify(t, connected)
 	cancel()
 
 	if err := <-done; err == nil {
@@ -2843,7 +2886,7 @@ func TestACancelledRequestIsNotReportedAsASourceFailure(t *testing.T) {
 func TestShuttingDownTheBridgeIsNotASourceFailure(t *testing.T) {
 	shortenVerify(t, 5*time.Second)
 	working := mjpegUpstream(t, testJPEG(t, 32, 32))
-	silent := silentUpstream(t)
+	silent, connected := silentUpstreamConnected(t)
 
 	var logged bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -2867,7 +2910,7 @@ func TestShuttingDownTheBridgeIsNotASourceFailure(t *testing.T) {
 		_, _, err := b.Apply(context.Background(), mjpegConfig(silent.URL))
 		done <- err
 	}()
-	time.Sleep(200 * time.Millisecond)
+	waitForVerify(t, connected)
 	shutdown()
 
 	err := <-done
