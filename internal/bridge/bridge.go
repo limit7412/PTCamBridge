@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,7 +105,41 @@ type Bridge struct {
 	// ことすらできなくなります。
 	view atomic.Pointer[view]
 
-	mu      sync.Mutex
+	// modes は、列挙に成功したカメラのモードを、名前 (小文字化したもの) ごとに
+	// 憶えたものです。identities は、最後に数えた顔ぶれ — 名前と
+	// "@device_pnp_..." のそれぞれから、その 1 台の素性を引きます。listing は
+	// 今走っている列挙です。CameraModes を参照。
+	//
+	// listing の鍵は打たれた名前 (小文字化したもの) です。素性にしないのは、
+	// 素性が後から変わるからです — 登録した後に顔ぶれを数え直すと、その鍵では
+	// 誰も引けなくなります。同じ 1 台かどうかは findListingLocked が、そのつど
+	// 素性に直して見ます。
+	modesMu    sync.Mutex
+	modes      map[string]modeMemory
+	identities map[string][]string
+	// countedListing は、いま反映されているデバイス一覧の札です。遅れて戻った
+	// 古い一覧に巻き戻されないために持ちます。Devices を参照。
+	countedListing uint64
+	nextListing    uint64
+	listing        map[string]*modeLookup
+	// listingWG は走っている列挙です。Stop が終わりを待ちます。stopped は、その
+	// 待ちが済んだ後です — 以降は新しい列挙を始めません。
+	listingWG      sync.WaitGroup
+	lookupsStopped bool
+
+	// lifetime は、このアプリケーションが動いている間だけ生きているコンテキスト
+	// です (Start が受け取るもの)。列挙はこれの下で走ります — 要求 1 本より長く、
+	// プロセスより短く。listModesOnce を参照。
+	//
+	// root と同じものですが、こちらはロックの外から読めます。mu の下に置くと、
+	// 設定変更中の Apply が最長 30 秒それを握るので、モードを訊いた画面がその間
+	// 待たされます。
+	lifetime atomic.Pointer[context.Context]
+
+	mu sync.Mutex
+	// opening は、launchLocked が今まさに開こうとしているカメラの名前です。
+	// view を通して公開します。capturing を参照。
+	opening string
 	cfg     config.Config
 	root    context.Context
 	cancel  context.CancelFunc
@@ -150,10 +186,43 @@ type pendingSave struct {
 	from config.Config
 }
 
+// modeMemory は、1 台のカメラについて憶えたモードと、憶えたときのその個体の
+// 素性です。素性は「同じカメラかどうか」を後から言えるようにするためだけにあります。
+type modeMemory struct {
+	modes    []source.Mode
+	identity string
+}
+
+// modeLookup は、走っている列挙 1 つと、その答えを待っている側への受け渡しです。
+// modes と err は done を閉じる前に書き、閉じた後は読むだけです。
+type modeLookup struct {
+	done chan struct{}
+	// device は、この列挙が訊いている名前です。走っている列挙を探すときは、
+	// これを毎回そのときの素性に直して突き合わせます (findListingLocked)。
+	// 素性そのものを鍵にすると、登録の後に顔ぶれを数え直しただけで、走っている
+	// 列挙を誰も見つけられなくなります。
+	device string
+	// identity は、この列挙を始めたときにそのカメラが持っていた素性です。
+	// rememberModesLocked を参照。
+	identity string
+	// cancel は、この列挙を諦めさせます。使うのは 2 つの場面だけ — 終了と、
+	// 同じカメラをキャプチャのために開くとき。要求 1 本が去っただけでは使いません。
+	cancel context.CancelFunc
+	// waiting は、この 1 本の答えを待っている呼び出しの数です。modesMu の下で
+	// 数えます。
+	waiting int
+	modes   []source.Mode
+	err     error
+}
+
 // view は、呼び出し側が読むだけで決して変更しないもののロックフリーな写しです。
 type view struct {
 	cfg    config.Config
 	paused bool
+	// opening は、今まさに開こうとしているカメラです。設定そのものと違って、
+	// これは検証を通る前から公開します。何を開こうとしているかは、その時点で
+	// 確定しているからです。capturing を参照。
+	opening string
 }
 
 // provenLocked は、現在の設定の背後に動くソースがあるかどうかを返します。起動に
@@ -164,7 +233,7 @@ func (b *Bridge) provenLocked() bool {
 
 // publishView はロックフリーな写しを更新します。呼び出し側が mu を保持します。
 func (b *Bridge) publishView() {
-	b.view.Store(&view{cfg: b.cfg, paused: b.paused})
+	b.view.Store(&view{cfg: b.cfg, paused: b.paused, opening: b.opening})
 }
 
 // New は、渡された設定でブリッジを組み立てます。キャプチャを始めるには Start を
@@ -234,6 +303,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return errors.New("bridge: already started")
 	}
 	b.root = ctx
+	b.lifetime.Store(&ctx)
 	// 起動時は検証しない。まだ挿さっていないカメラは、現れたときに拾えなければ
 	// ならず、ドライバを畳んでしまうとそれができなくなる。
 	return b.startLocked()
@@ -242,8 +312,94 @@ func (b *Bridge) Start(ctx context.Context) error {
 // Stop はキャプチャを止め、ドライバがデバイスを解放し終えるまで待ちます。
 func (b *Bridge) Stop() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.stopLocked()
+	b.mu.Unlock()
+
+	// 走っている列挙も止めて、終わるまで待ちます。待たないと、こちらのプロセスが
+	// 先に終わり、ffmpeg が残ってカメラを掴んだままになり得ます — Windows の
+	// 子プロセスは親と一緒には死にません。カメラを解放しないまま終わることは、
+	// このアプリケーションが最もしてはいけないことです。
+	b.stopLookups()
+}
+
+// stopLookups は、走っている列挙をすべて諦めさせ、終わるまで待ちます。
+func (b *Bridge) stopLookups() {
+	b.modesMu.Lock()
+	// 印を立てるのは待つ前です。待っている間に始まった列挙は、この Wait では
+	// 拾えません。拾えないものを止める唯一の方法は、始めさせないことです。
+	b.lookupsStopped = true
+	for _, call := range b.listing {
+		call.cancel()
+	}
+	b.modesMu.Unlock()
+	b.listingWG.Wait()
+}
+
+// cancelListing は、名前で指定されたカメラの列挙を諦めさせ、手放すまで待ちます。
+//
+// キャプチャがそのカメラを開く直前に呼びます。排他的なデバイスなので、両方は
+// 開けません。列挙は後からやり直せますが、キャプチャはここで失敗すると設定ごと
+// 巻き戻ります — どちらかが譲るなら、譲るのは列挙の側です。
+func (b *Bridge) cancelListing(device string) {
+	b.modesMu.Lock()
+	// 1 本とは限りません。素性が分かる前は、同じ 1 台が名前と "@device_pnp_..."
+	// で別々に登録され得ます。1 本だけ止めても、もう 1 本がカメラを掴んだままです。
+	running := b.listingsForLocked(device)
+	for _, call := range running {
+		call.cancel()
+	}
+	b.modesMu.Unlock()
+	for _, call := range running {
+		<-call.done
+	}
+}
+
+// findListingLocked は、その答えを共有してよい列挙を返します。呼び出し側が
+// modesMu を保持します。
+//
+// 共有には**確かに同じ 1 台**であることを求めます。sameCameraLocked の
+// 「同じ可能性がある」で合流させると、フレンドリ名を共有する 2 台があるときに、
+// 共有名の列挙 (ffmpeg が開くのは常にそのうちの 1 台) の答えを、もう一方の
+// 代替名で訊いた画面へ渡すことになります。開けないことより悪い — 別の機種の
+// 解像度を「対応している」として勧めます。
+//
+// 走っている分をそのつど素性に直して見ます。登録のときの素性を鍵にすると、その後
+// Devices が顔ぶれを数え直しただけで鍵が変わり、走っている列挙を誰も見つけられ
+// なくなります — 2 本目の ffmpeg が同じカメラへ向かい、キャプチャの起動もそれに
+// 手放させられなくなります。
+func (b *Bridge) findListingLocked(device string) *modeLookup {
+	for _, call := range b.listing {
+		if b.sameCameraForSureLocked(call.device, device) {
+			return call
+		}
+	}
+	return nil
+}
+
+// sameCameraForSureLocked は、2 つの名前が確かに同じ 1 台を指しているかを返します。
+// 呼び出し側が modesMu を保持します。
+//
+// sameCameraLocked との違いは、迷ったときにどちらへ倒すかです。あちらは「開きに
+// 行かない」ための判定なので、同じ可能性があれば衝突させます。こちらは「答えを
+// 渡してよいか」の判定なので、言い切れなければ渡しません。
+func (b *Bridge) sameCameraForSureLocked(a, c string) bool {
+	if strings.EqualFold(a, c) {
+		return true
+	}
+	identity := b.identityOfLocked(a)
+	return identity != "" && identity == b.identityOfLocked(c)
+}
+
+// listingsForLocked は、そのカメラについて走っている列挙をすべて返します。
+// 呼び出し側が modesMu を保持します。
+func (b *Bridge) listingsForLocked(device string) []*modeLookup {
+	var found []*modeLookup
+	for _, call := range b.listing {
+		if b.sameCameraLocked(call.device, device) {
+			found = append(found, call)
+		}
+	}
+	return found
 }
 
 // Snapshot は現在有効な設定を返します。
@@ -793,10 +949,22 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	var devices server.Devices
 
-	cameras, err := source.ListDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
+	// 始めた順に札を取ります。列挙は数秒かかることがあり、要求は重なります
+	// (トレイと設定画面、タブが 2 つ、など)。戻る順は始めた順とは限らないので、
+	// 札が無いと、遅れて戻った古い一覧が新しい顔ぶれを上書きします。差し替えた
+	// 直後にそれが起きると、素性が前のカメラへ巻き戻り、動いているカメラを
+	// 「別のカメラ」と答えるようになります。
+	started := b.nextDeviceListing()
+
+	cameras, err := listDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
 	if err != nil {
 		b.log.Warn("could not list capture devices", "error", err)
 		devices.CameraError = err.Error()
+	} else {
+		// 列挙できたときだけ照らし合わせる。失敗した一覧は「1 台も無い」とは
+		// 違うので、それを顔ぶれの変化として読むと、ffmpeg が一度でも転んだ
+		// 拍子に憶えを捨てることになる。
+		b.forgetModesIfCamerasChanged(started, cameras)
 	}
 	devices.Cameras = cameras
 
@@ -808,6 +976,387 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	devices.SerialPorts = ports
 
 	return devices
+}
+
+// listModes は差し替えられるようにしてあります。本物は Windows でしか答えず
+// (source.ListModes を参照)、テストは Windows で走らないので、これが無いと
+// CameraModes の憶えと諦めの筋を 1 本も踏めません。
+var listModes = source.ListModes
+
+// listDevices も同じ理由で差し替えられるようにしてあります。
+var listDevices = source.ListDevices
+
+// exclusiveCameraAccess は、キャプチャ中のカメラをもう一度開けないかどうかです。
+//
+// Windows だけです。列挙が実際にデバイスを開くのは DirectShow だけで、他の
+// プラットフォームの ListModes は何も開かずに空を返します (相当する仕組みが
+// 無いことを、エラーではなく無言で表しています。source.ListModes を参照)。
+// そこで掴んでいることを理由に断ると、無言のはずの機能が、Windows でしか意味の
+// 無い — トレイも一時停止も無い環境の — エラーになります。
+//
+// var なのはテストのためです。テストは Windows で走りません。
+var exclusiveCameraAccess = runtime.GOOS == "windows"
+
+// CameraModes は、1 台のカメラが申告するモードを返します。
+//
+// 列挙はカメラを開きます。UVC デバイスは排他的なので、ブリッジが今キャプチャして
+// いるカメラを訊かれると、その列挙は開けずに失敗します。しかも設定画面でいちばん
+// よく訊かれるのは、まさにその「今のカメラ」です。
+//
+// そこで、うまくいった列挙の答えをカメラ名ごとに憶えておき、開けなかったときは
+// それを返します。モードはカメラの持ち物で、こちらの都合では変わらないので、
+// 一度得た答えは後からでも正しいままです。キャプチャを止める — 一時停止でも、
+// 別のソースへの切り替えでも — とカメラは解放されるので、そこで一度訊けば以降は
+// 憶えたもので答えられます。
+//
+// 憶えが無く、かつ訊かれたのが今キャプチャしているカメラだった場合は、開きに
+// 行かずにその場で失敗させます。開けないと分かっているものを開きに行っても、
+// 列挙が自前の 15 秒を使い切ってから同じ答えに辿り着くだけです。しかも失敗は
+// 憶えないので、画面がカメラ名に触れるたびにそれを払うことになります。
+func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode, error) {
+	if exclusiveCameraAccess && b.capturing(device) {
+		if modes, ok := b.recallModes(device); ok {
+			return modes, nil
+		}
+		return nil, fmt.Errorf("uvc: PTCamBridge is capturing %s right now and a UVC camera cannot be opened twice, so pause capture from the tray to look at its modes", device)
+	}
+
+	modes, err := b.listModesOnce(ctx, device)
+	if err == nil {
+		return modes, nil
+	}
+	// 掴んでいないはずのカメラでも、名前の比較は完全ではありません。設定が
+	// フレンドリ名を持ち、画面が "@device_pnp_..." で訊けば (あるいはその逆なら)、
+	// 同じ 1 台でも別物に見えます。憶えがあるなら、気付けなくても答えは出せます。
+	if modes, ok := b.recallModes(device); ok {
+		b.log.Debug("could not list the camera modes; answering with what it said earlier", "device", device, "error", err)
+		return modes, nil
+	}
+	return nil, err
+}
+
+// listModesOnce は、1 台のカメラについて同時に 1 つだけ列挙を走らせます。
+// 同じカメラを訊いている他の呼び出しは、その 1 つの答えを待って共有します。
+//
+// 画面の側にも同じ抑止がありますが、あちらが知っているのはそのページの中だけです。
+// 設定画面を 2 つのタブで開く、あるいは管理 API を並べて叩くと、同じカメラへ
+// ffmpeg が 2 本向かいます。排他的なデバイスなので、その 2 本は互いを失敗させ得ます。
+// 開くのはこちらなので、抑止もこちらに要ります。
+func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mode, error) {
+	b.modesMu.Lock()
+	if b.lookupsStopped {
+		b.modesMu.Unlock()
+		return nil, errors.New("uvc: PTCamBridge is shutting down")
+	}
+	if call := b.findListingLocked(device); call != nil {
+		call.waiting++
+		b.modesMu.Unlock()
+		return awaitModes(ctx, call)
+	}
+	// 同じ 1 台かもしれない列挙が走っているなら、こちらは始めません。答えを
+	// 分けることもしません — 共有名が開くのはその名前を持つ 1 台だけなので、
+	// その答えが今訊かれている個体のものだとは言えません。開けば排他的な
+	// デバイスを取り合い、分ければ別の機種のモードを勧めます。断って、その 1 本が
+	// 終わってから訊き直してもらいます。
+	if exclusiveCameraAccess && len(b.listingsForLocked(device)) > 0 {
+		b.modesMu.Unlock()
+		return nil, fmt.Errorf("uvc: PTCamBridge is listing the modes of a camera that may be %s right now, so try again in a moment", device)
+	}
+	// 掴んでいるかどうかを、登録と同じロックの下でもう一度見ます。呼び出し側の
+	// 判定はロックの外なので、その後・ここへ来る前に、キャプチャがそのカメラを
+	// 予約していることがあります (launchLocked は予約してから cancelListing で
+	// modesMu を取ります)。ここで見なければ、その予約をすり抜けた列挙が 1 本
+	// 登録され、起動と取り合います。
+	if exclusiveCameraAccess && b.openingLocked(device) {
+		b.modesMu.Unlock()
+		return nil, fmt.Errorf("uvc: PTCamBridge is opening %s right now", device)
+	}
+	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
+	// 同じ答えを待っている他の要求まで巻き添えになります。だから要求の期限からは
+	// 切り離し、代わりにこのアプリケーションの生存期間に結びます。終了時に
+	// 止まらないと、ffmpeg が残ってカメラを掴んだままになり得ます。
+	lifetime := context.Background()
+	if lt := b.lifetime.Load(); lt != nil {
+		lifetime = *lt
+	}
+	runCtx, cancel := context.WithCancel(lifetime)
+
+	key := strings.ToLower(device)
+	call := &modeLookup{done: make(chan struct{}), device: device, cancel: cancel, identity: b.identityOfLocked(device)}
+	if b.listing == nil {
+		b.listing = make(map[string]*modeLookup)
+	}
+	b.listing[key] = call
+	// 数えるのは登録と同じロックの下です。解いた後に足すと、その隙間に入った
+	// Stop が「走っているものは無い」と見て待ち終え、その後で列挙が始まります。
+	b.listingWG.Add(1)
+	b.modesMu.Unlock()
+
+	ffmpegPath := b.Snapshot().Source.UVC.FFmpegPath
+	go func() {
+		defer b.listingWG.Done()
+		defer cancel()
+		modes, err := listModes(runCtx, ffmpegPath, device)
+		b.modesMu.Lock()
+		delete(b.listing, key)
+		if err == nil {
+			changed := b.cameraChangedLocked(device, call.identity)
+			// 憶えるのはここです。呼び出し側で憶えると、この列挙を始めたときの
+			// 素性が分からなくなります。
+			b.rememberModesLocked(device, modes, call.identity)
+			if changed {
+				// 憶えないだけでは足りません。待っている要求へ成功として返せば、
+				// 画面は名前が変わっていないのでそれを受け取り、今そこにいる
+				// カメラが持っていない候補を並べ、それ以外を保存できなくします。
+				modes, err = nil, fmt.Errorf("uvc: %s changed while its modes were being listed", device)
+			}
+		}
+		b.modesMu.Unlock()
+		call.modes, call.err = modes, err
+		close(call.done)
+	}()
+
+	return awaitModes(ctx, call)
+}
+
+// awaitModes は、走っている列挙の答えを待ちます。
+//
+// 写しを渡すのは、憶えと同じ理由 — 待っていた全員が同じ 1 本を書き換え合わない
+// ためです。呼び出し側の要求が先に終わればそちらを返します。列挙は止めません。
+func awaitModes(ctx context.Context, call *modeLookup) ([]source.Mode, error) {
+	select {
+	case <-call.done:
+		return slices.Clone(call.modes), call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// capturing は、名前で指定されたカメラを今このブリッジが握っている — あるいは
+// まさに開こうとしている — かどうかを返します。一時停止中はカメラを解放している
+// ので、握っていないと答えます。
+func (b *Bridge) capturing(device string) bool {
+	if device == "" {
+		return false
+	}
+	v := b.view.Load()
+	// DirectShow のフレンドリ名は大文字小文字を区別しません。
+	if v.opening != "" && strings.EqualFold(v.opening, device) {
+		// 開いている最中。設定の側はまだ動いていないことがあります — 検証を
+		// 通っていない設定を公開しないので (applyLocked を参照)、その窓は最長で
+		// startVerifyTimeout です。それを「空いている」と読ませると、その 30 秒の
+		// あいだに来た問い合わせがカメラを開きに行き、起動と取り合います。
+		return true
+	}
+	if v.paused || v.cfg.Source.Type != config.SourceUVC {
+		return false
+	}
+	return strings.EqualFold(v.cfg.Source.UVC.Device, device)
+}
+
+// sameCameraLocked は、2 つの名前が同じ 1 台を指しているかを返します。
+// 呼び出し側が modesMu を保持します。
+//
+// 同じ 1 台をフレンドリ名でも "@device_pnp_..." でも指せるので、文字列を突き
+// 合わせるだけだと、別々の名前で同じカメラを 2 回開きます。画面が代替名で調べて
+// いる最中に Apply がフレンドリ名で起動する、という形が実際に起こります。素性は
+// 顔ぶれを数えたときに両方から引けるようにしてあります
+// (forgetModesIfCamerasChanged を参照)。
+//
+// フレンドリ名が重複しているときは、その名前は**どの個体でもあり得ます**。
+// どれか 1 つに決めると、決めなかった側を「別のカメラ」と答えることになり、
+// 動いているカメラへ列挙を向けます。だから候補が 1 つでも重なれば同じ 1 台と
+// 見ます — 排他の判定で迷ったときは、衝突する側へ倒します。
+//
+// 一覧に無い名前は、打たれたまま小文字で突き合わせます。知らないものを勝手に
+// 束ねることはできません。
+func (b *Bridge) sameCameraLocked(a, c string) bool {
+	la, lc := strings.ToLower(a), strings.ToLower(c)
+	if la == lc {
+		return true
+	}
+	mine, theirs := b.identities[la], b.identities[lc]
+	for _, identity := range mine {
+		if slices.Contains(theirs, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+// identityOfLocked は、その名前が指す個体を 1 つに決められるならそれを返します。
+// 決められなければ空を返します — 一覧に無い名前と、フレンドリ名が重複していて
+// どの個体か言えない名前です。呼び出し側が modesMu を保持します。
+func (b *Bridge) identityOfLocked(device string) string {
+	if found := b.identities[strings.ToLower(device)]; len(found) == 1 {
+		return found[0]
+	}
+	return ""
+}
+
+// openingLocked は、今まさに開こうとしているカメラかどうかを、素性まで見て
+// 答えます。呼び出し側が modesMu を保持します。
+//
+// capturing は名前を突き合わせるだけなので、設定がフレンドリ名を持ち、画面が
+// "@device_pnp_..." で訊いた (あるいはその逆の) ときにすり抜けます。ここは
+// 列挙を登録する直前 — すり抜けたものが実際にカメラを開く場所 — なので、
+// 素性で見ます。
+func (b *Bridge) openingLocked(device string) bool {
+	if device == "" {
+		return false
+	}
+	v := b.view.Load()
+	if v.opening != "" && b.sameCameraLocked(v.opening, device) {
+		return true
+	}
+	// 既に開き終えたカメラも同じです。capturing はここでも名前しか見ないので、
+	// 動いているカメラを代替名で訊かれると「空いている」と答えます。
+	if v.paused || v.cfg.Source.Type != config.SourceUVC || v.cfg.Source.UVC.Device == "" {
+		return false
+	}
+	return b.sameCameraLocked(v.cfg.Source.UVC.Device, device)
+}
+
+// rememberModesLocked / recallModes は、列挙に成功した答えを憶え、思い出します。
+//
+// mu ではなく専用のロックの下に置いてあります。設定変更中の Apply は mu をソースの
+// 検証のあいだ — 最長で startVerifyTimeout — 握るので、mu の下に置くと、設定画面が
+// カメラ名を打っただけで 30 秒待たされます。
+//
+// started は、その列挙を始めたときにそのカメラが持っていた素性です。戻ってきた
+// 時点の素性と違えば、憶えません。調べている 15 秒の間に同じ名前の別機種へ
+// 差し替わったということなので、その答えは今そこにあるカメラのものではありません。
+// 今の素性を貼ると、後の照合も素通りして、二度と捨てられなくなります。
+func (b *Bridge) rememberModesLocked(device string, modes []source.Mode, started string) {
+	key := strings.ToLower(device)
+	if b.identityOfLocked(device) != started {
+		b.log.Debug("the camera it was told about changed while its modes were being listed, not remembering them", "device", device)
+		return
+	}
+	if b.modes == nil {
+		b.modes = make(map[string]modeMemory)
+	}
+	// 素性が空のままのことはあります (一覧より先に訊かれた場合)。次にそのカメラが
+	// 一覧に現れたときに埋まります。forgetModesIfCamerasChanged を参照。
+	b.modes[key] = modeMemory{modes: slices.Clone(modes), identity: started}
+}
+
+// cameraChangedLocked は、その列挙を始めてから、その名前が別の個体を指すように
+// なったかを返します。呼び出し側が modesMu を保持します。
+//
+// 始めた時点で素性を知らなかった (started が空) 場合は「変わった」とは言いません。
+// 後から分かったことは変化ではなく、そこで得たモードは、たった今そのカメラが
+// 申告したものです。憶えはしません — 同じ 1 台だったと確かめられないので —
+// が、訊いた人には返します。
+func (b *Bridge) cameraChangedLocked(device, started string) bool {
+	return started != "" && b.identityOfLocked(device) != started
+}
+
+// nextDeviceListing は、これから始めるデバイス一覧の札を配ります。大きいほど
+// 新しく、遅れて戻った古い一覧はこれで見分けます。
+func (b *Bridge) nextDeviceListing() uint64 {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	b.nextListing++
+	return b.nextListing
+}
+
+// forgetModesIfCamerasChanged は、素性の変わったカメラの憶えだけを捨てます。
+//
+// モードが変わらないのは同じ 1 台についてだけです。憶えの鍵は名前ですが、名前は
+// 個体を指しません — "USB Camera" は次に挿した別機種にも付きます。抜き挿しで
+// 入れ替わったカメラに、前の機種のモードを勧め続けることになります。
+//
+// 個体の識別子だけで憶える方法は取っていません。CameraModes が受け取るのは画面が
+// 打った名前だけで、そこから個体を引くにはデバイス一覧が要り、一覧は ffmpeg を
+// 1 回起動します。顔ぶれは既に — デバイス一覧を読むこの経路で — 手元にあるので、
+// 憶えるときにそこから素性を添えます。
+//
+// 捨てるのは素性が変わったものだけです。顔ぶれ全体で一致を見ると、無関係な
+// カメラを 1 台挿しただけで全部消えます。そのとき今キャプチャしているカメラは
+// もう調べ直せないので、正しかった答えを二度と出せなくなります。
+func (b *Bridge) forgetModesIfCamerasChanged(started uint64, cameras []source.Device) {
+	// 名前でも "@device_pnp_..." でも引けるようにします。画面はどちらでも
+	// 訊けるので、憶えの鍵もどちらにもなり得ます。
+	//
+	// フレンドリ名が重複しているときは、その名前に**両方**を並べます。どれか 1 つ
+	// に決めると、決めなかった側を別のカメラと答えることになります。
+	identities := make(map[string][]string, len(cameras)*2)
+	add := func(name, identity string) {
+		key := strings.ToLower(name)
+		if !slices.Contains(identities[key], identity) {
+			identities[key] = append(identities[key], identity)
+		}
+	}
+	for _, c := range cameras {
+		identity := c.Name + "\x00" + c.Alternative
+		add(c.Name, identity)
+		if c.Alternative != "" {
+			add(c.Alternative, identity)
+		}
+	}
+
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	// 自分より後に始まった一覧が先に反映されていれば、こちらは古い。捨てます。
+	if started < b.countedListing {
+		b.log.Debug("a newer device listing already landed, not rolling the cameras back")
+		return
+	}
+	b.countedListing = started
+	b.identities = identities
+	for key, entry := range b.modes {
+		now, listed := b.identityOfLocked(key), len(identities[key]) > 0
+		switch {
+		case entry.identity == "":
+			// 素性を知らずに憶えたもの。一覧より先にモードを訊いた場合です。
+			// 今の素性を貼ることはできません — 訊いてから数えるまでの間に
+			// 同じ名前の別機種へ差し替わっていても、こちらにはそれを言う材料が
+			// 無いからです。貼ってしまうと以後の照合も素通りして、他機種の
+			// モードを勧め続けます。分からないものは捨てます。
+			//
+			// 失うものは、ほぼありません。設定画面は最初の一覧を待ってから
+			// モードを訊くので (ui_settings.html の devicesListed を参照)、
+			// この経路に落ちるのは API を直に叩いた場合だけです。掴んでいない
+			// カメラなら訊き直せます。
+			b.log.Debug("forgetting modes learned before the cameras were counted", "device", key)
+			delete(b.modes, key)
+		case !listed:
+			// 今は見えないカメラ。見えないことは入れ替わったことではないので、
+			// 憶えたままにします。戻ってきたものが別の個体なら、そのとき素性で
+			// 分かります。
+		case now != entry.identity:
+			b.log.Debug("a camera was replaced, forgetting the modes the old one reported", "device", key)
+			delete(b.modes, key)
+		}
+	}
+}
+
+// recallModes は、そのカメラについて憶えているモードを返します。
+//
+// 打たれた名前だけでなく、同じ 1 台を指す別名でも引きます。憶えるのは訊かれた
+// 名前ですが、訊く名前は場面ごとに変わります — 一時停止中にフレンドリ名で憶えた
+// ものを、キャプチャ中に "@device_pnp_..." で訊かれる、という形が実際に起こります。
+// そこで引けないと、掴んでいて調べ直せないカメラについて、答えを持っているのに
+// エラーを返すことになります。
+func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	if entry, ok := b.modes[strings.ToLower(device)]; ok {
+		return slices.Clone(entry.modes), true
+	}
+	// 別名から引くときは、個体が**一意に決まる**ことを求めます。排他の判定で
+	// 使う sameCameraLocked は「同じ可能性がある」で真になりますが、それは
+	// 開きに行かないための保守側で、答えを渡す理由にはなりません。フレンドリ名
+	// を共有する 2 台があるとき、共有名で開かれるのは常に同じ 1 台なので、
+	// もう一方のモードを渡すと、そのカメラが持っていない値を勧めることに
+	// なります。
+	for key, entry := range b.modes {
+		if b.sameCameraForSureLocked(key, device) {
+			return slices.Clone(entry.modes), true
+		}
+	}
+	return nil, false
 }
 
 // SetPaused はキャプチャを停止または再開します。一時停止はカメラを解放します。
@@ -896,6 +1445,24 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		// カメラが、誰かが再開するまで「古いカメラがまだ失敗している」ように見える。
 		b.status.SetSource(b.cfg.Source.Type)
 		return nil
+	}
+
+	// 開こうとしているカメラを列挙が掴んでいるなら、先に手放させます。排他的な
+	// デバイスなので、両方は開けません。ここで衝突すると、モードを見てから保存
+	// した人 — つまりこの機能を使った人 — の設定だけが巻き戻ります。
+	//
+	// 手放させるだけでは足りません。その後に来た問い合わせが、また開きに行きます。
+	// 開いている間は、こちらのものだと言い切ります。
+	if b.cfg.Source.Type == config.SourceUVC {
+		// 先に予約してから手放させます。逆にすると、手放した直後・開く直前に来た
+		// 問い合わせが、また同じカメラを開きに行きます。
+		b.opening = b.cfg.Source.UVC.Device
+		b.publishView()
+		defer func() {
+			b.opening = ""
+			b.publishView()
+		}()
+		b.cancelListing(b.cfg.Source.UVC.Device)
 	}
 
 	drv, err := b.newSource()

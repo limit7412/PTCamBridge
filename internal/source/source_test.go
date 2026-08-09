@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,4 +252,201 @@ func containsPair(args []string, flag, value string) bool {
 		}
 	}
 	return false
+}
+
+// ffmpeg が実際に書く形。カメラを繋がずに確認できるのはここだけなので、行の形は
+// 記録として残しておく。
+const dshowListOptionsOutput = `[dshow @ 000001d0a1] DirectShow video device options (from video devices)
+[dshow @ 000001d0a1]  Pin "Capture" (alternative pin name "0")
+[dshow @ 000001d0a1]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
+[dshow @ 000001d0a1]   vcodec=mjpeg  min s=640x480 fps=5 max s=640x480 fps=30
+[dshow @ 000001d0a1]   pixel_format=yuyv422  min s=640x480 fps=5 max s=640x480 fps=30
+[dshow @ 000001d0a1]   pixel_format=yuyv422  min s=640x480 fps=5 max s=640x480 fps=30
+[dshow @ 000001d0a1]   pixel_format=yuyv422  min s=160x120 fps=5 max s=1280x720 fps=29.97
+[dshow @ 000001d0a1] Immediate exit requested
+`
+
+func TestParseDshowModes(t *testing.T) {
+	modes := parseDshowModes(dshowListOptionsOutput)
+
+	// 同じ行が 2 度出ている (ピンが複数あるカメラで起きる) ので、5 行から 4 つ。
+	if len(modes) != 4 {
+		t.Fatalf("got %d modes, want 4 after folding the duplicate: %v", len(modes), modes)
+	}
+	// 並べ替えない。カメラが先に挙げるものには意味がある。
+	if modes[0].Format != "mjpeg" || modes[0].MinSize != "1280x720" {
+		t.Errorf("modes[0] = %+v, want the first line ffmpeg printed", modes[0])
+	}
+	if modes[0].MaxFPS != 30 {
+		t.Errorf("modes[0].MaxFPS = %v, want 30", modes[0].MaxFPS)
+	}
+	// 範囲で答えるカメラもある。片方に丸めると使える値を隠すことになる。
+	last := modes[len(modes)-1]
+	if last.MinSize != "160x120" || last.MaxSize != "1280x720" {
+		t.Errorf("the ranged mode was flattened: %+v", last)
+	}
+	if last.MaxFPS != 29.97 {
+		t.Errorf("last.MaxFPS = %v, want the fractional rate kept", last.MaxFPS)
+	}
+}
+
+// この文字列は、カメラが開かなかった人がそのまま設定ファイルへ書き写すもの。
+func TestModeReadsLikeSomethingYouCanConfigure(t *testing.T) {
+	for _, tc := range []struct {
+		mode Mode
+		want string
+	}{
+		{Mode{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}, "640x480 @ 30fps (mjpeg)"},
+		{Mode{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 5, MaxFPS: 30}, "640x480 @ 5-30fps (mjpeg)"},
+		{Mode{Format: "yuyv422", MinSize: "160x120", MaxSize: "1280x720", MinFPS: 5, MaxFPS: 29.97}, "160x120-1280x720 @ 5-29.97fps (yuyv422)"},
+		{Mode{MinSize: "240x240", MaxSize: "240x240"}, "240x240"},
+	} {
+		if got := tc.mode.String(); got != tc.want {
+			t.Errorf("Mode.String() = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+// 関係のない出力からモードを拾ってはいけない。デバイス一覧と混ざると、存在しない
+// 解像度を勧めることになる。
+func TestParseDshowModesIgnoresEverythingElse(t *testing.T) {
+	if modes := parseDshowModes(`[dshow @ 021] "HD Webcam" (video)
+[dshow @ 021]   Alternative name "@device_pnp_\\?\usb#vid_1234"
+Could not set video options
+`); len(modes) != 0 {
+		t.Errorf("parseDshowModes = %v, want nothing from output that has no modes", modes)
+	}
+}
+
+// "Could not set video options" は何が悪かったかを言うが、代わりに何を書けばよいかは
+// 言わない。設定ファイルを開いた人も、ログを読んだ人も、そこで止まる。
+func TestRefusedModeFailureCarriesWhatTheCameraOffers(t *testing.T) {
+	u := &UVC{
+		cfg: UVCConfig{Device: "USB Camera", Size: "240x240", Framerate: 30},
+		log: discardLogger(),
+		// 調べ済みということにする。ListModes は ffmpeg とカメラを要るので、
+		// ここで見たいのは「調べた結果をどう伝えるか」の方。
+		modesAsked: true,
+		modes: []Mode{
+			{Format: "mjpeg", MinSize: "1280x720", MaxSize: "1280x720", MinFPS: 5, MaxFPS: 30},
+			{Format: "yuyv422", MinSize: "640x480", MaxSize: "640x480", MinFPS: 5, MaxFPS: 30},
+		},
+	}
+
+	diag := "Could not set video options\nError opening input: I/O error"
+	err := u.explainRefusedMode(context.Background(), diag, errors.New("uvc: ffmpeg closed its output"))
+	if err == nil {
+		t.Fatal("explainRefusedMode swallowed the failure")
+	}
+	// 元の失敗は残す。添えるだけで、置き換えてはいけない。
+	if !strings.Contains(err.Error(), "ffmpeg closed its output") {
+		t.Errorf("error = %v, want the original failure kept", err)
+	}
+	for _, want := range []string{"USB Camera", "1280x720", "640x480", "mjpeg"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// モードの話でない失敗に、モードの一覧を足してはいけない。カメラが見つからない人に
+// 解像度を並べても、探す場所を誤らせるだけ。
+func TestOtherFailuresAreNotDressedUpAsModeProblems(t *testing.T) {
+	modes := []Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MaxFPS: 30}}
+
+	for _, tc := range []struct {
+		name string
+		cfg  UVCConfig
+		diag string
+	}{
+		{
+			name: "the device was not found at all",
+			cfg:  UVCConfig{Device: "USB Camera", Size: "240x240"},
+			diag: "Could not find video device with name [USB Camera]",
+		},
+		{
+			// 何も要求していないのに拒まれたのなら、それはモードの話ではない。
+			// 一覧を添えると「空を指定したのが悪い」と読ませてしまう。
+			name: "nothing was asked for in the first place",
+			cfg:  UVCConfig{Device: "USB Camera"},
+			diag: "Could not set video options",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &UVC{cfg: tc.cfg, log: discardLogger(), modesAsked: true, modes: modes}
+			original := errors.New("uvc: ffmpeg closed its output")
+			err := u.explainRefusedMode(context.Background(), tc.diag, original)
+			if err.Error() != original.Error() {
+				t.Errorf("error = %v, want the failure left alone", err)
+			}
+		})
+	}
+}
+
+// 成功を失敗に変えてはいけない。
+func TestExplainRefusedModeLeavesSuccessAlone(t *testing.T) {
+	u := &UVC{cfg: UVCConfig{Device: "USB Camera", Size: "240x240"}, log: discardLogger()}
+	if err := u.explainRefusedMode(context.Background(), "Could not set video options", nil); err != nil {
+		t.Errorf("explainRefusedMode = %v, want nil when the attempt did not fail", err)
+	}
+}
+
+// モードは書かれたそばから拾わなければならない。診断用の末尾バッファに任せると、
+// モードの多いカメラ — 出力ピンが複数あるものなど — では先頭側の行が落ちる。
+// 落ちても残りが解析できてしまうので、欠けたことは誰にも分からない。設定画面は
+// そのカメラが実際に持っている解像度を候補から外し、打ち込まれても拒む。
+func TestModeScannerKeepsWhatWouldNotFitInTheDiagnosticTail(t *testing.T) {
+	scan := &modeScanner{}
+	tail := &tailWriter{max: 64 << 10}
+	out := io.MultiWriter(scan, tail)
+
+	// 最初に本物のモードを 1 つ。この後、末尾バッファを溢れさせる。
+	first := "[dshow @ 01]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30\n"
+	if _, err := out.Write([]byte(first)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	filler := "[dshow @ 01] Immediate exit requested\n"
+	for range (64 << 10 / len(filler)) + 2 {
+		if _, err := out.Write([]byte(filler)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	// ffmpeg は少しずつ書く。1 回の書き込みが行の途中で切れることもある。
+	last := "[dshow @ 01]   pixel_format=yuyv422  min s=640x480 fps=5 max s=640"
+	if _, err := out.Write([]byte(last)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := out.Write([]byte("x480 fps=30\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// 前提: この量なら、末尾バッファからは最初の行が消えている。消えていなければ
+	// このテストは何も確かめていない。
+	if strings.Contains(tail.String(), "1280x720") {
+		t.Fatal("the diagnostic tail still holds the first mode; this test proves nothing")
+	}
+
+	modes := scan.Modes()
+	if len(modes) != 2 {
+		t.Fatalf("got %d modes, want 2: %v", len(modes), modes)
+	}
+	if modes[0].MinSize != "1280x720" {
+		t.Errorf("modes[0] = %+v, want the mode that scrolled out of the diagnostic tail", modes[0])
+	}
+	// 書き込みの途中で切れた行も、繋いで読めなければならない。
+	if modes[1].MinSize != "640x480" || modes[1].MaxFPS != 30 {
+		t.Errorf("modes[1] = %+v, want the mode that arrived across two writes", modes[1])
+	}
+}
+
+// 改行で終わらない最後の 1 行も見なければならない。ffmpeg は最後の行を書き終えた
+// 直後に終わることがある。
+func TestModeScannerReadsTheLastLineWithoutANewline(t *testing.T) {
+	scan := &modeScanner{}
+	if _, err := scan.Write([]byte("[dshow @ 01]   vcodec=mjpeg  min s=640x480 fps=30 max s=640x480 fps=30")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if modes := scan.Modes(); len(modes) != 1 || modes[0].MinSize != "640x480" {
+		t.Errorf("modes = %v, want the unterminated last line read", modes)
+	}
 }

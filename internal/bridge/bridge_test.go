@@ -23,6 +23,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
@@ -2984,5 +2985,1306 @@ func TestRequestEndedCoversBothWaysAContextEnds(t *testing.T) {
 				t.Errorf("requestEnded(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// uvcConfig は、名前だけ与えた UVC の設定。ドライバは起動しない。
+func uvcConfig(device string) config.Config {
+	cfg := config.Default()
+	cfg.Source.Type = config.SourceUVC
+	cfg.Source.UVC.Device = device
+	cfg.Normalise()
+	return cfg
+}
+
+// fakeModeLister は listModes を差し替え、呼ばれた回数と、そのとき渡された名前を
+// 記録する。
+type fakeModeLister struct {
+	mu      sync.Mutex
+	calls   int
+	devices []string
+	modes   []source.Mode
+	err     error
+}
+
+// onWindowsCameraRules は、カメラが排他的なプラットフォームの規則で走らせる。
+// テストは Windows で走らないので、これが無いと掴んでいるカメラの筋を踏めない。
+func onWindowsCameraRules(t *testing.T) {
+	t.Helper()
+	prev := exclusiveCameraAccess
+	exclusiveCameraAccess = true
+	t.Cleanup(func() { exclusiveCameraAccess = prev })
+}
+
+func (f *fakeModeLister) install(t *testing.T) {
+	t.Helper()
+	onWindowsCameraRules(t)
+	prev := listModes
+	listModes = func(_ context.Context, _, device string) ([]source.Mode, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.calls++
+		f.devices = append(f.devices, device)
+		return f.modes, f.err
+	}
+	t.Cleanup(func() { listModes = prev })
+}
+
+func (f *fakeModeLister) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// 列挙はカメラを開く。UVC は排他的なので、キャプチャ中のカメラを訊かれた列挙は
+// 失敗する。設定画面が最もよく訊くのがその「今のカメラ」なので、一度得た答えを
+// 憶えておいて、そこから答えられなければならない。
+func TestCameraModesAnswersTheRunningCameraFromWhatItLearnedEarlier(t *testing.T) {
+	want := []source.Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: want}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+
+	// まだ掴んでいないうちに一度訊く。ここは本当に列挙できる。
+	b.SetPaused(true)
+	got, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("modes = %v, want %v", got, want)
+	}
+
+	// 掴んだ後は列挙が失敗する。憶えたもので答えること。
+	lister.modes, lister.err = nil, errors.New("uvc: ffmpeg listed no modes")
+	b.SetPaused(false)
+	got, err = b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes while capturing: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("modes = %v, want the remembered %v", got, want)
+	}
+}
+
+// 掴んでいると分かっているカメラに、開けないと分かっている列挙をぶつけない。
+// 列挙は自前で 15 秒待つので、名前を打つたびにそれを払うことになる。
+func TestCameraModesDoesNotReopenTheCameraItIsHolding(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	before := lister.count()
+	for range 3 {
+		if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+			t.Fatalf("CameraModes while capturing: %v", err)
+		}
+	}
+	if got := lister.count() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera the bridge is holding, want 0", got)
+	}
+}
+
+// 掴んでいないはずのカメラの列挙が失敗したときも、憶えがあればそれで答える。
+//
+// 名前の比較は完全ではない。設定がフレンドリ名を持ち、画面が "@device_pnp_..."
+// で訊けば (あるいはその逆なら)、同じ 1 台でも別物に見える。そこで列挙は「自分が
+// 握っているせいで」失敗するが、こちらはそうと気付けない。憶えがあるなら、
+// 気付けなくても正しい答えは出せる。
+func TestCameraModesFallsBackToWhatItLearnedWhenTheLookupFails(t *testing.T) {
+	want := []source.Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: want}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_bigeye"); err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+
+	lister.modes, lister.err = nil, errors.New("uvc: ffmpeg listed no modes")
+	got, err := b.CameraModes(context.Background(), "@device_pnp_bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes after the lookup broke: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("modes = %v, want the remembered %v", got, want)
+	}
+}
+
+// 憶えが無いまま自分の握っているカメラを訊かれたら、開きに行かずにその場で言う。
+//
+// 開けないと分かっているものを開きに行っても、列挙が 15 秒を使い切ってから同じ
+// 答えに辿り着くだけ。しかも失敗は憶えないので、画面がカメラ名に触れるたびに
+// それを払うことになる。
+func TestCameraModesSaysWhenItIsTheOneHoldingTheCamera(t *testing.T) {
+	lister := &fakeModeLister{err: errors.New("uvc: ffmpeg listed no modes for \"Bigeye\"")}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_, err := b.CameraModes(context.Background(), "Bigeye")
+	if err == nil {
+		t.Fatal("expected an error when the camera cannot be opened")
+	}
+	if !strings.Contains(err.Error(), "pause capture") {
+		t.Errorf("error = %q, want it to say how to get the modes", err)
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera the bridge is holding, want 0", got)
+	}
+}
+
+// カメラの顔ぶれが変わったら、憶えは捨てなければならない。
+//
+// モードが変わらないのは同じ 1 台についてだけ。憶えの鍵は名前だが、名前は個体を
+// 指さない — "USB Camera" は次に挿した別機種にも付く。抜き挿しで入れ替わった
+// カメラに、前の機種のモードを勧め続けることになる。
+func TestCameraModesForgetsWhatItLearnedWhenTheCamerasChange(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}}
+	lister.install(t)
+
+	cameras := []source.Device{{Name: "USB Camera", Alternative: "@device_pnp_first"}}
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) { return cameras, nil }
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	// 設定画面と同じ順序。まず一覧を読み、それからモードを訊く。
+	b.Devices(context.Background())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "USB Camera"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// 同じ顔ぶれのままなら憶えは残る。一覧は 5 秒ごとに読まれるので、ここで
+	// 捨てていては憶える意味が無い。
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "USB Camera"); err != nil {
+		t.Fatalf("CameraModes with the same cameras attached: %v", err)
+	}
+
+	// 別の個体に入れ替わった。名前は同じでも、答えはもう前の機種のもの。
+	cameras = []source.Device{{Name: "USB Camera", Alternative: "@device_pnp_second"}}
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "USB Camera"); err == nil {
+		t.Error("expected the modes of the camera that was unplugged to be forgotten")
+	}
+}
+
+// 関係のないカメラが増えても、素性の変わっていないカメラの憶えは残さなければ
+// ならない。顔ぶれ全体で一致を見ると、1 台挿しただけで全部消える。そのとき今
+// キャプチャしているカメラはもう調べ直せないので、正しかった答えを二度と出せない。
+func TestCameraModesKeepsWhatItLearnedAboutTheCamerasThatDidNotChange(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	cameras := []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) { return cameras, nil }
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// 別のカメラを挿した。Bigeye は何も変わっていない。
+	cameras = append(cameras, source.Device{Name: "Webcam", Alternative: "@device_pnp_webcam"})
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("plugging in another camera threw away what Bigeye said: %v", err)
+	}
+}
+
+// 同じカメラを同時に訊かれても、開くのは 1 回でなければならない。
+//
+// 画面の側にも同じ抑止があるが、あちらが知っているのはそのページの中だけ。
+// タブを 2 つ開けば、同じカメラへ ffmpeg が 2 本向かう。開くのはこちらなので、
+// 抑止もこちらに要る。
+func TestCameraModesOpensACameraOnceForConcurrentCallers(t *testing.T) {
+	onWindowsCameraRules(t)
+	want := []source.Mode{{MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+
+	var calls atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return want, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	const callers = 4
+	got := make(chan []source.Mode, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			modes, err := b.CameraModes(context.Background(), "Bigeye")
+			got <- modes
+			errs <- err
+		}()
+	}
+
+	// 1 本目が走り出し、残りがその答えを待つところまで進めてから解放する。
+	// 先に解放すると 4 本が順番に走るだけで、重なりを一度も作らない。
+	<-started
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < callers-1 {
+		if time.Now().After(deadline) {
+			// 待っていないということは、それぞれが自分でカメラを開いたということ。
+			close(release)
+			t.Fatalf("only %d of %d callers waited for the running enumeration", b.listingWaitersForTest(), callers-1)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Errorf("CameraModes: %v", err)
+		}
+		if modes := <-got; !slices.Equal(modes, want) {
+			t.Errorf("modes = %v, want %v", modes, want)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("opened the camera %d times for %d concurrent callers, want 1", n, callers)
+	}
+}
+
+// 共有している列挙は、始めた要求と一緒に終わってはいけない。
+//
+// 始めたタブが閉じただけで止めると、同じ答えを待っている他の要求まで巻き添えに
+// なる。待っている側の要求はまだ生きているのに、候補が出せない。
+func TestCameraModesFinishesTheLookupTheFirstCallerAbandoned(t *testing.T) {
+	onWindowsCameraRules(t)
+	want := []source.Mode{{MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		close(started)
+		// 本物の列挙と同じく、期限が切れればそこで終わる。
+		select {
+		case <-release:
+			return want, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	// 1 人目。これが列挙を始め、そして先に立ち去る。
+	leaving, giveUp := context.WithCancel(context.Background())
+	defer giveUp()
+	gone := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(leaving, "Bigeye")
+		gone <- err
+	}()
+	<-started
+
+	// 2 人目。1 人目の答えを待つ。
+	stays := make(chan []source.Mode, 1)
+	staysErr := make(chan error, 1)
+	go func() {
+		modes, err := b.CameraModes(context.Background(), "Bigeye")
+		stays <- modes
+		staysErr <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the second caller never joined the running lookup")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// 1 人目が去る。列挙は 2 人目のために続かなければならない。
+	giveUp()
+	if err := <-gone; !errors.Is(err, context.Canceled) {
+		t.Errorf("the caller that left got %v, want its own cancellation", err)
+	}
+	close(release)
+
+	if err := <-staysErr; err != nil {
+		t.Fatalf("the caller that stayed got %v, want the modes", err)
+	}
+	if modes := <-stays; !slices.Equal(modes, want) {
+		t.Errorf("modes = %v, want %v", modes, want)
+	}
+}
+
+// 終了は、走っている列挙も終わらせなければならない。
+//
+// 待たずに落ちると、ffmpeg が残ってカメラを掴んだままになり得る。Windows の
+// 子プロセスは親と一緒には死なない。カメラを解放しないまま終わることは、この
+// アプリケーションが最もしてはいけないこと。
+func TestStopEndsALookupThatIsStillRunning(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	ended := make(chan error, 1)
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		close(running)
+		<-ctx.Done()
+		ended <- ctx.Err()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	// 起動は失敗してよい (この機械に ffmpeg は無い)。要るのは生存期間だけ。
+	_ = b.Start(context.Background())
+	b.SetPaused(true)
+
+	go b.CameraModes(context.Background(), "Bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	b.Stop()
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the lookup ended with %v, want it to be cancelled", err)
+		}
+	default:
+		t.Error("Stop returned while a lookup was still holding the camera")
+	}
+}
+
+// キャプチャがカメラを開く前に、列挙にそれを手放させなければならない。
+//
+// 排他的なデバイスなので両方は開けない。ここで衝突すると、モードを見てから保存
+// した人 — つまりこの機能を使った人 — の設定だけが巻き戻る。
+func TestStartingCaptureTakesTheCameraFromAPendingLookup(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		close(running)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	b.SetPaused(true)
+
+	asked := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		asked <- err
+	}()
+	<-running
+
+	// 再開はキャプチャを立ち上げる。その前に列挙が手放していなければならない。
+	if err := b.SetPaused(false); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	select {
+	case err := <-asked:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the lookup ended with %v, want it to have been asked to let go", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("capture started while a lookup still held the camera")
+	}
+}
+
+// 開こうとしているカメラも、掴んでいるものとして扱わなければならない。
+//
+// 検証を通っていない設定は公開しないので、起動している間 view はまだ前のカメラを
+// 指している。それを「空いている」と読ませると、最長 30 秒のあいだに来た問い合わせが
+// カメラを開きに行き、起動と取り合う。
+func TestCameraModesLeavesTheCameraThatIsBeingOpenedAlone(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	// 設定は別のカメラを指したまま。一時停止中でもある — どちらも「空いている」
+	// と読ませる材料になる。
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	b.openingCameraForTest("Newcomer")
+
+	if _, err := b.CameraModes(context.Background(), "Newcomer"); err == nil {
+		t.Error("expected the camera being opened to be left alone")
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera being opened, want 0", got)
+	}
+
+	// 他のカメラは今までどおり調べられる。
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("CameraModes for another camera: %v", err)
+	}
+}
+
+// キャプチャを起動している間じゅう、そのカメラは予約されていなければならない。
+// そして開き終えたら下ろさなければならない — 残ると、そのカメラは二度と
+// 調べられなくなる。
+func TestStartingCaptureHoldsTheCameraForTheWholeLaunch(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	var started sync.Once
+	running := make(chan struct{})
+	release := make(chan struct{})
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		// 諦めろと言われてもすぐには手放さない。本物の ffmpeg も、殺されてから
+		// カメラを離すまでには間があります。その間が、ここで見たい窓です。
+		<-release
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	b.SetPaused(true)
+
+	// この列挙は、起動が手放させるまで走り続ける。起動はその間ここで止まるので、
+	// 「開いている最中」を外から覗ける。
+	go b.CameraModes(context.Background(), "Bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	resumed := make(chan error, 1)
+	go func() { resumed <- b.SetPaused(false) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for b.isOpeningForTest() == "" {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the bridge never marked the camera as being opened")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// この瞬間に来た問い合わせは、カメラを開きに行ってはいけない。設定の側は
+	// まだ動いていないので、そこだけを見ると「空いている」と読める。
+	before := probes.Load()
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("a lookup was allowed while the camera was being opened")
+	}
+	if got := probes.Load() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times while the camera was being opened, want 0", got)
+	}
+
+	close(release)
+	if err := <-resumed; err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := b.isOpeningForTest(); got != "" {
+		t.Errorf("the bridge is still holding %q open after the launch returned", got)
+	}
+}
+
+// 止め終えた後に、新しい列挙を始めてはいけない。
+//
+// Stop が待つのは、待ち始めた時点で走っていたものだけ。その後に登録されたものは
+// 拾えないので、始めさせない。拾えないまま終わると、ffmpeg が残ってカメラを
+// 掴んだままになり得る。
+func TestCameraModesRefusesToStartAfterTheBridgeStopped(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	b.SetPaused(true)
+	b.Stop()
+
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("expected a stopped bridge to refuse a new lookup")
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times after the bridge stopped, want 0", got)
+	}
+}
+
+// 予約の確認と登録は、同じロックの下で行わなければならない。
+//
+// 呼び出し側の判定はロックの外なので、その後・登録の前に、キャプチャがカメラを
+// 予約していることがある。登録のところで見なければ、その予約をすり抜けた列挙が
+// 1 本走り、起動と取り合う。
+func TestCameraModesRechecksTheReservationWhenItRegisters(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	// 呼び出し側の判定 (capturing) を通った後に、キャプチャが予約した状況。
+	// listModesOnce を直に呼んで、その順序を作る。
+	b.openingCameraForTest("Bigeye")
+	if _, err := b.listModesOnceForTest(context.Background(), "Bigeye"); err == nil {
+		t.Error("expected the registration to see the reservation the caller missed")
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera already reserved, want 0", got)
+	}
+}
+
+// 同じ 1 台は、どちらの名前で指されても同じ列挙として数えなければならない。
+//
+// 画面は "@device_pnp_..." でも訊けるので、打たれた文字列をそのまま鍵にすると、
+// 別々の鍵で同じカメラを 2 回開く。画面が代替名で調べている最中に Apply が
+// フレンドリ名で起動する、という形が実際に起こる。
+func TestCameraModesCountsBothNamesOfACameraAsOne(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	// 顔ぶれを数えておく。素性はここから引く。
+	b.Devices(context.Background())
+	b.SetPaused(true)
+
+	// 画面は代替名で調べている。
+	go b.CameraModes(context.Background(), "@device_pnp_bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	// キャプチャはフレンドリ名で起動する。走っている列挙を見つけられなければ、
+	// 手放させないまま開きに行く。
+	resumed := make(chan error, 1)
+	go func() { resumed <- b.SetPaused(false) }()
+
+	early := false
+	select {
+	case err := <-resumed:
+		early = true
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		t.Error("capture started without taking the camera from the lookup running under the other name")
+	case <-time.After(50 * time.Millisecond):
+		// 起動は列挙が手放すのを待っている。これが正しい。
+	}
+
+	close(release)
+	if !early {
+		if err := <-resumed; err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened the camera %d times, want 1", got)
+	}
+}
+
+// 初めて数えた顔ぶれは、変化ではない。
+//
+// カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、
+// 最初の一覧で捨てる作りにすると、そこで憶えたものが 5 秒後に流れる。
+func TestCameraModesForgetsWhatItLearnedBeforeItKnewTheCameras(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	// 一覧より先に訊く。ここで憶えるものに素性は付けられない。
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// ここが最初の一覧。訊いてから数えるまでの間に同じ名前の別機種へ差し替わって
+	// いても、それを言う材料は無い。今の素性を貼ると以後の照合も素通りするので、
+	// 分からないものは捨てる。
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("kept modes it could not tie to a camera, and stamped them with the identity it happened to find")
+	}
+
+	// 掴んでいなければ訊き直せる。捨てたことが行き止まりにはならない。
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("could not learn the modes again after they were dropped: %v", err)
+	}
+	// 今度は素性が付いている。次の一覧では残る。
+	b.Devices(context.Background())
+	b.SetPaused(false)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("dropped modes that were tied to a camera it had counted: %v", err)
+	}
+}
+
+// 列挙そのものに失敗したときは、顔ぶれが変わったことにしてはいけない。
+// 「1 台も見つからない」と「見に行けなかった」は違う。
+func TestCameraModesKeepsItsMemoryWhenTheDeviceListFails(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	cameras := []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}
+	var listErr error
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		if listErr != nil {
+			return nil, listErr
+		}
+		return cameras, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	// 一度は数えられている状態にしてから壊す。数える前の失敗は、初回として
+	// 素通りするので何も確かめられない。
+	b.Devices(context.Background())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	listErr = errors.New("uvc: ffmpeg is not installed")
+	b.Devices(context.Background())
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("a failed device listing threw the memory away: %v", err)
+	}
+}
+
+// 排他的でないプラットフォームでは、掴んでいることを理由に断ってはいけない。
+//
+// 列挙が実際にデバイスを開くのは DirectShow だけで、他では ListModes が何も
+// 開かずに空を返す。そこで断ると、無言のはずの機能が、案内した先 — トレイの
+// 一時停止 — が存在しない環境で、直しようのないエラーになる。
+func TestCameraModesDoesNotClaimExclusivityWhereThereIsNone(t *testing.T) {
+	lister := &fakeModeLister{}
+	lister.install(t)
+	exclusiveCameraAccess = false
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	modes, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+	if len(modes) != 0 {
+		t.Errorf("modes = %v, want the silent empty answer", modes)
+	}
+	if got := lister.count(); got != 1 {
+		t.Errorf("asked %d times, want the platform's own answer to decide", got)
+	}
+}
+
+// 握っていないカメラの失敗に、一時停止の助言を付けてはいけない。それはただの
+// 名前の打ち間違いで、一時停止しても何も変わらない。
+func TestCameraModesDoesNotBlameItselfForAnotherCamera(t *testing.T) {
+	lister := &fakeModeLister{err: errors.New("uvc: ffmpeg listed no modes for \"Typo\"")}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_, err := b.CameraModes(context.Background(), "Typo")
+	if err == nil {
+		t.Fatal("expected an error when the camera cannot be opened")
+	}
+	if strings.Contains(err.Error(), "pause capture") {
+		t.Errorf("error = %q, want no advice about a camera the bridge is not holding", err)
+	}
+}
+
+// 一時停止中はカメラを解放している。そこは実際に開けるので、憶えを取りに行く
+// 唯一の機会になる。
+func TestCameraModesLooksAgainWhilePaused(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	before := lister.count()
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	if got := lister.count() - before; got != 1 {
+		t.Errorf("ffmpeg ran %d times while paused, want 1", got)
+	}
+}
+
+// 憶えは呼び出し側に渡した後も、こちらのものであり続けなければならない。
+func TestCameraModesDoesNotHandOutItsOwnMemory(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+
+	// ここから先は憶えから答える経路。渡したものを書き換えられても、次の答えは
+	// 変わってはいけない。
+	lister.modes, lister.err = nil, errors.New("uvc: ffmpeg listed no modes")
+	got, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+	got[0].MinSize = "scribbled"
+
+	again, err := b.CameraModes(context.Background(), "Bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes: %v", err)
+	}
+	if again[0].MinSize != "640x480" {
+		t.Errorf("remembered mode = %q, want the caller not to be able to change it", again[0].MinSize)
+	}
+}
+
+// 動いているカメラは、代替名で訊かれても開きに行ってはいけない。
+//
+// capturing は名前しか見ないので、設定がフレンドリ名を持ち、画面が
+// "@device_pnp_..." で訊けば、そこは素通りします。素性を知っているのは登録の
+// 側なので、実際に開く手前でもう一度、素性で見なければなりません。
+func TestCameraModesDoesNotReopenTheRunningCameraUnderItsOtherName(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	// 顔ぶれを数えておく。素性はここから引く。
+	b.Devices(context.Background())
+
+	before := lister.count()
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_bigeye"); err == nil {
+		t.Error("expected the camera the bridge is holding to be left alone under its other name")
+	}
+	if got := lister.count() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times for the camera the bridge is holding, want 0", got)
+	}
+
+	// 別のカメラは今までどおり調べられる。
+	if _, err := b.CameraModes(context.Background(), "Newcomer"); err != nil {
+		t.Errorf("CameraModes for another camera: %v", err)
+	}
+}
+
+// 調べている間に差し替わったカメラの答えは、憶えてはいけない。
+//
+// 列挙は 15 秒かかることがあります。その間に同じ名前の別機種へ差し替わると、
+// 返ってきた答えは今そこにいるカメラのものではありません。今の素性を貼って
+// 憶えると、後の照合も素通りして、二度と捨てられなくなります。
+func TestCameraModesDoesNotRememberTheModesOfACameraThatWasSwappedOut(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		started.Do(func() { close(running) })
+		<-release
+		return []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	alternative := "@device_pnp_bigeye"
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: alternative}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	b.Devices(context.Background())
+
+	answered := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		answered <- err
+	}()
+	<-running
+
+	// 調べている最中に、同じ名前の別機種へ差し替わる。
+	alternative = "@device_pnp_newcomer"
+	b.Devices(context.Background())
+
+	close(release)
+	// 訊いた人にも渡してはいけない。憶えないだけでは、画面が名前の変わらない
+	// まま受け取って、今そこにいるカメラが持っていない候補を並べる。
+	if err := <-answered; err == nil {
+		t.Error("handed back the modes of the camera that was swapped out while they were being listed")
+	}
+
+	// 憶えてもいないこと。憶えていれば、掴んだ後もそれで答えてしまう。
+	b.SetPaused(false)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("remembered the modes of the camera that was swapped out while they were being listed")
+	}
+}
+
+// 走っている列挙は、その最中に顔ぶれを数え直しても見つけられなければならない。
+//
+// 登録の鍵を素性にすると、登録した後に Devices が素性を埋めただけで鍵が変わり、
+// 走っているものを誰も引けなくなる。2 本目の ffmpeg が同じカメラへ向かう。
+func TestCameraModesJoinsALookupThatStartedBeforeTheCamerasWereCounted(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return nil, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+
+	// 顔ぶれを数える前に始める。この時点で引ける素性は無い。
+	first := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		first <- err
+	}()
+	<-running
+
+	// 走っている最中に数える。ここで素性が付く。
+	b.Devices(context.Background())
+
+	second := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		second <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < 1 {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatalf("the second call did not join the running enumeration; the camera was opened %d times", probes.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	if err := <-first; err != nil {
+		t.Errorf("CameraModes: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Errorf("CameraModes: %v", err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened the camera %d times, want 1", got)
+	}
+}
+
+// 同じ列挙を、キャプチャの起動も見つけられなければならない。見つけられなければ、
+// 掴んだままの ffmpeg を残して開きに行く。
+func TestStartingCaptureTakesTheCameraFromALookupThatPredatesTheCount(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		started.Do(func() { close(running) })
+		// 諦めろと言われても、すぐには手放さない。すぐ返ると、起動が待ったのか
+		// 素通りしたのかを見分けられない。
+		<-release
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	b.SetPaused(true)
+
+	go b.CameraModes(context.Background(), "Bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	// 走っている最中に数える。鍵が変わるのはここ。
+	b.Devices(context.Background())
+
+	resumed := make(chan error, 1)
+	go func() { resumed <- b.SetPaused(false) }()
+
+	early := false
+	select {
+	case err := <-resumed:
+		early = true
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		t.Error("capture started without taking the camera from the lookup registered before the count")
+	case <-time.After(50 * time.Millisecond):
+		// 起動は列挙が手放すのを待っている。これが正しい。
+	}
+
+	close(release)
+	if !early {
+		if err := <-resumed; err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+	}
+}
+
+// フレンドリ名が重複しているとき、その名前はどの個体でもあり得る。
+//
+// どれか 1 台に決めると、決めなかった側を「別のカメラ」と答えることになる。
+// 設定が共有名を持ち、画面がもう一方の代替名で訊けば、動いているカメラへ列挙が
+// 向かう。排他の判定で迷ったときは、衝突する側へ倒さなければならない。
+func TestCameraModesTreatsASharedNameAsEveryCameraThatHasIt(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{
+			{Name: "USB Camera", Alternative: "@device_pnp_one"},
+			{Name: "USB Camera", Alternative: "@device_pnp_two"},
+		}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	// 設定は共有名を持っている。既存の設定も API もそれを使える。
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+
+	// どちらの個体を訊かれても、掴んでいる可能性がある。
+	for _, name := range []string{"@device_pnp_one", "@device_pnp_two", "USB Camera"} {
+		before := lister.count()
+		if _, err := b.CameraModes(context.Background(), name); err == nil {
+			t.Errorf("CameraModes(%q) went ahead while a camera of that name is being captured", name)
+		}
+		if got := lister.count() - before; got != 0 {
+			t.Errorf("ffmpeg ran %d times for %q, want 0", got, name)
+		}
+	}
+
+	// 名前を共有していないカメラは、今までどおり調べられる。
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("CameraModes for a camera with its own name: %v", err)
+	}
+}
+
+// 憶えは、同じ 1 台を指す別名からも引けなければならない。
+//
+// 憶えるのは訊かれた名前だが、訊く名前は場面で変わる。一時停止中にフレンドリ名で
+// 憶えたものを、キャプチャ中に "@device_pnp_..." で訊かれる形が実際に起こる。
+// そこで引けないと、掴んでいて調べ直せないカメラについて、答えを持っているのに
+// エラーを返すことになる。
+func TestCameraModesAnswersUnderTheOtherNameOfTheSameCamera(t *testing.T) {
+	want := []source.Mode{{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: want}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+
+	// 一時停止中にフレンドリ名で憶える。
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Fatalf("CameraModes while paused: %v", err)
+	}
+	b.SetPaused(false)
+
+	// キャプチャ中に代替名で訊かれる。開きに行けない — その判定は素性で正しく
+	// 効く — ので、憶えから答えられなければ何も出せない。
+	got, err := b.CameraModes(context.Background(), "@device_pnp_bigeye")
+	if err != nil {
+		t.Fatalf("CameraModes under the other name: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("modes = %v, want the remembered %v", got, want)
+	}
+}
+
+// 遅れて戻った古い一覧で、顔ぶれを巻き戻してはいけない。
+//
+// 一覧は数秒かかることがあり、要求は重なる (トレイと設定画面、タブが 2 つ)。
+// 戻る順は始めた順とは限らない。巻き戻すと、差し替えた直後のカメラの素性が
+// 前のものに戻り、動いているカメラを「別のカメラ」と答えるようになる。
+func TestDevicesDoesNotRollTheCamerasBackToAnOlderListing(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	release := make(chan struct{})
+	slowStarted := make(chan struct{})
+	var started sync.Once
+	var calls atomic.Int64
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		if calls.Add(1) == 1 {
+			started.Do(func() { close(slowStarted) })
+			<-release
+			return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
+		}
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_new"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+
+	slow := make(chan struct{})
+	go func() {
+		defer close(slow)
+		b.Devices(context.Background())
+	}()
+	<-slowStarted
+
+	// 後から始めた一覧が先に戻る。
+	b.Devices(context.Background())
+
+	close(release)
+	<-slow
+
+	// 新しい代替名は、動いているカメラと同じ 1 台を指していなければならない。
+	// 巻き戻っていれば、それは知らない名前になり、開きに行ってしまう。
+	before := lister.count()
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_new"); err == nil {
+		t.Error("the newest alternative name is not tied to the running camera; an older listing rolled it back")
+	}
+	if got := lister.count() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times for the camera the bridge is holding, want 0", got)
+	}
+}
+
+// 曖昧な名前に、別の個体のモードを渡してはいけない。
+//
+// 排他の判定で使う「同じ可能性がある」は開きに行かないための保守側で、答えを
+// 渡す理由にはならない。フレンドリ名を共有する 2 台があるとき、共有名で開かれる
+// のは常に同じ 1 台なので、もう一方のモードを渡すと、そのカメラが持っていない
+// 値を勧めることになる。
+func TestCameraModesDoesNotAnswerASharedNameWithTheOtherCamerasModes(t *testing.T) {
+	other := []source.Mode{{Format: "mjpeg", MinSize: "1280x720", MaxSize: "1280x720", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: other}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{
+			{Name: "USB Camera", Alternative: "@device_pnp_one"},
+			{Name: "USB Camera", Alternative: "@device_pnp_two"},
+		}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+
+	// 一時停止中に、2 台目を代替名で調べて憶える。
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_two"); err != nil {
+		t.Fatalf("CameraModes for the second camera: %v", err)
+	}
+	b.SetPaused(false)
+
+	// 共有名でのキャプチャ中に、共有名で訊かれる。憶えているのは、その名前が
+	// 開く 1 台のものだとは言えない。
+	got, err := b.CameraModes(context.Background(), "USB Camera")
+	if err == nil {
+		t.Errorf("answered the shared name with %v, which was learned from a camera it cannot tie to that name", got)
+	}
+}
+
+// 曖昧な名前の列挙に、別の個体を訊いた要求を合流させてはいけない。
+//
+// 共有名で ffmpeg が開くのは、その名前を持つ 1 台だけ。その答えをもう一方の
+// 代替名で訊いた画面へ渡すと、別の機種の解像度を「対応している」として勧める
+// ことになる。かといって 2 本目を開けば、同じカメラだった場合に取り合う。
+// どちらもしない — 断る。
+func TestCameraModesDoesNotShareASharedNameLookupWithOneOfTheCameras(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return []source.Mode{{MinSize: "1280x720", MaxSize: "1280x720"}}, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{
+			{Name: "USB Camera", Alternative: "@device_pnp_one"},
+			{Name: "USB Camera", Alternative: "@device_pnp_two"},
+		}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+	b.SetPaused(true)
+
+	shared := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "USB Camera")
+		shared <- err
+	}()
+	<-running
+
+	// 期限を切って訊く。合流させる作りだと、この要求はその 1 本を待ってしまう —
+	// 期限が切れたことで、断らずに待ったと分かる。
+	ask, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	modes, err := b.CameraModes(ask, "@device_pnp_two")
+	switch {
+	case err == nil:
+		t.Errorf("answered %v from a lookup that may have opened the other camera", modes)
+	case errors.Is(err, context.DeadlineExceeded):
+		t.Error("waited on a lookup that may have opened the other camera instead of refusing")
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened a camera %d times, want 1 — the second request must neither join nor open its own", got)
+	}
+
+	close(release)
+	if err := <-shared; err != nil {
+		t.Errorf("CameraModes for the shared name: %v", err)
+	}
+}
+
+// 個体が一意に決まるなら、走っている列挙には合流しなければならない。断ると、
+// 同じ 1 台を 2 度開くか、待てば得られた答えを捨てることになる。
+func TestCameraModesJoinsTheLookupRunningUnderTheOtherNameOfTheSameCamera(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	want := []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}
+	var probes atomic.Int64
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	prev := listModes
+	listModes = func(context.Context, string, string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		<-release
+		return want, nil
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	prevDevices := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_bigeye"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prevDevices })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+	b.SetPaused(true)
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		first <- err
+	}()
+	<-running
+
+	joined := make(chan []source.Mode, 1)
+	errs := make(chan error, 1)
+	go func() {
+		modes, err := b.CameraModes(context.Background(), "@device_pnp_bigeye")
+		joined <- modes
+		errs <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for b.listingWaitersForTest() < 1 {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatalf("the other name did not join the running lookup; the camera was opened %d times", probes.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	if err := <-first; err != nil {
+		t.Errorf("CameraModes: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Errorf("CameraModes under the other name: %v", err)
+	}
+	if modes := <-joined; !slices.Equal(modes, want) {
+		t.Errorf("modes = %v, want the shared %v", modes, want)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("opened the camera %d times, want 1", got)
 	}
 }

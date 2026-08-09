@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/papertracker"
+	"github.com/limit7412/PTCamBridge/internal/source"
 )
 
 // ワイルドカードの bind は、listen する対象としては妥当で、クライアントのアドレス
@@ -290,5 +293,84 @@ func TestRestoreCacheSaysThereIsNothingToUndo(t *testing.T) {
 	}
 	if err := restoreCache(opts); err != nil {
 		t.Errorf("restoreCache = %v, want it to report that there is nothing to restore", err)
+	}
+}
+
+// フレンドリ名は重複し得る。同じ名前のカメラが 2 台あるとき、名前で訊けば、
+// 一方の見出しの下にもう一方のモードが並ぶ。見分けているのは Alternative の方。
+func TestModeQueryNamePrefersTheNameThatIsUnique(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		device source.Device
+		want   string
+	}{
+		{
+			name:   "with a device path",
+			device: source.Device{Name: "Bigeye", Alternative: "@device_pnp_\\\\?\\usb#vid_1234"},
+			want:   "@device_pnp_\\\\?\\usb#vid_1234",
+		},
+		{
+			name:   "without one",
+			device: source.Device{Name: "Bigeye"},
+			want:   "Bigeye",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := modeQueryName(tc.device); got != tc.want {
+				t.Errorf("modeQueryName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// 期限はカメラごとに分けなければならない。1 本を全台で分け合うと、使用中の 1 台が
+// 待ち時間を使い切った後のカメラは、繋がっていてもモードを一切出せない。
+func TestCameraModesGivesEachCameraItsOwnDeadline(t *testing.T) {
+	var deadlines []time.Time
+	prev := listCameraModes
+	listCameraModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("listing the modes of a camera must have a deadline")
+		}
+		deadlines = append(deadlines, deadline)
+		// 1 台目が時間を使ったことにする。期限を分け合っていれば、2 台目の期限は
+		// これで前に詰まる。
+		time.Sleep(5 * time.Millisecond)
+		return nil, nil
+	}
+	t.Cleanup(func() { listCameraModes = prev })
+
+	for _, name := range []string{"Bigeye", "Slowpoke"} {
+		if _, err := cameraModes(context.Background(), "", source.Device{Name: name}); err != nil {
+			t.Fatalf("cameraModes(%q): %v", name, err)
+		}
+	}
+	if len(deadlines) != 2 {
+		t.Fatalf("listed modes %d times, want 2", len(deadlines))
+	}
+	if !deadlines[1].After(deadlines[0]) {
+		t.Errorf("the second camera's deadline (%v) is not later than the first's (%v), so they share one budget",
+			deadlines[1], deadlines[0])
+	}
+}
+
+// 列挙は、親の期限も継がなければならない。
+//
+// -list-devices は 1 台ごとに ffmpeg を起こす。Ctrl+C で降りたときにそれが
+// 止まらないと、CREATE_NO_WINDOW で起こした子にはコンソールの割り込みが届かない
+// ので、カメラを掴んだまま残り得る (childproc_windows.go を参照)。
+func TestCameraModesFollowsTheParentContext(t *testing.T) {
+	prev := listCameraModes
+	listCameraModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listCameraModes = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cameraModes(ctx, "", source.Device{Name: "Bigeye"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("cameraModes with a cancelled parent = %v, want it to end with the parent", err)
 	}
 }

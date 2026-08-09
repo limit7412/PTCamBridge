@@ -36,14 +36,17 @@
         <p class="hint warn" id="camera-error" hidden></p>
         <div class="field">
           <label for="uvc-size">{{index .Text "size"}}</label>
-          <input type="text" id="uvc-size" class="mono" placeholder="640x480">
+          <input type="text" id="uvc-size" list="camera-sizes" class="mono" placeholder="640x480">
           <p class="hint">{{index .Text "sizeHint"}}</p>
         </div>
+        <datalist id="camera-sizes"></datalist>
         <div class="field">
           <label for="uvc-framerate">{{index .Text "framerate"}}</label>
-          <input type="number" id="uvc-framerate" min="0">
+          <input type="number" id="uvc-framerate" list="camera-framerates" min="0">
           <p class="hint">{{index .Text "framerateHint"}}</p>
         </div>
+        <datalist id="camera-framerates"></datalist>
+        <p class="hint" id="camera-modes"></p>
         <div class="field">
           <label for="uvc-ffmpeg">{{index .Text "ffmpegPath"}}</label>
           <input type="text" id="uvc-ffmpeg" class="mono">
@@ -239,6 +242,11 @@ function fill(cfg) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
+  // 代入では change も blur も起きないので、候補はここから取りに行くしかない。
+  // 初回の読み込みだけでなく、保存のたびに通るこの経路でも要る — 別のクライアント
+  // やトレイがカメラを変えていれば、応答がこの欄をそちらへ書き換えるので、欄と
+  // 候補が別のカメラを指すことになる。名前が変わっていなければ何もしない。
+  loadCameraModes();
 }
 
 // rebase は、基準を cfg のものへ取り直し、ユーザーが触った項目だけを画面に残します。
@@ -266,6 +274,10 @@ function rebase(cfg, keep) {
   FIELDS.forEach((field, i) => {
     if (keep.has(i)) field.write(mine[i]);
   });
+  // fill と同じ理由。こちらは失敗した保存の後始末なので、欄に残るのがユーザーの
+  // 打った名前かサーバの名前かは keep 次第で、どちらでも候補は合っていなければ
+  // ならない。
+  loadCameraModes();
 }
 
 // 保存中はフォームを触らせない。ソースの変更は最初のフレームを待つので最大 30 秒
@@ -384,21 +396,59 @@ el("settings").addEventListener("submit", async (event) => {
 });
 
 for (const radio of document.querySelectorAll('input[name="source-type"]')) {
-  radio.addEventListener("change", () => showSource(radio.value));
+  radio.addEventListener("change", () => {
+    showSource(radio.value);
+    // どのソースを選んでも呼ぶ。UVC を選んだ瞬間は、そのカメラを調べてよくなる
+    // 瞬間 — ここで呼ばなければ、切り替えた人はカメラ名の欄に触るまで候補を
+    // 見られない。UVC をやめた瞬間は、隠れた欄の拒否を解く瞬間 — 解かなければ、
+    // 見えない欄のせいで保存そのものが始まらない。どちらの判断も
+    // loadCameraModes の中にある。
+    loadCameraModes();
+  });
+}
+
+// options は datalist の中身を入れ替える。デバイス名にもカメラのモードにも使う。
+const options = (id, names) => {
+  const list = el(id);
+  list.replaceChildren();
+  for (const name of names) {
+    const option = document.createElement("option");
+    option.value = name;
+    list.append(option);
+  }
+};
+
+// cameraChoices は、カメラ名の候補を作ります。
+//
+// フレンドリ名が重複しているカメラだけ、"@device_pnp_..." の方も候補に足します。
+// 同じ名前が 2 つある状態では、どちらを選んでも ffmpeg にとっては同じ要求で、
+// モードの問い合わせもキャプチャも、開くのは常に同じ 1 台になります。見分けて
+// いるのはそちらの名前だけなので、選べる場所に置きます。
+//
+// 重複していないカメラには足しません。長くて読みにくい名前を、それが要る人に
+// だけ見せるためです。
+//
+// 数えるときは大文字小文字を無視する。DirectShow のフレンドリ名はそれを区別
+// しないので (bridge.capturing の EqualFold と同じ)、区別して数えると
+// "USB Camera" と "usb camera" が別物になり、どちらも 1 台と見なされる。
+// そのとき候補に出るのは、同じ 1 台に解決される名前だけになる。
+function cameraChoices(cameras) {
+  const seen = new Map();
+  const key = (name) => String(name || "").toLowerCase();
+  for (const camera of cameras) {
+    seen.set(key(camera.name), (seen.get(key(camera.name)) || 0) + 1);
+  }
+  const names = [];
+  for (const camera of cameras) {
+    names.push(camera.name);
+    if (camera.alternative && seen.get(key(camera.name)) > 1) names.push(camera.alternative);
+  }
+  return names;
 }
 
 // デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
 // 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
 async function loadDevices() {
-  const options = (id, names) => {
-    const list = el(id);
-    list.replaceChildren();
-    for (const name of names) {
-      const option = document.createElement("option");
-      option.value = name;
-      list.append(option);
-    }
-  };
   // 列挙の失敗は、候補が空になることと区別して出す。ffmpeg が無いから列挙できない
   // のか、カメラが繋がっていないのか。候補欄が空という 1 つの見た目が 2 つの意味を
   // 持つと、ユーザーはどちらを直せばよいのか分からない。
@@ -414,7 +464,7 @@ async function loadDevices() {
       if (!response.ok) throw new Error(response.status);
       return await response.json();
     })();
-    options("camera-names", (devices.cameras || []).map((d) => d.name));
+    options("camera-names", cameraChoices(devices.cameras || []));
     options("port-names", (devices.serial_ports || []).map((p) => p.name));
     failure("camera-error", devices.camera_error);
     failure("serial-error", devices.serial_error);
@@ -423,6 +473,252 @@ async function loadDevices() {
     failure("serial-error", String(err));
   }
 }
+
+// カメラが持っているモード。
+//
+// デバイス一覧と一緒には取らない。調べるにはカメラを開く必要があり、1 台につき
+// ffmpeg を 1 回起動する。一覧はこの画面と診断画面の両方が読み、トレイのメニューも
+// 読むので、そこに混ぜると「どんなカメラがあるか」を見るたびに全カメラを掴みに
+// 行くことになる。
+//
+// 取りに行くのはカメラ名が決まったときだけ。覚えるのは成功したときだけで、
+// 失敗した名前は覚えない。ffmpeg を後から入れた人やカメラの一時停止を解いた人が、
+// ページを読み直さずにもう一度試せるようにするため。
+//
+// modesLoading は今調べている最中の名前ぜんぶ。失敗を覚えない以上、これが無いと、
+// 入力欄から離れたときに change と blur の両方が同じ名前で入ってきて、同じ
+// カメラへ 2 本の ffmpeg を同時に走らせることになる。排他的なデバイスなので、
+// その 2 本は互いを失敗させ得る。1 つしか覚えないのでは足りない — A を待っている
+// 間に B へ変え、また A に戻せば、3 回目の A は上書きされた印をすり抜ける。
+//
+// modesFor は、今出ている候補がどのカメラのものか。候補を捨てるときは一緒に
+// 下ろす。下ろさないと、B を調べ始めた後に A へ戻った人が行き場を失う: A は
+// 「調べ済み」なので訊き直さず、候補は B のために消えたまま残る。
+//
+// カメラごとに結果を貯めておく手もあるが、取らない。名前は個体を指さないので、
+// 貯めた分にはブリッジ側と同じ無効化が要る (bridge.forgetModesIfCamerasChanged
+// を参照)。同じ判断を 2 つの言語で持つより、訊き直すほうが安い — 訊く先の
+// ブリッジは既に憶えていて、掴んでいるカメラならカメラを開かずに答える。
+let modesFor = null;
+// devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
+// これを待ちます。初期化を参照。
+let devicesListed = null;
+const modesLoading = new Set();
+let cameraModes = [];
+
+const sayModes = (text) => el("camera-modes").textContent = text || "";
+
+const chosenSource = () => {
+  const radio = document.querySelector('input[name="source-type"]:checked');
+  return radio ? radio.value : "";
+};
+
+async function loadCameraModes() {
+  // UVC を選んでいないときは調べない。設定には前に使ったカメラ名が残っていて、
+  // fill() はそれを、隠れている UVC の入力欄にも書く。そのまま調べに行くと、
+  // 画面を開いただけで、使ってもいないカメラを開いて他のアプリと取り合うことに
+  // なる。ソースを UVC に変えた時点で改めて訊く。
+  if (chosenSource() !== "uvc") {
+    // 隠れた入力欄もフォームの検証を受けます。UVC の欄に拒否を残したまま
+    // 別のソースへ移ると、見えない欄のせいで保存そのものが始まりません。
+    refuse("uvc-size", false, "");
+    refuse("uvc-framerate", false, "");
+    return;
+  }
+
+  const device = el("uvc-device").value.trim();
+  // 今出ている候補が既にこのカメラのものなら、訊き直さない。ただし候補欄は
+  // 作り直す — 解像度が変わっていれば、それに合うフレームレートも変わる。
+  // fill() の代入では uvc-size の input も起きないので、ここで拾わなければ
+  // 別のクライアントが変えた解像度に、前の解像度のフレームレートが並ぶ。
+  if (device === modesFor) {
+    refreshModeChoices();
+    return;
+  }
+
+  // ここから先、出ている候補は別のカメラのもの。捨てる。列挙には 15 秒かかる
+  // ことがあり、その間ずっと前のカメラの解像度を選べたままにすると、今のカメラが
+  // 持っていない組み合わせを保存できてしまう。
+  modesFor = null;
+  cameraModes = [];
+  refreshModeChoices();
+
+  if (!device) {
+    sayModes("");
+    return;
+  }
+  sayModes(TEXT.modesLooking);
+
+  // 既に調べている最中なら、訊き直さない。候補は上で捨ててある — このカメラは
+  // まだ答えていないので、出ていたものは必ず別のカメラのものだった。
+  if (modesLoading.has(device)) return;
+
+  modesLoading.add(device);
+  try {
+    // 個体の照合が先。待つのは最初の一覧が終わるまでで、以降は素通りします。
+    if (devicesListed) await devicesListed;
+    // 待っている間に画面は動きます。別のカメラを打った人、UVC をやめた人の
+    // ために、もう要らないカメラを開きに行くことはありません — 開けば使用ランプが
+    // 点き、他のアプリと 15 秒取り合います。
+    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device) return;
+    const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    const found = await response.json();
+    // 名前が変わっていたら捨てる。入力欄は待っている間も動くので、古い応答で
+    // 候補を書き換えると、今いる名前とは無関係なモードを勧めることになる。
+    // ソースも見る — UVC をやめた後に採り込むと、隠れた欄に拒否が戻り、
+    // 別のソースの設定が保存できなくなる。
+    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim()) return;
+
+    cameraModes = found.modes || [];
+    if (found.error) {
+      // 調べられなかった。覚えないので、原因が直れば次の機会に効く。
+      sayModes(TEXT.modesUnknown + " " + found.error);
+    } else {
+      modesFor = device;
+      sayModes(cameraModes.length ? TEXT.modesFound + " " + cameraModes.map(describeMode).join(", ") : "");
+    }
+  } catch (err) {
+    // 成功の側と同じ判定。古い要求が転んだからといって、今のカメラについて
+    // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
+    // B の候補は次に入力の合図が来るまで戻らない。
+    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim()) return;
+    cameraModes = [];
+    sayModes(TEXT.modesUnknown + " " + String(err));
+  } finally {
+    modesLoading.delete(device);
+  }
+  refreshModeChoices();
+}
+
+// refreshModeChoices は候補欄を今のモードから作り直します。
+//
+// フレームレートは、選んでいる解像度に合うモードからだけ取ります。両者を独立に
+// 並べると、カメラが 1920x1080@5 と 640x480@30 しか持っていない場合に、画面が
+// 1920x1080@30 を選ばせることになります。それはまさに、この機能が説明しようと
+// している "Could not set video options" です。画面がそれを誘発しては本末転倒です。
+function refreshModeChoices() {
+  const sizes = [];
+  for (const m of cameraModes) {
+    for (const size of [m.min_size, m.max_size]) {
+      if (size && !sizes.includes(size)) sizes.push(size);
+    }
+  }
+  options("camera-sizes", sizes);
+
+  const chosen = el("uvc-size").value.trim();
+  const rates = [];
+  for (const m of cameraModes) {
+    if (chosen && !modeHasSize(m, chosen)) continue;
+    for (const fps of writableRates(m)) {
+      if (!rates.includes(fps)) rates.push(fps);
+    }
+  }
+  options("camera-framerates", rates);
+
+  // 候補欄は入力を縛りません。解像度を打ち替えただけでは、前の解像度でしか
+  // 使えないフレームレートが欄に残ります。そのまま保存すると、カメラが持って
+  // いない組み合わせを要求して起動に失敗します — この PR が説明しようとして
+  // いる失敗そのものです。ブラウザに止めさせます。
+  //
+  // 判定に使うのは候補欄ではなくモードの範囲です。候補は「書ける整数」に絞って
+  // あるので、そちらと突き合わせると、5-30fps のカメラに入っている 15 のような
+  // 正しい値まで弾いてしまいます (しかも保存の邪魔になるのはその欄だけでは
+  // ありません — 無関係な項目も一緒に保存できなくなります)。逆に 29.97fps しか
+  // 持たないカメラでは候補が空になるので、候補で見ると 30 が素通りします。
+  //
+  // 言うのは、このカメラのモードを知っているときだけです。知らないカメラ
+  // (まだ挿していない、調べられなかった) について「持っていない」とは言えません。
+  const known = cameraModes.length > 0;
+  const badSize = known && chosen !== "" && !cameraModes.some((m) => modeHasSize(m, chosen));
+  refuse("uvc-size", badSize, TEXT.modesNoSize);
+
+  // 解像度が違っているなら、そのフレームレートの当否は問いません。「この解像度
+  // では持っていない」と言っても、その解像度自体が無いので意味を成しません。
+  const wanted = el("uvc-framerate").value.trim();
+  const fps = Number(wanted);
+  const asked = wanted !== "" && fps !== 0;
+  const hasRate = cameraModes.some((m) => (!chosen || modeHasSize(m, chosen)) && fps >= m.min_fps && fps <= m.max_fps);
+  refuse("uvc-framerate", known && !badSize && asked && !hasRate, TEXT.modesNoRate);
+}
+
+// refuse は、その欄のせいで保存できないことをブラウザに伝えます。空文字を渡すと
+// 解除されるので、直った瞬間に保存できるようになります。
+function refuse(id, wrong, reason) {
+  const node = el(id);
+  if (node.setCustomValidity) node.setCustomValidity(wrong ? reason : "");
+}
+
+const parseSize = (s) => {
+  const m = /^(\d+)x(\d+)$/.exec(s || "");
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+};
+
+// modeHasSize は、その大きさをこのモードが受け付け得るかどうかを返します。範囲で
+// 答えるカメラでは、両端の間の大きさも使えます。
+//
+// 「使え得る」までしか言えません。DirectShow の範囲には刻み幅 (OutputGranularity)
+// があり、間のどの値でも良いとは限りませんが、ffmpeg の -list_options はそれを
+// 書きません。手元にない情報です。
+//
+// それでも間を受け付けるのは、ここが**拒否するかどうか**を決める場所だからです。
+// 両端しか認めないと、160x120-1280x720 のカメラで 640x480 を拒否します。それは
+// ほぼ確実に使える値で、しかも拒否はフォーム全体の保存を止めます。分からない
+// ことを理由に、動くはずの設定を止めるほうが害が大きい。刻み幅に外れた値は
+// カメラが開かず、そのときはエラーがモードの一覧を添えます — この PR がまさに
+// 足した経路です。
+function modeHasSize(m, size) {
+  if (m.min_size === size || m.max_size === size) return true;
+  const want = parseSize(size), lo = parseSize(m.min_size), hi = parseSize(m.max_size);
+  if (!want || !lo || !hi) return false;
+  return want.w >= lo.w && want.w <= hi.w && want.h >= lo.h && want.h <= hi.h;
+}
+
+// writableRates は、設定に書けるフレームレートだけを返します。
+//
+// source.uvc.framerate は整数です。29.97 のような値を候補に出しても、入力欄が
+// 弾くか、保存できても設定として通りません。
+//
+// 幅のあるモードなら間の整数が使えるので、上端を切り下げた値を出します。1 つの値
+// しか持たないモードが 29.97 なら、書ける整数はありません。近い整数を勧めると、
+// カメラが持っていないフレームレートを要求させることになります。
+//
+// 幅があっても、その間に整数があるとは限りません。29.5-29.7fps のようなモードでは
+// 切り下げも切り上げも範囲の外に出ます。丸めた後に、それが本当にそのモードの値か
+// どうかを見ます。
+function writableRates(m) {
+  const out = [];
+  const add = (n) => {
+    if (!Number.isInteger(n) || n <= 0) return;
+    if (n < m.min_fps || n > m.max_fps) return;
+    if (!out.includes(String(n))) out.push(String(n));
+  };
+  add(Math.floor(m.max_fps));
+  add(Math.ceil(m.min_fps));
+  return out;
+}
+
+// describeMode は、Go 側の Mode.String と同じ形にする。片方だけを読んだ人が
+// もう片方を見て別のカメラの話だと思わないため。ここはカメラが申告したままを
+// 見せる — 書ける値かどうかは候補欄の役目で、説明の役目ではない。
+function describeMode(m) {
+  let size = m.min_size || "";
+  if (m.max_size && m.max_size !== m.min_size) size += "-" + m.max_size;
+  let out = size;
+  if (m.max_fps) {
+    out += " @ " + (m.min_fps && m.min_fps !== m.max_fps ? m.min_fps + "-" + m.max_fps : m.max_fps) + "fps";
+  }
+  if (m.format) out += " (" + m.format + ")";
+  return out;
+}
+
+el("uvc-device").addEventListener("change", loadCameraModes);
+el("uvc-device").addEventListener("blur", loadCameraModes);
+// 解像度が変わればフレームレートの候補も変わる。組み合わせで持っているものだから。
+el("uvc-size").addEventListener("input", refreshModeChoices);
+// フレームレート側にも要る。拒否したまま聞かなければ、直しても保存できない
+// ままになる — カスタムエラーが残っているフォームは submit すら起こしません。
+el("uvc-framerate").addEventListener("input", refreshModeChoices);
 
 // ffmpeg の取得。100 メガバイトは 1 つの応答に収まらないので、開始したら状態を
 // 見に行く。診断画面と同じ数字を同じところから読んでいる。
@@ -485,8 +781,14 @@ el("get-ffmpeg").addEventListener("click", async () => {
   }
 });
 
+// 一覧とフォームは並べて読みます。デバイスの列挙は ffmpeg を起動するので、
+// 遅ければ 15 秒かかります。設定の表示までそれを待たせません。
+//
+// 待たせるのは最初のモード問い合わせだけです。ブリッジがカメラの入れ替わりを
+// 知るのは一覧を数えたときなので (bridge.forgetModesIfCamerasChanged)、先に
+// モードを訊くと、入れ替わったカメラの古い答えを受け取り、成功として覚えます。
+devicesListed = loadDevices();
 load();
-loadDevices();
 pollFFmpeg();
 setInterval(pollFFmpeg, 2000);
 </script>

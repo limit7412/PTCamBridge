@@ -67,6 +67,7 @@ const (
 	CLINoSettingsRead   Key = "cli.no_settings_read"
 	CLINoDevices        Key = "cli.no_devices"
 	CLINoSerialPorts    Key = "cli.no_serial_ports"
+	CLINoModes          Key = "cli.no_modes"
 )
 
 // 診断画面。
@@ -148,6 +149,11 @@ const (
 	UIQualityHint     Key = "ui.hint.quality"
 	UIFramerateHint   Key = "ui.hint.framerate"
 	UISizeHint        Key = "ui.hint.size"
+	UIModesFound      Key = "ui.modes.found"
+	UIModesLooking    Key = "ui.modes.looking"
+	UIModesNoSize     Key = "ui.modes.no_size"
+	UIModesNoRate     Key = "ui.modes.no_framerate"
+	UIModesUnknown    Key = "ui.modes.unknown"
 	UIWriteCacheHint  Key = "ui.hint.write_cache"
 	UIRestartBadge    Key = "ui.restart.badge"
 	UIRestartNote     Key = "ui.restart.note"
@@ -234,6 +240,7 @@ var messages = map[Key]map[Lang]string{
 	CLICaptureDevices:   {English: "Capture devices:", Japanese: "カメラ:"},
 	CLISerialPorts:      {English: "Serial ports:", Japanese: "シリアルポート:"},
 	CLINoneFound:        {English: "  (none found)", Japanese: "  (見つかりません)"},
+	CLINoModes:          {English: "could not list this camera's modes:", Japanese: "このカメラの対応モードを取得できませんでした:"},
 	CLIRestored:         {English: "PaperTracker address cache restored in %s", Japanese: "%s の PaperTracker 接続先を元に戻しました"},
 	CLINothingToRestore: {English: "Nothing to restore: PTCamBridge has not changed the PaperTracker address cache.", Japanese: "戻すものはありません: PTCamBridge は PaperTracker の接続先を変更していません。"},
 	CLIRestoreHint:      {English: "If the client is installed somewhere unusual, set papertracker.install_dir or pass -config.", Japanese: "クライアントが通常と異なる場所にある場合は、papertracker.install_dir を設定するか -config を指定してください。"},
@@ -322,6 +329,26 @@ var messages = map[Key]map[Lang]string{
 	UISizeHint: {
 		English:  "Empty leaves the resolution to the camera. A size the camera does not have stops it from opening at all.",
 		Japanese: "空ならカメラに任せます。カメラが持っていない解像度を書くと、そのカメラは開きません。",
+	},
+	UIModesFound: {
+		English:  "This camera offers:",
+		Japanese: "このカメラが持っているモード:",
+	},
+	UIModesLooking: {
+		English:  "Looking up this camera's modes...",
+		Japanese: "このカメラの対応モードを調べています…",
+	},
+	UIModesNoSize: {
+		English:  "This camera does not offer that size.",
+		Japanese: "このカメラはその解像度を持っていません。",
+	},
+	UIModesNoRate: {
+		English:  "This camera does not offer that framerate at this size.",
+		Japanese: "このカメラは、この解像度でそのフレームレートを持っていません。",
+	},
+	UIModesUnknown: {
+		English:  "Could not read this camera's modes:",
+		Japanese: "このカメラの対応モードを読めませんでした:",
 	},
 	UIWriteCacheHint: {
 		English:  "The previous address is kept, and \"ptcambridge -restore-cache\" puts it back.",
