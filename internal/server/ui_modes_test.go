@@ -800,7 +800,55 @@ console.log(JSON.stringify({beforeList, afterList}));
 	}
 }
 
-// 進行中は 1 つでは足りません。
+// 一覧を待っている間に画面が動いたら、もう要らないカメラは開きません。
+//
+// 待ちに入る前に掴んだ名前のまま問い合わせると、既に別のカメラへ移った人・
+// UVC をやめた人のために、使っていないカメラの使用ランプを点け、他のアプリと
+// 15 秒取り合うことになります。
+func TestSettingsPageChecksAgainAfterWaitingForTheDeviceList(t *testing.T) {
+	harness := modesHarness + `
+let finishList;
+const held = () => { devicesListed = new Promise((resolve) => { finishList = resolve; }); };
+
+// カメラ名が変わった場合。
+held();
+const forA = loadCameraModes();
+nodes["uvc-device"].value = "B";
+finishList();
+await new Promise((r) => setTimeout(r, 0));
+const afterRename = asked;
+
+// ソースを変えた場合。
+nodes["uvc-device"].value = "C";
+held();
+const forC = loadCameraModes();
+sourceType = "serial";
+finishList();
+await new Promise((r) => setTimeout(r, 0));
+const afterSwitch = asked;
+
+release();
+await Promise.all([forA, forC]);
+console.log(JSON.stringify({afterRename, afterSwitch}));
+`
+	var got struct {
+		AfterRename int `json:"afterRename"`
+		AfterSwitch int `json:"afterSwitch"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterRename != 0 {
+		t.Errorf("opened %d cameras after the name moved on, want 0", got.AfterRename)
+	}
+	if got.AfterSwitch != 0 {
+		t.Errorf("opened %d cameras after the source moved on, want 0", got.AfterSwitch)
+	}
+}
+
+// 進行中は 1 つでは足りません。// 進行中は 1 つでは足りません。
 //
 // A を待っている間に B へ変え、また A に戻すと、3 回目の A は「今 B を調べている」
 // という印をすり抜けます。同時に走り得るのは、走っている数だけあります。

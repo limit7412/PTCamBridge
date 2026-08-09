@@ -549,6 +549,10 @@ async function loadCameraModes() {
   try {
     // 個体の照合が先。待つのは最初の一覧が終わるまでで、以降は素通りします。
     if (devicesListed) await devicesListed;
+    // 待っている間に画面は動きます。別のカメラを打った人、UVC をやめた人の
+    // ために、もう要らないカメラを開きに行くことはありません — 開けば使用ランプが
+    // 点き、他のアプリと 15 秒取り合います。
+    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device) return;
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
     const found = await response.json();
