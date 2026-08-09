@@ -152,6 +152,16 @@ size = "240x240"
 framerate = 30
 ```
 
+**自分のカメラが持っているモードを調べるには、ffmpeg に直接訊きます。**
+`-list-devices` が答えるのはデバイス名だけで、モードは含みません。
+
+```
+ffmpeg -hide_banner -f dshow -list_options true -i video="Bigeye"
+```
+
+`ffmpeg.exe` は、トレイの「Get ffmpeg」で取得したものが
+`%APPDATA%\PTCamBridge\bin\` にあります。カメラ名は `-list-devices` で確認できます。
+
 正方形が欲しいだけなら、カメラのモードを指定せずに `[transform] crop_square = true` で
 切り出す手もあります。
 
