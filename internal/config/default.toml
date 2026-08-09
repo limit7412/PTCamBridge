@@ -51,9 +51,27 @@ max_frame_size = 0
 # 同名のカメラが複数ある場合や、再起動でフレンドリ名が変わる環境では、
 # -list-devices が併記する "@device_pnp_..." の方を指定すると安定します。
 device = ""
-size = "240x240"
-# 0 でデバイス既定値。負数は設定ミスとして起動時に拒否します。
-framerate = 30
+# 解像度。空でカメラ既定値。
+#
+# 空を既定にしているのは、指定した値をカメラが持っていなければ、そのカメラが
+# 一切開かないためです。Windows の DirectShow は要求したモードが無いと
+# "Could not set video options" で入力を開けず、再試行しても毎回同じ場所で
+# 落ちます。空にしておけば、カメラが自分の既定モードを選びます。それは
+# どのカメラにも必ず存在します。
+#
+# Babble や EyeTrackVR のボードを使う場合は size = "240x240"、framerate = 30 を
+# 書いてください。
+#
+# 自分のカメラが持っているモードを調べるには、ffmpeg に直接訊きます。
+# カメラ名は ptcambridge.exe -list-devices で確認できます。
+# トレイの「Get ffmpeg」で取得した ffmpeg.exe は PATH に入らないので、
+# 場所を含めて実行してください。
+#
+#   "%APPDATA%\PTCamBridge\bin\ffmpeg.exe" -hide_banner -f dshow -list_options true -i video="カメラ名"
+size = ""
+# フレームレート。0 でデバイス既定値。負数は設定ミスとして起動時に拒否します。
+# size と同じ理由で、既定は 0 です。
+framerate = 0
 # 空なら実行ファイルと同じフォルダの ffmpeg.exe、次に PATH、最後にトレイの
 # 「Get ffmpeg」で取得した %APPDATA%\PTCamBridge\bin\ffmpeg.exe を探します。
 # ここで指定したものが常に優先されます。

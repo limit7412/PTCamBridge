@@ -149,10 +149,12 @@ func Default() Config {
 		},
 		Source: Source{
 			Type: SourceUVC,
-			UVC: UVC{
-				Size:      "240x240",
-				Framerate: 30,
-			},
+			// UVC の解像度とフレームレートは空 (デバイス既定値) です。値を決めて
+			// しまうと、それを持っていないカメラは一切開きません。DirectShow は
+			// 要求したモードが無いと入力を開けないので、汎用の webcam を挿した人が
+			// 「カメラを選んだだけ」で理由の分からない失敗を受け取ります。決めない
+			// 方を既定にして、特定のボード向けの値は明示指定にします。
+			UVC: UVC{},
 			Serial: Serial{
 				Port:   "auto",
 				Baud:   DefaultSerialBaud,

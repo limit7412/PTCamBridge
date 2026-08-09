@@ -401,6 +401,7 @@ func uiText(p i18n.Printer) map[string]string {
 		"langAuto":       i18n.UILangAuto,
 		"qualityHint":    i18n.UIQualityHint,
 		"framerateHint":  i18n.UIFramerateHint,
+		"sizeHint":       i18n.UISizeHint,
 		"writeCacheHint": i18n.UIWriteCacheHint,
 		"restartBadge":   i18n.UIRestartBadge,
 		"restartNote":    i18n.UIRestartNote,

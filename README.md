@@ -84,6 +84,10 @@ ptcambridge.exe -list-devices
 4. 引き継ぐものがあれば手で移す
    - 設定: `%APPDATA%\PaperBridge\paperbridge.toml` →
      `%APPDATA%\PTCamBridge\ptcambridge.toml`
+     (**一般的な UVC カメラを使っている場合は、移した後に `[source.uvc]` の
+     `size` を空、`framerate` を 0 にしてください。**
+     旧バージョンの既定値 `240x240` / `30` はそのカメラには無いモードなので、
+     残したままだとカメラが開きません → [解像度とフレームレート](#解像度とフレームレート))
    - 取得済み ffmpeg: `%APPDATA%\PaperBridge\bin\` → `%APPDATA%\PTCamBridge\bin\`
      (100 MB 超の再ダウンロードを避けるため。移さなければトレイから取り直せます)
 5. `%APPDATA%\PaperBridge\` と旧 exe を削除する
@@ -133,6 +137,59 @@ ptcambridge.exe -list-devices
 | `uvc` | USB ウェブカメラ全般 | `[source.uvc] device` に DirectShow のデバイス名 |
 | `serial` | 有線 Babble ボード / OpenIris 系 | `[source.serial] port`。`auto` で VID から自動探索 |
 | `mjpeg` | WiFi ESP32 など HTTP 配信カメラ | `[source.mjpeg] url` |
+
+#### 解像度とフレームレート
+
+`[source.uvc] size` と `framerate` の既定は**空と 0、つまりカメラ任せ**です。
+
+**カメラが持っていないモードを指定すると、そのカメラは一切開きません。** DirectShow は
+要求した組み合わせが無いと `Could not set video options` で入力を開けず、再試行しても
+毎回同じ場所で落ちます。こちらで値を決めないでおけば、カメラは自分の既定モードを選び、
+それはどのカメラにも必ず存在します。
+
+> **既に設定ファイルがある場合は、この既定は適用されません。**
+>
+> 既定が変わるのは、設定ファイルが新しく作られるときだけです。以前のバージョンが
+> 作ったファイルには `size = "240x240"` と `framerate = 30` が**書かれた状態で残る**ので、
+> 一般的な UVC カメラを使っていると、更新しても同じ理由で開けないままです。
+>
+> ログに `Could not set video options` が出ているなら、設定ファイルの該当行を
+> 手で書き換えてください。
+>
+> ```toml
+> [source.uvc]
+> size = ""
+> framerate = 0
+> ```
+>
+> 自動では書き換えません。`240x240` が書いてあっても、それが「旧既定値のまま」なのか
+> 「Babble ボードのために自分で選んだ値」なのかを、こちらから見分ける方法がないためです。
+> 後者を黙って消すと、動いていた人の設定を壊します。
+
+Babble や EyeTrackVR のボードを使う場合は明示してください。
+
+```toml
+[source.uvc]
+device = "Bigeye"
+size = "240x240"
+framerate = 30
+```
+
+**自分のカメラが持っているモードを調べるには、ffmpeg に直接訊きます。**
+`-list-devices` が答えるのはデバイス名だけで、モードは含みません。
+
+トレイの「Get ffmpeg」で取得した場合、`ffmpeg.exe` は PATH には入らないので、
+場所を含めて実行してください。
+
+```
+"%APPDATA%\PTCamBridge\bin\ffmpeg.exe" -hide_banner -f dshow -list_options true -i video="Bigeye"
+```
+
+自分で用意した `ffmpeg.exe` が PATH にあるなら `ffmpeg` だけで実行できます。
+カメラ名は `-list-devices` で確認できます。
+
+正方形が欲しいだけなら、カメラのモードを指定せずに `[transform] crop_square = true` で
+切り出す手もあります。
 
 UVC はまずカメラ自身に MJPEG を要求してパススルーします。1 フレームも得られず、
 かつ ffmpeg の診断がデバイス未オープンを示していない場合は、再エンコードに切り替えて
