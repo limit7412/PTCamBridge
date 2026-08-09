@@ -24,6 +24,11 @@ func runSettingsScript(t *testing.T, body string) string {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
+		// CI では飛ばしません。飛ばせるようにしておくと、runner の中身が変わった日に
+		// この画面のテストが黙って消え、それに気づく機会が二度と来ません。
+		if os.Getenv("CI") != "" {
+			t.Fatal("node is required to test the settings page script")
+		}
 		t.Skip("node is not installed, skipping the settings page script test")
 	}
 
