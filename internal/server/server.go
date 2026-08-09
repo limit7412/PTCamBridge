@@ -82,6 +82,12 @@ type Controller interface {
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
 	// 1 つのエラーにまとめず、リストごとに報告します。
 	Devices(ctx context.Context) Devices
+	// CameraModes は、1 台のカメラが申告する出力形式の組み合わせを返します。
+	//
+	// Devices とは別です。調べるにはデバイスを開く必要があり、カメラ 1 台につき
+	// ffmpeg を 1 回起動します。設定画面は Devices を定期的に読むので、そちらに
+	// 混ぜると、画面を開いているだけで数秒おきに全カメラを掴みに行くことになります。
+	CameraModes(ctx context.Context, device string) ([]source.Mode, error)
 	// Overridden は、起動時に環境変数やコマンドラインで上書きされた、起動時にしか
 	// 読まれない設定の名前です。プロセスの間ずっと変わりません。
 	Overridden() []string
@@ -194,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/api/v1/config", s.handleConfig)
 		mux.HandleFunc("/api/v1/source", s.handleSourceSwitch)
 		mux.HandleFunc("/api/v1/devices", s.handleDevices)
+		mux.HandleFunc("/api/v1/camera-modes", s.handleCameraModes)
 		if s.opts.FFmpeg != nil {
 			mux.HandleFunc("/api/v1/ffmpeg", s.handleFFmpeg)
 		}
@@ -619,6 +626,48 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	// エラーは返さない。半分の答えでも答えではあるし、どちらが失敗したかは
 	// 本体の中で報告している。
 	writeJSON(w, r, http.StatusOK, s.opts.Controller.Devices(r.Context()))
+}
+
+// CameraModes は、1 台のカメラが持っているモードの答えです。
+type CameraModes struct {
+	Device string        `json:"device"`
+	Modes  []source.Mode `json:"modes"`
+	Error  string        `json:"error,omitempty"`
+}
+
+// handleCameraModes は、名前を指定された 1 台のカメラのモードを返します。
+//
+// デバイス一覧と分けてあるのは、こちらがカメラを開くからです。呼ばれるのは、
+// ユーザーが解像度の欄に触れたときだけであってほしいので、要求された 1 台だけを
+// 調べます。
+//
+// 失敗も 200 で返します。「調べられなかった」ことは、画面が候補欄の隣に出すべき
+// 答えの 1 つであって、要求が誤っていたわけではありません。名前が空の場合だけは
+// 400 です。そちらは要求の側の誤りです。
+func (s *Server) handleCameraModes(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	device := strings.TrimSpace(r.URL.Query().Get("device"))
+	if device == "" {
+		http.Error(w, "device is required", http.StatusBadRequest)
+		return
+	}
+
+	out := CameraModes{Device: device, Modes: []source.Mode{}}
+	modes, err := s.opts.Controller.CameraModes(r.Context(), device)
+	if err != nil {
+		out.Error = err.Error()
+	}
+	if modes != nil {
+		out.Modes = modes
+	}
+	writeJSON(w, r, http.StatusOK, out)
 }
 
 // handleFFmpeg は、ffmpeg が取得済みかどうかを報告し、取得を開始します。

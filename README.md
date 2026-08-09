@@ -175,18 +175,36 @@ size = "240x240"
 framerate = 30
 ```
 
-**自分のカメラが持っているモードを調べるには、ffmpeg に直接訊きます。**
-`-list-devices` が答えるのはデバイス名だけで、モードは含みません。
-
-トレイの「Get ffmpeg」で取得した場合、`ffmpeg.exe` は PATH には入らないので、
-場所を含めて実行してください。
+**自分のカメラが持っているモードは、`-list-devices` が並べます。**
 
 ```
-"%APPDATA%\PTCamBridge\bin\ffmpeg.exe" -hide_banner -f dshow -list_options true -i video="Bigeye"
+ptcambridge.exe -list-devices
 ```
 
-自分で用意した `ffmpeg.exe` が PATH にあるなら `ffmpeg` だけで実行できます。
-カメラ名は `-list-devices` で確認できます。
+```
+Capture devices:
+  Bigeye
+    @device_pnp_\\?\usb#vid_1234...
+      1280x720 @ 5-30fps (mjpeg)
+      640x480 @ 5-30fps (yuyv422)
+```
+
+ここに出た値をそのまま `size` と `framerate` に書けます。
+
+**設定画面でも同じ一覧が候補に出ます。** カメラ名を入れると、その 1 台について
+解像度とフレームレートの候補が埋まります。読みに行くのはカメラ名が決まったときだけで、
+デバイス一覧のような定期的な取得はしません — モードを調べるにはカメラを開く必要が
+あり、画面を開いているだけで数秒おきに全カメラを掴みに行くわけにはいかないためです。
+
+**モードが合っていなくて開けなかったときは、エラーがそのカメラの持ち物を添えます。**
+
+```
+uvc: ffmpeg closed its output (ffmpeg: Could not set video options ...);
+  Bigeye offers 1280x720 @ 5-30fps (mjpeg), 640x480 @ 5-30fps (yuyv422)
+```
+
+ログを読むだけで次の一手が分かるようにするためです。調べるのは 1 回だけで、
+再接続のたびには調べ直しません。
 
 正方形が欲しいだけなら、カメラのモードを指定せずに `[transform] crop_square = true` で
 切り出す手もあります。
@@ -401,6 +419,7 @@ ffmpeg の起動を伴い最大 15 秒かかるので、繰り返しません。
 | `/api/v1/config` | GET / PUT。設定の取得と適用。PUT の応答は動作中の設定で、起動時にしか読まれない設定を変更した場合は `pending_restart` にその名前が入る |
 | `/api/v1/source` | POST `{"type":"uvc"}`。ソース切替 |
 | `/api/v1/devices` | GET。カメラとシリアルポートの一覧 |
+| `/api/v1/camera-modes?device=名前` | GET。そのカメラ 1 台が持っているモード |
 | `/api/v1/ffmpeg` | GET。取得状況。POST。ffmpeg のダウンロード開始 (202) |
 
 カメラとシリアルの列挙は独立して行い、失敗も `camera_error` / `serial_error`
@@ -427,8 +446,10 @@ ffmpeg の起動を伴い最大 15 秒かかるので、繰り返しません。
 `Sec-Fetch-Site` を見るのは GET のためです。ページが
 `<img src="http://127.0.0.1:18080/api/v1/devices">` のようにサブリソースとして
 要求する場合、ブラウザは `Origin` を付けず、プリフライトも起きません。応答は
-読めませんが、`/api/v1/devices` は Windows で ffmpeg を起動して最大 15 秒待つため、
-URL を変えながら繰り返せばローカルにプロセスを作り続けられます。
+読めませんが、`/api/v1/devices` と `/api/v1/camera-modes` は Windows で ffmpeg を
+起動して最大 15 秒待つため、URL を変えながら繰り返せばローカルにプロセスを作り続け
+られます。後者は `device` を変えるだけで別の要求になるので、狙う側にとってはより
+都合のよい的です。どちらも同じ `guardAdmin` を通ります。
 `Sec-Fetch-Site` はページ側から偽装も抑止もできないため、これを送るブラウザは
 この値で判定します。
 

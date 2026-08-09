@@ -36,14 +36,17 @@
         <p class="hint warn" id="camera-error" hidden></p>
         <div class="field">
           <label for="uvc-size">{{index .Text "size"}}</label>
-          <input type="text" id="uvc-size" class="mono" placeholder="640x480">
+          <input type="text" id="uvc-size" list="camera-sizes" class="mono" placeholder="640x480">
           <p class="hint">{{index .Text "sizeHint"}}</p>
         </div>
+        <datalist id="camera-sizes"></datalist>
         <div class="field">
           <label for="uvc-framerate">{{index .Text "framerate"}}</label>
-          <input type="number" id="uvc-framerate" min="0">
+          <input type="number" id="uvc-framerate" list="camera-framerates" min="0">
           <p class="hint">{{index .Text "framerateHint"}}</p>
         </div>
+        <datalist id="camera-framerates"></datalist>
+        <p class="hint" id="camera-modes"></p>
         <div class="field">
           <label for="uvc-ffmpeg">{{index .Text "ffmpegPath"}}</label>
           <input type="text" id="uvc-ffmpeg" class="mono">
@@ -387,18 +390,20 @@ for (const radio of document.querySelectorAll('input[name="source-type"]')) {
   radio.addEventListener("change", () => showSource(radio.value));
 }
 
+// options は datalist の中身を入れ替える。デバイス名にもカメラのモードにも使う。
+const options = (id, names) => {
+  const list = el(id);
+  list.replaceChildren();
+  for (const name of names) {
+    const option = document.createElement("option");
+    option.value = name;
+    list.append(option);
+  }
+};
+
 // デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
 // 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
 async function loadDevices() {
-  const options = (id, names) => {
-    const list = el(id);
-    list.replaceChildren();
-    for (const name of names) {
-      const option = document.createElement("option");
-      option.value = name;
-      list.append(option);
-    }
-  };
   // 列挙の失敗は、候補が空になることと区別して出す。ffmpeg が無いから列挙できない
   // のか、カメラが繋がっていないのか。候補欄が空という 1 つの見た目が 2 つの意味を
   // 持つと、ユーザーはどちらを直せばよいのか分からない。
@@ -423,6 +428,82 @@ async function loadDevices() {
     failure("serial-error", String(err));
   }
 }
+
+// カメラが持っているモード。
+//
+// デバイス一覧と一緒には取らない。調べるにはカメラを開く必要があり、1 台につき
+// ffmpeg を 1 回起動する。一覧は 5 秒ごとに読んでいるので、そこに混ぜると、この画面を
+// 開いているだけで数秒おきに全カメラを掴みに行くことになる。
+//
+// 取りに行くのはカメラ名が決まったときだけ。同じ名前で 2 度は訊かない。
+let modesFor = "";
+
+async function loadCameraModes() {
+  const device = el("uvc-device").value.trim();
+  if (device === modesFor) return;
+  modesFor = device;
+
+  const say = (text) => el("camera-modes").textContent = text || "";
+  if (!device) {
+    options("camera-sizes", []);
+    options("camera-framerates", []);
+    say("");
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    const found = await response.json();
+    // 名前が変わっていたら捨てる。入力欄は待っている間も動くので、古い応答で
+    // 候補を書き換えると、今いる名前とは無関係なモードを勧めることになる。
+    if (found.device !== el("uvc-device").value.trim()) return;
+
+    const modes = found.modes || [];
+    // 大きさは範囲で答えるカメラがあるので、両端を候補に出す。間の値も使えるが、
+    // それを全部並べても選びやすくはならない。
+    const sizes = [];
+    const rates = [];
+    for (const m of modes) {
+      for (const size of [m.min_size, m.max_size]) {
+        if (size && !sizes.includes(size)) sizes.push(size);
+      }
+      for (const fps of [m.min_fps, m.max_fps]) {
+        if (fps && !rates.includes(String(fps))) rates.push(String(fps));
+      }
+    }
+    options("camera-sizes", sizes);
+    options("camera-framerates", rates);
+
+    if (found.error) {
+      say(TEXT.modesUnknown + " " + found.error);
+    } else if (modes.length) {
+      say(TEXT.modesFound + " " + modes.map(describeMode).join(", "));
+    } else {
+      say("");
+    }
+  } catch (err) {
+    options("camera-sizes", []);
+    options("camera-framerates", []);
+    say(TEXT.modesUnknown + " " + String(err));
+  }
+}
+
+// describeMode は、Go 側の Mode.String と同じ形にする。片方だけを読んだ人が
+// もう片方を見て別のカメラの話だと思わないため。
+function describeMode(m) {
+  let size = m.min_size || "";
+  if (m.max_size && m.max_size !== m.min_size) size += "-" + m.max_size;
+  let out = size;
+  if (m.max_fps) {
+    out += " @ " + (m.min_fps && m.min_fps !== m.max_fps ? m.min_fps + "-" + m.max_fps : m.max_fps) + "fps";
+  }
+  if (m.format) out += " (" + m.format + ")";
+  return out;
+}
+
+el("uvc-device").addEventListener("change", loadCameraModes);
+el("uvc-device").addEventListener("blur", loadCameraModes);
 
 // ffmpeg の取得。100 メガバイトは 1 つの応答に収まらないので、開始したら状態を
 // 見に行く。診断画面と同じ数字を同じところから読んでいる。

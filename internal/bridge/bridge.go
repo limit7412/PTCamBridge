@@ -810,6 +810,16 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	return devices
 }
 
+// CameraModes は、1 台のカメラが申告するモードを返します。
+//
+// ここは設定を読むだけで、動いているソースには触れません。使うのは ffmpeg の
+// 探索経路を揃えるための ffmpeg_path だけです。画面が指定したカメラと、動作中の
+// カメラが同じとは限りません — 解像度を決めるために、まだ選んでいないカメラを
+// 調べるのが、この呼び出しの主な用途です。
+func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode, error) {
+	return source.ListModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
+}
+
 // SetPaused はキャプチャを停止または再開します。一時停止はカメラを解放します。
 // これは UVC で意味を持ちます。デバイスは排他的で、ブリッジが握っている間
 // Baballonia はそれを開けないからです。

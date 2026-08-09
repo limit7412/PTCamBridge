@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,15 @@ type UVC struct {
 	// 流す試みが 2 度目も失敗したことを記録します。2 つのモードはこの比較のために
 	// あり、これが問いに決着をつけます。
 	reencodeReal bool
+
+	// modes は、このカメラが申告したモードの一覧を、一度調べた結果です。
+	// modesAsked は、調べようとしたかどうか (失敗も含む) です。
+	//
+	// 覚えておくのは、再接続ループが数秒おきに戻ってくるからです。失敗のたびに
+	// 調べ直すと、カメラを開く回数が倍になります。答えは配線が変わらない限り
+	// 変わらないので、1 回で足ります。
+	modes      []Mode
+	modesAsked bool
 }
 
 // NewUVC はドライバを組み立てます。デバイスの指定は必須です。
@@ -105,8 +115,62 @@ func (u *UVC) Run(ctx context.Context, out chan<- core.Frame) error {
 		// 待つことでそれを判断する。
 		frames, diag, err := u.capture(ctx, out, u.copyCodec)
 		u.chooseCodec(frames, diag, err)
-		return err
+		return u.explainRefusedMode(ctx, diag, err)
 	})
+}
+
+// modeRefusedSigns は、「デバイスは見つかったが、要求した解像度やフレームレートを
+// 持っていない」ことを意味する ffmpeg の診断です。
+//
+// 文言の一致なので、これで再試行を止めたり、コーデックの選び方を変えたりはしません
+// (deviceUnavailableSigns の注意書きと同じ理由です)。使うのは、既に起きた失敗に
+// 説明を足すためだけです。取りこぼしても、これまでどおりのエラーが出ます。
+var modeRefusedSigns = []string{
+	"could not set video options", // dshow
+}
+
+// explainRefusedMode は、要求したモードが拒まれた失敗に、そのカメラが実際に持って
+// いるモードを添えます。
+//
+// これが要るのは、元の診断が行き止まりだからです。"Could not set video options" は
+// 何が悪かったかを言いますが、代わりに何を書けばよいかは言いません。設定ファイルを
+// 開いた人も、ログを読んだ人も、そこで止まります。
+//
+// 調べるのは 1 回だけです。再接続ループは数秒おきに戻ってくるので、毎回調べると
+// カメラを開く回数が倍になります。答えは配線が変わらない限り変わりません。
+func (u *UVC) explainRefusedMode(ctx context.Context, diag string, err error) error {
+	if err == nil || !refusedMode(diag) {
+		return err
+	}
+	// 何も要求していないのに拒まれたのなら、それはモードの話ではない。添えられる
+	// ことは何も無いし、「空を指定したのが悪い」と読ませてしまう。
+	if u.cfg.Size == "" && u.cfg.Framerate == 0 {
+		return err
+	}
+
+	if !u.modesAsked {
+		u.modesAsked = true
+		modes, listErr := ListModes(ctx, u.cfg.FFmpegPath, u.cfg.Device)
+		if listErr != nil {
+			u.log.Debug("could not list the camera modes to explain the failure", "device", u.cfg.Device, "error", listErr)
+		}
+		u.modes = modes
+	}
+	if len(u.modes) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; %s offers %s", err, u.cfg.Device, describeModes(u.modes))
+}
+
+// refusedMode は、診断が「そのモードは無い」と言っているかどうかを返します。
+func refusedMode(diag string) bool {
+	lower := strings.ToLower(diag)
+	for _, sign := range modeRefusedSigns {
+		if strings.Contains(lower, sign) {
+			return true
+		}
+	}
+	return false
 }
 
 // chooseCodec は、次の試行をどのモードで走らせるかを選びます。
@@ -404,6 +468,88 @@ type Device struct {
 	Alternative string `json:"alternative,omitempty"`
 }
 
+// Mode は、カメラが 1 つの出力形式について申告する組み合わせです。
+//
+// 最小と最大を別々に持つのは、ffmpeg がそう報告するからです。多くのカメラは
+// 両者が同じ値の行を形式ごとに並べますが、範囲で答えるカメラもあり、その場合は
+// 間のどの大きさも使えます。片方に丸めると、使える値を隠すか、使えない値を
+// 勧めることになります。
+type Mode struct {
+	// Format は "mjpeg" のようなコーデック名か、"yuyv422" のようなピクセル形式です。
+	Format string `json:"format,omitempty"`
+	// MinSize と MaxSize は "640x480" の形です。等しいこともあります。
+	MinSize string `json:"min_size"`
+	MaxSize string `json:"max_size"`
+	// MinFPS と MaxFPS は、その大きさでカメラが受け付けるフレームレートの幅です。
+	MinFPS float64 `json:"min_fps,omitempty"`
+	MaxFPS float64 `json:"max_fps,omitempty"`
+}
+
+// String は、設定ファイルに書く値がそのまま読み取れる形にします。
+func (m Mode) String() string {
+	size := m.MinSize
+	if m.MaxSize != m.MinSize {
+		size += "-" + m.MaxSize
+	}
+	fps := trimFloat(m.MaxFPS)
+	if m.MinFPS != m.MaxFPS {
+		fps = trimFloat(m.MinFPS) + "-" + fps
+	}
+
+	out := size
+	if fps != "0" {
+		out += " @ " + fps + "fps"
+	}
+	if m.Format != "" {
+		out += " (" + m.Format + ")"
+	}
+	return out
+}
+
+// trimFloat は 30 を "30"、29.97 を "29.97" にします。設定に書くのは整数なので、
+// "30.000000" と出して人に読み替えさせる理由がありません。
+func trimFloat(f float64) string {
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// dshowModeLine は ffmpeg の -list_options の出力に一致します。次の形です。
+//
+//	[dshow @ 0000...]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
+//	[dshow @ 0000...]   pixel_format=yuyv422  min s=640x480 fps=5 max s=640x480 fps=30
+var dshowModeLine = regexp.MustCompile(
+	`(?:vcodec|pixel_format)=(\S+)\s+min s=(\d+x\d+)\s+fps=([\d.]+)\s+max s=(\d+x\d+)\s+fps=([\d.]+)`)
+
+// parseDshowModes は、ffmpeg が申告したモードを取り出します。
+//
+// 同じ行が複数回出ることがある (ピンが複数あるカメラなど) ので重複は畳みます。
+// 順序は ffmpeg が並べたとおりに保ちます。カメラが先に挙げるものには意味があり、
+// 並べ替えるとその手がかりを捨てることになります。
+func parseDshowModes(out string) []Mode {
+	var modes []Mode
+	seen := map[Mode]struct{}{}
+	for _, line := range strings.Split(out, "\n") {
+		m := dshowModeLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		minFPS, err := strconv.ParseFloat(m[3], 64)
+		if err != nil {
+			continue
+		}
+		maxFPS, err := strconv.ParseFloat(m[5], 64)
+		if err != nil {
+			continue
+		}
+		mode := Mode{Format: m[1], MinSize: m[2], MaxSize: m[4], MinFPS: minFPS, MaxFPS: maxFPS}
+		if _, dup := seen[mode]; dup {
+			continue
+		}
+		seen[mode] = struct{}{}
+		modes = append(modes, mode)
+	}
+	return modes
+}
+
 // dshowDeviceLine は ffmpeg のデバイス一覧に一致します。たとえば次の形です。
 //
 //	[dshow @ 0000...] "HD Webcam" (video)
@@ -447,6 +593,66 @@ func ListDevices(ctx context.Context, ffmpegPath string) ([]Device, error) {
 	}
 
 	return parseDshowDevices(diag.String()), nil
+}
+
+// ListModes は、1 台のカメラが申告する出力形式の組み合わせを返します。
+//
+// ListDevices とは別にしてあり、そちらからは呼びません。-list_options はデバイスを
+// 開いて問い合わせるので、カメラ 1 台につき ffmpeg を 1 回起動します。デバイス一覧は
+// 設定画面が定期的に読むものなので、そこに混ぜると、画面を開いているだけで数秒おきに
+// 全カメラを掴みに行くことになります。
+//
+// Windows 以外では何も返しません。この関数があるのは DirectShow が「持っていない
+// モードを要求されたらデバイスを開かない」ためで、その診断が要るのも Windows です。
+func ListModes(ctx context.Context, ffmpegPath, device string) ([]Mode, error) {
+	if runtime.GOOS != "windows" {
+		return nil, nil
+	}
+	if strings.TrimSpace(device) == "" {
+		return nil, errors.New("uvc: cannot list the modes of a camera with no name")
+	}
+	u := &UVC{cfg: UVCConfig{Device: device, FFmpegPath: ffmpegPath}, log: slog.Default()}
+	path, err := u.ffmpegPath()
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	_, input := platformInput(device)
+	cmd := exec.CommandContext(ctx, path, "-hide_banner", "-f", "dshow", "-list_options", "true", "-i", input)
+	configureChildProcess(cmd)
+	diag := &tailWriter{max: 64 << 10}
+	cmd.Stderr = diag
+	runErr := cmd.Run()
+
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("uvc: listing the modes of %q did not finish: %w", device, ctx.Err())
+	}
+	// ListDevices と同じく、非ゼロ終了は想定どおり。一覧を書いてから ffmpeg は
+	// 「入力が無い」と言って終わる。
+	var exitErr *exec.ExitError
+	if runErr != nil && !errors.As(runErr, &exitErr) {
+		return nil, fmt.Errorf("uvc: run ffmpeg to list the modes of %q: %w", device, runErr)
+	}
+
+	modes := parseDshowModes(diag.String())
+	if len(modes) == 0 {
+		// 開けなかったか、この ffmpeg が別の形で書いている。どちらにせよ黙って
+		// 空を返すと、呼び出し側は「モードが 1 つも無いカメラ」と受け取る。
+		return nil, fmt.Errorf("uvc: ffmpeg listed no modes for %q (ffmpeg: %s)", device, diag.String())
+	}
+	return modes, nil
+}
+
+// describeModes は、モードの一覧を 1 行にします。
+func describeModes(modes []Mode) string {
+	names := make([]string, 0, len(modes))
+	for _, m := range modes {
+		names = append(names, m.String())
+	}
+	return strings.Join(names, ", ")
 }
 
 // parseDshowDevices は、ffmpeg のデバイス一覧から映像の項目を取り出します。

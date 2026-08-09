@@ -62,12 +62,9 @@ device = ""
 # Babble や EyeTrackVR のボードを使う場合は size = "240x240"、framerate = 30 を
 # 書いてください。
 #
-# 自分のカメラが持っているモードを調べるには、ffmpeg に直接訊きます。
-# カメラ名は ptcambridge.exe -list-devices で確認できます。
-# トレイの「Get ffmpeg」で取得した ffmpeg.exe は PATH に入らないので、
-# 場所を含めて実行してください。
-#
-#   "%APPDATA%\PTCamBridge\bin\ffmpeg.exe" -hide_banner -f dshow -list_options true -i video="カメラ名"
+# 自分のカメラが持っているモードは ptcambridge.exe -list-devices が並べます。
+# 設定画面でも、カメラ名を入れると解像度とフレームレートの候補に出ます。
+# モードが合わずに開けなかった場合は、ログのエラーにもその一覧が付きます。
 size = ""
 # フレームレート。0 でデバイス既定値。負数は設定ミスとして起動時に拒否します。
 # size と同じ理由で、既定は 0 です。

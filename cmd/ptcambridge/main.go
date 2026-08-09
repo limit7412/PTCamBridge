@@ -458,11 +458,22 @@ func listDevices(opts options) error {
 		fmt.Println(p.S(i18n.CLINoneFound))
 	}
 	for _, d := range cameras {
+		fmt.Printf("  %s\n", d.Name)
 		if d.Alternative != "" {
-			fmt.Printf("  %s\n    %s\n", d.Name, d.Alternative)
+			fmt.Printf("    %s\n", d.Alternative)
+		}
+		// モードはカメラごとに ffmpeg を 1 回起動して調べる。デバイス一覧そのものに
+		// 混ぜていないのは、設定画面がそれを定期的に読むから (source.ListModes を
+		// 参照)。ここは人が 1 回だけ叩くコマンドなので、その代金を払う価値がある。
+		// 設定に書く値を探しているのは、まさにこれを実行している人だから。
+		modes, err := source.ListModes(ctx, ffmpegPath, d.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "    %s %v\n", p.S(i18n.CLINoModes), err)
 			continue
 		}
-		fmt.Printf("  %s\n", d.Name)
+		for _, m := range modes {
+			fmt.Printf("      %s\n", m)
+		}
 	}
 
 	ports, err := source.ListSerialPorts()

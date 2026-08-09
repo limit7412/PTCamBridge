@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/i18n"
+	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
 
@@ -479,5 +481,91 @@ func TestUIStateCarriesTheFFmpegConsentText(t *testing.T) {
 				t.Errorf("the consent text is offered when the download cannot start: %q", got.FFmpegPrompt)
 			}
 		})
+	}
+}
+
+// モードを調べるにはカメラを開く。デバイス一覧は画面が定期的に読むものなので、
+// そちらに混ぜてはいけない。要求された 1 台だけを、訊かれたときにだけ調べる。
+func TestCameraModesAsksOnlyForTheCameraNamed(t *testing.T) {
+	ctrl := &fakeController{modes: []source.Mode{
+		{Format: "mjpeg", MinSize: "640x480", MaxSize: "640x480", MinFPS: 5, MaxFPS: 30},
+	}}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, "/api/v1/camera-modes?device=USB+Camera", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/camera-modes = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if ctrl.modesFor != "USB Camera" {
+		t.Errorf("asked for %q, want the device from the query", ctrl.modesFor)
+	}
+
+	var got CameraModes
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Modes) != 1 || got.Modes[0].MinSize != "640x480" {
+		t.Errorf("modes = %+v, want the one the controller reported", got.Modes)
+	}
+	// 名前を返すのは、画面が待っている間に入力欄が動くから。どのカメラについての
+	// 答えなのかが分からないと、古い応答で候補を書き換えてしまう。
+	if got.Device != "USB Camera" {
+		t.Errorf("device = %q, want the answer to say which camera it is about", got.Device)
+	}
+}
+
+// 「調べられなかった」ことは、画面が候補欄の隣に出すべき答えの 1 つ。要求が
+// 誤っていたわけではないので、200 で返して本体に書く。
+func TestCameraModesReportsWhyItCouldNotLook(t *testing.T) {
+	ctrl := &fakeController{modesErr: errors.New("uvc: ffmpeg listed no modes for \"USB Camera\"")}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, "/api/v1/camera-modes?device=USB+Camera", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the request was fine, the camera was not", rec.Code)
+	}
+	var got CameraModes
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == "" {
+		t.Error("the failure was swallowed, so the page would show an empty list instead of a reason")
+	}
+	// 空のリストは「モードが 1 つも無いカメラ」に見える。理由と一緒でなければ
+	// ならない。
+	if got.Modes == nil {
+		t.Error("modes should be an empty list, not null")
+	}
+}
+
+// 名前が無ければ調べようがない。こちらは要求の側の誤りなので 400。
+func TestCameraModesNeedsADevice(t *testing.T) {
+	ctrl := &fakeController{}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, "/api/v1/camera-modes?device=++", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if ctrl.modesCalls != 0 {
+		t.Errorf("the controller was asked %d times, want none: there was no camera to ask about", ctrl.modesCalls)
+	}
+}
+
+// 管理 API を切っている待受では、他の管理エンドポイントと一緒に消えなければならない。
+func TestCameraModesDisappearsWithTheManagementAPI(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{EnableAdmin: false, Controller: &fakeController{}})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, uiRequest(http.MethodGet, "/api/v1/camera-modes?device=USB+Camera", nil))
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("status = %d, want the endpoint gone when the management API is off", rec.Code)
 	}
 }

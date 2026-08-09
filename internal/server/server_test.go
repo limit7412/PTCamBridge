@@ -374,6 +374,19 @@ type fakeController struct {
 	deferred []string
 	// overridden は、起動時の指定が優先される設定名。
 	overridden []string
+	// modes と modesErr は CameraModes が返す値。modesFor は最後に訊かれた
+	// カメラ名で、modesCalls はその回数。1 回につきカメラを開くので、呼ばれ方
+	// そのものが確認したい振る舞い。
+	modes      []source.Mode
+	modesErr   error
+	modesFor   string
+	modesCalls int
+}
+
+func (c *fakeController) CameraModes(_ context.Context, device string) ([]source.Mode, error) {
+	c.modesCalls++
+	c.modesFor = device
+	return c.modes, c.modesErr
 }
 
 func (c *fakeController) Snapshot() config.Config { return c.cfg }
