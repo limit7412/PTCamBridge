@@ -71,6 +71,24 @@ var knownCameraVIDs = map[string]string{
 	"2E8A": "Raspberry Pi",
 }
 
+// guessRecord は、あるポート名について推測が何回外れたかと、そのとき居たデバイスを
+// 覚えています。
+//
+// デバイスを覚えるのは、ポート名が使い回されるからです。Linux の /dev/ttyUSB0 は
+// 抜き差しで別のデバイスに付け直されますし、Windows の COM 番号も同じことが
+// 起こります。名前だけで数えていると、3 回外した未知のデバイスを抜いて、同じ名前で
+// 現れた別の未知のボードが、一度も開かれないまま拒まれます。別のデバイスなら
+// 別の推測です。
+type guessRecord struct {
+	// device は describePort が返す文字列です。列挙が言えることの全部で、
+	// VID:PID と製品名が入ります。
+	device string
+	// opened は、このデバイスを実際に開いた回数です。選んだ回数ではありません。
+	// 開けなかった試行 — 別のプロセスが掴んでいた、権限が無かった — は、
+	// そのポートがフレームを出すかどうかについて何も語らないので数えません。
+	opened int
+}
+
 // ErrNoSerialPort は、カメラボードであり得るものが探索で 1 つも見つからなかった
 // ことを表します。
 var ErrNoSerialPort = errors.New("serial: no port matched a known camera vendor ID; set source.serial.port explicitly")
@@ -103,14 +121,18 @@ type Serial struct {
 	tried  map[string]struct{}
 	proven string
 
-	// guessed は、既知ベンダーに一致しないポートを推測で開いた回数を、ポートごとに
-	// 数えています。maxGuessAttempts に達したポートは、それ以上開きません。
+	// guessed は、既知ベンダーに一致しないポートを推測で「開いた」回数を、ポート
+	// ごとに数えています。maxGuessAttempts に達したポートは、それ以上開きません。
 	//
 	// tried とは別に持ちます。tried は 1 巡の中での位置を表すもので、巡回のたびに
 	// 消えます。こちらは「このポートは推測として何回外したか」で、巡回をまたいで
 	// 残らなければ意味がありません。フレームが 1 枚でも出ればそのポートは推測では
 	// なくなるので、そこで消します。
-	guessed map[string]int
+	guessed map[string]guessRecord
+
+	// guessing は、いま解決したポート名が推測だった場合のその名前です。数えるのは
+	// 実際に開けたときだけなので、resolvePort と session の間でこれを渡します。
+	guessing string
 
 	// tail は、直近のパケットの終端より後ろにあるとパーサーが最後に報告した量です。
 	// なぜここに持つのかは splitPackets を参照してください。
@@ -166,7 +188,7 @@ func NewSerial(cfg SerialConfig, log *slog.Logger, reporter Reporter) (*Serial, 
 		log:       log,
 		reporter:  reporter,
 		tried:     map[string]struct{}{},
-		guessed:   map[string]int{},
+		guessed:   map[string]guessRecord{},
 		warned:    map[string][]string{},
 		listPorts: ListSerialPorts,
 		openPort: func(name string, baud int) (serialPort, error) {
@@ -196,6 +218,15 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 		return fmt.Errorf("serial: open %s at %d baud: %w", name, s.cfg.Baud, err)
 	}
 	defer port.Close()
+
+	// 開けた。ここで初めて推測を 1 回使ったことになる。開けなかった試行を数えると、
+	// 別のプロセスが掴んでいる間に持ち点を使い切り、解放された頃には一度も読めて
+	// いないのに打ち切られる。
+	if s.guessing == name {
+		rec := s.guessed[name]
+		rec.opened++
+		s.guessed[name] = rec
+	}
 
 	if err := port.SetReadTimeout(serialReadTimeout); err != nil {
 		return fmt.Errorf("serial: set read timeout: %w", err)
@@ -254,6 +285,7 @@ func (s *Serial) session(ctx context.Context, out chan<- core.Frame) error {
 				// 開き直す価値がある。既知の VID に載っていないだけのボードは
 				// 実在する。
 				delete(s.guessed, name)
+				s.guessing = ""
 				s.reporter.Connected(s.Name())
 			}
 			count++
@@ -352,6 +384,10 @@ func (s *Serial) splitPackets(buf []byte, _ int) ([][]byte, []byte) {
 // 隣にあるカメラは一度も試されません。そこで各候補は 1 回ずつ使い、次の再接続では
 // その次へ進みます。
 func (s *Serial) resolvePort() (string, error) {
+	// 推測かどうかは、この解決 1 回ごとの答え。前回の答えを持ち越すと、明示された
+	// ポートや既知ベンダーのボードを開いたときに、無関係な推測の回数が増える。
+	s.guessing = ""
+
 	if !strings.EqualFold(s.cfg.Port, AutoPort) {
 		return s.cfg.Port, nil
 	}
@@ -405,14 +441,25 @@ func (s *Serial) resolvePort() (string, error) {
 // からやり直すので、既知ベンダーのボードが現れればそちらへ移ります。列挙するだけなら
 // 誰の邪魔にもなりません。開くことが邪魔になるのです。
 func (s *Serial) resolveGuess(name string, ports []SerialPort) (string, error) {
-	if s.guessed[name] >= maxGuessAttempts {
+	device := describePort(ports, name)
+	rec := s.guessed[name]
+	if rec.device != device {
+		// この名前に居るのは、前に数えていたのとは別のデバイス。前の回数は、その
+		// デバイスについての判断だったので持ち越さない。
+		rec = guessRecord{device: device}
+	}
+	if rec.opened >= maxGuessAttempts {
 		// ポート名を別に書く。describePort が返すのは列挙が言っていることだけで、
 		// そこに名前が入っているとは限らない。設定に書く文字列がこの行に無ければ、
 		// 「明示的に設定してください」という案内は宙に浮く。
 		return "", fmt.Errorf("%w (%s, %s, was opened %d times and produced no frames, so it is not being opened again)",
-			ErrNoSerialPort, name, describePort(ports, name), s.guessed[name])
+			ErrNoSerialPort, name, device, rec.opened)
 	}
-	s.guessed[name]++
+	// 数えるのは session が実際に開けたとき。ここで数えると、別のプロセスが
+	// 掴んでいて開けなかった試行まで持ち点を使い、ポートが解放された頃には
+	// 一度も読めていないのに打ち切られる。
+	s.guessed[name] = rec
+	s.guessing = name
 	s.tried[name] = struct{}{}
 	// 省略せず全部言う。これは推測であり、前回の推測は誰かの午後を丸ごと
 	// 奪ったから。そのポートは VR ヘッドセットで、ログはポートが
