@@ -117,7 +117,11 @@ type Bridge struct {
 	modesMu    sync.Mutex
 	modes      map[string]modeMemory
 	identities map[string][]string
-	listing    map[string]*modeLookup
+	// countedListing は、いま反映されているデバイス一覧の札です。遅れて戻った
+	// 古い一覧に巻き戻されないために持ちます。Devices を参照。
+	countedListing uint64
+	nextListing    uint64
+	listing        map[string]*modeLookup
 	// listingWG は走っている列挙です。Stop が終わりを待ちます。stopped は、その
 	// 待ちが済んだ後です — 以降は新しい列挙を始めません。
 	listingWG      sync.WaitGroup
@@ -925,6 +929,13 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	var devices server.Devices
 
+	// 始めた順に札を取ります。列挙は数秒かかることがあり、要求は重なります
+	// (トレイと設定画面、タブが 2 つ、など)。戻る順は始めた順とは限らないので、
+	// 札が無いと、遅れて戻った古い一覧が新しい顔ぶれを上書きします。差し替えた
+	// 直後にそれが起きると、素性が前のカメラへ巻き戻り、動いているカメラを
+	// 「別のカメラ」と答えるようになります。
+	started := b.nextDeviceListing()
+
 	cameras, err := listDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
 	if err != nil {
 		b.log.Warn("could not list capture devices", "error", err)
@@ -933,7 +944,7 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 		// 列挙できたときだけ照らし合わせる。失敗した一覧は「1 台も無い」とは
 		// 違うので、それを顔ぶれの変化として読むと、ffmpeg が一度でも転んだ
 		// 拍子に憶えを捨てることになる。
-		b.forgetModesIfCamerasChanged(cameras)
+		b.forgetModesIfCamerasChanged(started, cameras)
 	}
 	devices.Cameras = cameras
 
@@ -1212,6 +1223,15 @@ func (b *Bridge) cameraChangedLocked(device, started string) bool {
 	return started != "" && b.identityOfLocked(device) != started
 }
 
+// nextDeviceListing は、これから始めるデバイス一覧の札を配ります。大きいほど
+// 新しく、遅れて戻った古い一覧はこれで見分けます。
+func (b *Bridge) nextDeviceListing() uint64 {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	b.nextListing++
+	return b.nextListing
+}
+
 // forgetModesIfCamerasChanged は、素性の変わったカメラの憶えだけを捨てます。
 //
 // モードが変わらないのは同じ 1 台についてだけです。憶えの鍵は名前ですが、名前は
@@ -1226,7 +1246,7 @@ func (b *Bridge) cameraChangedLocked(device, started string) bool {
 // 捨てるのは素性が変わったものだけです。顔ぶれ全体で一致を見ると、無関係な
 // カメラを 1 台挿しただけで全部消えます。そのとき今キャプチャしているカメラは
 // もう調べ直せないので、正しかった答えを二度と出せなくなります。
-func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
+func (b *Bridge) forgetModesIfCamerasChanged(started uint64, cameras []source.Device) {
 	// 名前でも "@device_pnp_..." でも引けるようにします。画面はどちらでも
 	// 訊けるので、憶えの鍵もどちらにもなり得ます。
 	//
@@ -1249,6 +1269,12 @@ func (b *Bridge) forgetModesIfCamerasChanged(cameras []source.Device) {
 
 	b.modesMu.Lock()
 	defer b.modesMu.Unlock()
+	// 自分より後に始まった一覧が先に反映されていれば、こちらは古い。捨てます。
+	if started < b.countedListing {
+		b.log.Debug("a newer device listing already landed, not rolling the cameras back")
+		return
+	}
+	b.countedListing = started
 	b.identities = identities
 	for key, entry := range b.modes {
 		now, listed := b.identityOfLocked(key), len(identities[key]) > 0
@@ -1290,8 +1316,18 @@ func (b *Bridge) recallModes(device string) ([]source.Mode, bool) {
 	if entry, ok := b.modes[strings.ToLower(device)]; ok {
 		return slices.Clone(entry.modes), true
 	}
+	// 別名から引くときは、個体が**一意に決まる**ことを求めます。排他の判定で
+	// 使う sameCameraLocked は「同じ可能性がある」で真になりますが、それは
+	// 開きに行かないための保守側で、答えを渡す理由にはなりません。フレンドリ名
+	// を共有する 2 台があるとき、共有名で開かれるのは常に同じ 1 台なので、
+	// もう一方のモードを渡すと、そのカメラが持っていない値を勧めることに
+	// なります。
+	want := b.identityOfLocked(device)
+	if want == "" {
+		return nil, false
+	}
 	for key, entry := range b.modes {
-		if b.sameCameraLocked(key, device) {
+		if b.identityOfLocked(key) == want {
 			return slices.Clone(entry.modes), true
 		}
 	}

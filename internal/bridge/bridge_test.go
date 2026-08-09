@@ -4069,3 +4069,91 @@ func TestCameraModesAnswersUnderTheOtherNameOfTheSameCamera(t *testing.T) {
 		t.Errorf("modes = %v, want the remembered %v", got, want)
 	}
 }
+
+// 遅れて戻った古い一覧で、顔ぶれを巻き戻してはいけない。
+//
+// 一覧は数秒かかることがあり、要求は重なる (トレイと設定画面、タブが 2 つ)。
+// 戻る順は始めた順とは限らない。巻き戻すと、差し替えた直後のカメラの素性が
+// 前のものに戻り、動いているカメラを「別のカメラ」と答えるようになる。
+func TestDevicesDoesNotRollTheCamerasBackToAnOlderListing(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	release := make(chan struct{})
+	slowStarted := make(chan struct{})
+	var started sync.Once
+	var calls atomic.Int64
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		if calls.Add(1) == 1 {
+			started.Do(func() { close(slowStarted) })
+			<-release
+			return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
+		}
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_new"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+
+	slow := make(chan struct{})
+	go func() {
+		defer close(slow)
+		b.Devices(context.Background())
+	}()
+	<-slowStarted
+
+	// 後から始めた一覧が先に戻る。
+	b.Devices(context.Background())
+
+	close(release)
+	<-slow
+
+	// 新しい代替名は、動いているカメラと同じ 1 台を指していなければならない。
+	// 巻き戻っていれば、それは知らない名前になり、開きに行ってしまう。
+	before := lister.count()
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_new"); err == nil {
+		t.Error("the newest alternative name is not tied to the running camera; an older listing rolled it back")
+	}
+	if got := lister.count() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times for the camera the bridge is holding, want 0", got)
+	}
+}
+
+// 曖昧な名前に、別の個体のモードを渡してはいけない。
+//
+// 排他の判定で使う「同じ可能性がある」は開きに行かないための保守側で、答えを
+// 渡す理由にはならない。フレンドリ名を共有する 2 台があるとき、共有名で開かれる
+// のは常に同じ 1 台なので、もう一方のモードを渡すと、そのカメラが持っていない
+// 値を勧めることになる。
+func TestCameraModesDoesNotAnswerASharedNameWithTheOtherCamerasModes(t *testing.T) {
+	other := []source.Mode{{Format: "mjpeg", MinSize: "1280x720", MaxSize: "1280x720", MinFPS: 30, MaxFPS: 30}}
+	lister := &fakeModeLister{modes: other}
+	lister.install(t)
+
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		return []source.Device{
+			{Name: "USB Camera", Alternative: "@device_pnp_one"},
+			{Name: "USB Camera", Alternative: "@device_pnp_two"},
+		}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("USB Camera"), "", hub.New(), status.New(), discardLogger())
+	b.Devices(context.Background())
+
+	// 一時停止中に、2 台目を代替名で調べて憶える。
+	b.SetPaused(true)
+	if _, err := b.CameraModes(context.Background(), "@device_pnp_two"); err != nil {
+		t.Fatalf("CameraModes for the second camera: %v", err)
+	}
+	b.SetPaused(false)
+
+	// 共有名でのキャプチャ中に、共有名で訊かれる。憶えているのは、その名前が
+	// 開く 1 台のものだとは言えない。
+	got, err := b.CameraModes(context.Background(), "USB Camera")
+	if err == nil {
+		t.Errorf("answered the shared name with %v, which was learned from a camera it cannot tie to that name", got)
+	}
+}
