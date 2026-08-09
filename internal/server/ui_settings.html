@@ -590,6 +590,24 @@ function refreshModeChoices() {
     }
   }
   options("camera-framerates", rates);
+
+  // 候補欄は入力を縛りません。解像度を打ち替えただけでは、前の解像度でしか
+  // 使えないフレームレートが欄に残ります。そのまま保存すると、カメラが持って
+  // いない組み合わせを要求して起動に失敗します — この PR が説明しようとして
+  // いる失敗そのものです。ブラウザに止めさせます。
+  //
+  // 言うのは、このカメラのモードを知っているときだけです。知らないカメラ
+  // (まだ挿していない、調べられなかった) について「持っていない」とは言えません。
+  refuse("uvc-size", cameraModes.length > 0 && chosen !== "" && !cameraModes.some((m) => modeHasSize(m, chosen)), TEXT.modesNoSize);
+  const fps = el("uvc-framerate").value.trim();
+  refuse("uvc-framerate", rates.length > 0 && fps !== "" && fps !== "0" && !rates.includes(fps), TEXT.modesNoRate);
+}
+
+// refuse は、その欄のせいで保存できないことをブラウザに伝えます。空文字を渡すと
+// 解除されるので、直った瞬間に保存できるようになります。
+function refuse(id, wrong, reason) {
+  const node = el(id);
+  if (node.setCustomValidity) node.setCustomValidity(wrong ? reason : "");
 }
 
 const parseSize = (s) => {
@@ -710,8 +728,11 @@ el("get-ffmpeg").addEventListener("click", async () => {
   }
 });
 
-load();
-loadDevices();
+// 一覧を先に読みます。ブリッジは一覧を数えたときにカメラの入れ替わりを知るので
+// (bridge.forgetModesIfCamerasChanged)、先にモードを訊くと、入れ替わったカメラの
+// 古い答えを受け取り、そのまま持ち続けることになります — ページを読み直しても
+// 直りません。fill() がモードを訊くので、順番はここで決まります。
+loadDevices().then(load);
 pollFFmpeg();
 setInterval(pollFFmpeg, 2000);
 </script>

@@ -65,8 +65,9 @@ cameraModes = [
   {format: "mjpeg", min_size: "1920x1080", max_size: "1920x1080", min_fps: 5, max_fps: 5},
   {format: "mjpeg", min_size: "640x480", max_size: "640x480", min_fps: 30, max_fps: 30},
 ];
+const TEXT = {modesNoSize: "no size", modesNoRate: "no rate"};
 let chosen = "";
-const el = () => ({ value: chosen });
+const el = () => ({ value: chosen, setCustomValidity() {} });
 const listed = {};
 const options = (id, values) => { listed[id] = values; };
 
@@ -104,8 +105,9 @@ console.log(JSON.stringify({sizes: listed["camera-sizes"], big, small}));
 // 幅のあるモードなら間の整数が使えます。
 func TestSettingsPageOffersOnlyFrameratesTheSettingCanHold(t *testing.T) {
 	harness := `
+const TEXT = {modesNoSize: "no size", modesNoRate: "no rate"};
 let chosen = "";
-const el = () => ({ value: chosen });
+const el = () => ({ value: chosen, setCustomValidity() {} });
 const listed = {};
 const options = (id, values) => { listed[id] = values; };
 
@@ -148,8 +150,9 @@ console.log(JSON.stringify({
 func TestSettingsPageAcceptsSizesInsideARange(t *testing.T) {
 	harness := `
 cameraModes = [{min_size: "160x120", max_size: "1280x720", min_fps: 5, max_fps: 30}];
+const TEXT = {modesNoSize: "no size", modesNoRate: "no rate"};
 let chosen = "640x480";
-const el = () => ({ value: chosen });
+const el = () => ({ value: chosen, setCustomValidity() {} });
 const listed = {};
 const options = (id, values) => { listed[id] = values; };
 
@@ -183,8 +186,9 @@ func TestSettingsPageLooksAgainAfterAFailedLookup(t *testing.T) {
 	harness := `
 const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking"};
 globalThis.document = { querySelector: () => ({ value: "uvc" }) };
-const nodes = {"uvc-device": {value: "Bigeye"}, "uvc-size": {value: ""}, "camera-modes": {textContent: ""}};
-const el = (id) => nodes[id] || (nodes[id] = {value: "", textContent: ""});
+const field = (value) => ({ value, textContent: "", invalid: "", setCustomValidity(why) { this.invalid = why; } });
+const nodes = {"uvc-device": field("Bigeye"), "uvc-size": field(""), "camera-modes": field("")};
+const el = (id) => nodes[id] || (nodes[id] = field(""));
 const listed = {};
 const options = (id, values) => { listed[id] = values; };
 
@@ -272,11 +276,12 @@ func TestSettingsPageDescribesModesTheSameWayGoDoes(t *testing.T) {
 // modesHarness は、loadCameraModes を踏むための土台。応答は release() を呼ぶまで
 // 返らないので、問い合わせの最中の状態を見られる。
 const modesHarness = `
-const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking"};
+const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking", modesNoSize: "no size", modesNoRate: "no rate"};
 let sourceType = "uvc";
 globalThis.document = { querySelector: () => ({ value: sourceType }) };
-const nodes = {"uvc-device": {value: "A"}, "uvc-size": {value: ""}, "camera-modes": {textContent: ""}};
-const el = (id) => nodes[id] || (nodes[id] = {value: "", textContent: ""});
+const field = (value) => ({ value, textContent: "", invalid: "", setCustomValidity(why) { this.invalid = why; } });
+const nodes = {"uvc-device": field("A"), "uvc-size": field(""), "uvc-framerate": field(""), "camera-modes": field("")};
+const el = (id) => nodes[id] || (nodes[id] = field(""));
 const listed = {"camera-sizes": [], "camera-framerates": []};
 const options = (id, values) => { listed[id] = values; };
 
@@ -572,6 +577,90 @@ console.log(JSON.stringify({small, big: listed["camera-framerates"], asked}));
 	}
 }
 
+// 候補欄は入力を縛りません。カメラが持っていない組み合わせのまま保存できては
+// いけません。
+//
+// 640x480@30 の状態から、30fps を持たない 1920x1080 へ解像度だけを打ち替えると、
+// フレームレートの欄には 30 が残ります。そのまま保存すると、この PR が説明しよう
+// としている失敗そのものを起こします。
+func TestSettingsPageRefusesACombinationTheCameraDoesNotHave(t *testing.T) {
+	harness := modesHarness + `
+cameraModes = [
+  {min_size: "640x480", max_size: "640x480", min_fps: 30, max_fps: 30},
+  {min_size: "1920x1080", max_size: "1920x1080", min_fps: 5, max_fps: 5},
+];
+const state = () => ({ size: nodes["uvc-size"].invalid, fps: nodes["uvc-framerate"].invalid });
+
+nodes["uvc-size"].value = "640x480";
+nodes["uvc-framerate"].value = "30";
+refreshModeChoices();
+const ok = state();
+
+// 解像度だけを打ち替えた。30fps はこの解像度には無い。
+nodes["uvc-size"].value = "1920x1080";
+refreshModeChoices();
+const mismatch = state();
+
+// カメラ任せに戻せば通る。
+nodes["uvc-framerate"].value = "0";
+refreshModeChoices();
+const cleared = state();
+
+// このカメラが持っていない解像度そのものも断る。
+nodes["uvc-size"].value = "320x240";
+refreshModeChoices();
+const unknownSize = state();
+
+// モードを知らないカメラについては、何も言わない。
+cameraModes = [];
+nodes["uvc-framerate"].value = "30";
+refreshModeChoices();
+console.log(JSON.stringify({ok, mismatch, cleared, unknownSize, unknownCamera: state()}));
+`
+	type validity struct {
+		Size string `json:"size"`
+		FPS  string `json:"fps"`
+	}
+	var got struct {
+		OK            validity `json:"ok"`
+		Mismatch      validity `json:"mismatch"`
+		Cleared       validity `json:"cleared"`
+		UnknownSize   validity `json:"unknownSize"`
+		UnknownCamera validity `json:"unknownCamera"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.OK != (validity{}) {
+		t.Errorf("a combination the camera has was refused: %+v", got.OK)
+	}
+	if got.Mismatch.FPS == "" {
+		t.Error("a framerate the chosen size does not offer was accepted")
+	}
+	if got.Cleared.FPS != "" {
+		t.Errorf("leaving the framerate to the camera was refused: %q", got.Cleared.FPS)
+	}
+	if got.UnknownSize.Size == "" {
+		t.Error("a size the camera does not have was accepted")
+	}
+	if got.UnknownCamera != (validity{}) {
+		t.Errorf("a camera whose modes are unknown was judged: %+v", got.UnknownCamera)
+	}
+}
+
+// 初回のモード取得は、デバイス一覧を読んだ後でなければなりません。
+//
+// ブリッジが「カメラが入れ替わった」ことを知るのは、一覧を数えたときです。先に
+// モードを訊くと、入れ替わったカメラの古い答えを受け取り、そのまま持ち続けます —
+// ページを読み直しても直りません。
+func TestSettingsPageReadsTheDeviceListBeforeAskingForModes(t *testing.T) {
+	if !strings.Contains(uiSettingsHTML, "loadDevices().then(load)") {
+		t.Error("the settings page must list the devices before it fills the form; filling it is what asks for the modes")
+	}
+}
+
 // 進行中は 1 つでは足りません。
 //
 // A を待っている間に B へ変え、また A に戻すと、3 回目の A は「今 B を調べている」
@@ -609,8 +698,9 @@ func TestSettingsPageIgnoresTheFailureOfALookupItNoLongerNeeds(t *testing.T) {
 	harness := `
 const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking"};
 globalThis.document = { querySelector: () => ({ value: "uvc" }) };
-const nodes = {"uvc-device": {value: "A"}, "uvc-size": {value: ""}, "camera-modes": {textContent: ""}};
-const el = (id) => nodes[id] || (nodes[id] = {value: "", textContent: ""});
+const field = (value) => ({ value, textContent: "", invalid: "", setCustomValidity(why) { this.invalid = why; } });
+const nodes = {"uvc-device": field("A"), "uvc-size": field(""), "uvc-framerate": field(""), "camera-modes": field("")};
+const el = (id) => nodes[id] || (nodes[id] = field(""));
 const listed = {"camera-sizes": [], "camera-framerates": []};
 const options = (id, values) => { listed[id] = values; };
 

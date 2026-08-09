@@ -151,6 +151,8 @@ const (
 	UISizeHint        Key = "ui.hint.size"
 	UIModesFound      Key = "ui.modes.found"
 	UIModesLooking    Key = "ui.modes.looking"
+	UIModesNoSize     Key = "ui.modes.no_size"
+	UIModesNoRate     Key = "ui.modes.no_framerate"
 	UIModesUnknown    Key = "ui.modes.unknown"
 	UIWriteCacheHint  Key = "ui.hint.write_cache"
 	UIRestartBadge    Key = "ui.restart.badge"
@@ -335,6 +337,14 @@ var messages = map[Key]map[Lang]string{
 	UIModesLooking: {
 		English:  "Looking up this camera's modes...",
 		Japanese: "このカメラの対応モードを調べています…",
+	},
+	UIModesNoSize: {
+		English:  "This camera does not offer that size.",
+		Japanese: "このカメラはその解像度を持っていません。",
+	},
+	UIModesNoRate: {
+		English:  "This camera does not offer that framerate at this size.",
+		Japanese: "このカメラは、この解像度でそのフレームレートを持っていません。",
 	},
 	UIModesUnknown: {
 		English:  "Could not read this camera's modes:",
