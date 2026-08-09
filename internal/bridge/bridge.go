@@ -113,6 +113,17 @@ type Bridge struct {
 	modes      map[string]modeMemory
 	identities map[string]string
 	listing    map[string]*modeLookup
+	// listingWG は走っている列挙です。Stop が終わりを待ちます。
+	listingWG sync.WaitGroup
+
+	// lifetime は、このアプリケーションが動いている間だけ生きているコンテキスト
+	// です (Start が受け取るもの)。列挙はこれの下で走ります — 要求 1 本より長く、
+	// プロセスより短く。listModesOnce を参照。
+	//
+	// root と同じものですが、こちらはロックの外から読めます。mu の下に置くと、
+	// 設定変更中の Apply が最長 30 秒それを握るので、モードを訊いた画面がその間
+	// 待たされます。
+	lifetime atomic.Pointer[context.Context]
 
 	mu      sync.Mutex
 	cfg     config.Config
@@ -172,6 +183,9 @@ type modeMemory struct {
 // modes と err は done を閉じる前に書き、閉じた後は読むだけです。
 type modeLookup struct {
 	done chan struct{}
+	// cancel は、この列挙を諦めさせます。使うのは 2 つの場面だけ — 終了と、
+	// 同じカメラをキャプチャのために開くとき。要求 1 本が去っただけでは使いません。
+	cancel context.CancelFunc
 	// waiting は、この 1 本の答えを待っている呼び出しの数です。modesMu の下で
 	// 数えます。
 	waiting int
@@ -263,6 +277,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return errors.New("bridge: already started")
 	}
 	b.root = ctx
+	b.lifetime.Store(&ctx)
 	// 起動時は検証しない。まだ挿さっていないカメラは、現れたときに拾えなければ
 	// ならず、ドライバを畳んでしまうとそれができなくなる。
 	return b.startLocked()
@@ -271,8 +286,41 @@ func (b *Bridge) Start(ctx context.Context) error {
 // Stop はキャプチャを止め、ドライバがデバイスを解放し終えるまで待ちます。
 func (b *Bridge) Stop() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.stopLocked()
+	b.mu.Unlock()
+
+	// 走っている列挙も止めて、終わるまで待ちます。待たないと、こちらのプロセスが
+	// 先に終わり、ffmpeg が残ってカメラを掴んだままになり得ます — Windows の
+	// 子プロセスは親と一緒には死にません。カメラを解放しないまま終わることは、
+	// このアプリケーションが最もしてはいけないことです。
+	b.stopLookups()
+}
+
+// stopLookups は、走っている列挙をすべて諦めさせ、終わるまで待ちます。
+func (b *Bridge) stopLookups() {
+	b.modesMu.Lock()
+	for _, call := range b.listing {
+		call.cancel()
+	}
+	b.modesMu.Unlock()
+	b.listingWG.Wait()
+}
+
+// cancelListing は、名前で指定されたカメラの列挙を諦めさせ、手放すまで待ちます。
+//
+// キャプチャがそのカメラを開く直前に呼びます。排他的なデバイスなので、両方は
+// 開けません。列挙は後からやり直せますが、キャプチャはここで失敗すると設定ごと
+// 巻き戻ります — どちらかが譲るなら、譲るのは列挙の側です。
+func (b *Bridge) cancelListing(device string) {
+	b.modesMu.Lock()
+	call, running := b.listing[strings.ToLower(device)]
+	if running {
+		call.cancel()
+	}
+	b.modesMu.Unlock()
+	if running {
+		<-call.done
+	}
 }
 
 // Snapshot は現在有効な設定を返します。
@@ -918,7 +966,17 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 		b.modesMu.Unlock()
 		return awaitModes(ctx, call)
 	}
-	call := &modeLookup{done: make(chan struct{})}
+	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
+	// 同じ答えを待っている他の要求まで巻き添えになります。だから要求の期限からは
+	// 切り離し、代わりにこのアプリケーションの生存期間に結びます。終了時に
+	// 止まらないと、ffmpeg が残ってカメラを掴んだままになり得ます。
+	lifetime := context.Background()
+	if lt := b.lifetime.Load(); lt != nil {
+		lifetime = *lt
+	}
+	runCtx, cancel := context.WithCancel(lifetime)
+
+	call := &modeLookup{done: make(chan struct{}), cancel: cancel}
 	if b.listing == nil {
 		b.listing = make(map[string]*modeLookup)
 	}
@@ -926,12 +984,11 @@ func (b *Bridge) listModesOnce(ctx context.Context, device string) ([]source.Mod
 	b.modesMu.Unlock()
 
 	ffmpegPath := b.Snapshot().Source.UVC.FFmpegPath
-	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
-	// 同じ答えを待っている他の要求まで巻き添えにします。だから要求の期限からは
-	// 切り離します。放置にはなりません — 列挙は自前で 15 秒の期限を持っています
-	// (source.ListModes を参照)。
+	b.listingWG.Add(1)
 	go func() {
-		modes, err := listModes(context.WithoutCancel(ctx), ffmpegPath, device)
+		defer b.listingWG.Done()
+		defer cancel()
+		modes, err := listModes(runCtx, ffmpegPath, device)
 		b.modesMu.Lock()
 		delete(b.listing, key)
 		b.modesMu.Unlock()
@@ -992,8 +1049,8 @@ func (b *Bridge) rememberModes(device string, modes []source.Mode) {
 //
 // 個体の識別子だけで憶える方法は取っていません。CameraModes が受け取るのは画面が
 // 打った名前だけで、そこから個体を引くにはデバイス一覧が要り、一覧は ffmpeg を
-// 1 回起動します。顔ぶれは既に — 設定画面が 5 秒ごとに読むこの経路で — 手元に
-// あるので、憶えるときにそこから素性を添えます。
+// 1 回起動します。顔ぶれは既に — デバイス一覧を読むこの経路で — 手元にあるので、
+// 憶えるときにそこから素性を添えます。
 //
 // 捨てるのは素性が変わったものだけです。顔ぶれ全体で一致を見ると、無関係な
 // カメラを 1 台挿しただけで全部消えます。そのとき今キャプチャしているカメラは
@@ -1128,6 +1185,13 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 		// カメラが、誰かが再開するまで「古いカメラがまだ失敗している」ように見える。
 		b.status.SetSource(b.cfg.Source.Type)
 		return nil
+	}
+
+	// 開こうとしているカメラを列挙が掴んでいるなら、先に手放させます。排他的な
+	// デバイスなので、両方は開けません。ここで衝突すると、モードを見てから保存
+	// した人 — つまりこの機能を使った人 — の設定だけが巻き戻ります。
+	if b.cfg.Source.Type == config.SourceUVC {
+		b.cancelListing(b.cfg.Source.UVC.Device)
 	}
 
 	drv, err := b.newSource()

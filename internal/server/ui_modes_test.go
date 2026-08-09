@@ -529,6 +529,49 @@ console.log(JSON.stringify({afterB, backOnA, finalSizes: listed["camera-sizes"]}
 	}
 }
 
+// 同じカメラのままでも、解像度が変われば候補は作り直さなければなりません。
+//
+// 別のクライアントが解像度だけを変えると、保存の応答が `fill()` を通ってこの欄を
+// 書き換えます。代入では `input` も起きないので、ここで拾わなければ、新しい解像度に
+// 前の解像度のフレームレートが並んだままになります。
+func TestSettingsPageRebuildsTheChoicesWhenOnlyTheSizeChanged(t *testing.T) {
+	harness := modesHarness + `
+// このカメラは既に調べ済み。2 つの解像度でフレームレートが違う。
+modesFor = "A";
+cameraModes = [
+  {min_size: "640x480", max_size: "640x480", min_fps: 30, max_fps: 30},
+  {min_size: "1920x1080", max_size: "1920x1080", min_fps: 5, max_fps: 5},
+];
+nodes["uvc-size"].value = "640x480";
+await loadCameraModes();
+const small = listed["camera-framerates"];
+
+// fill() が解像度だけを書き換えた。カメラ名は同じ。
+nodes["uvc-size"].value = "1920x1080";
+await loadCameraModes();
+console.log(JSON.stringify({small, big: listed["camera-framerates"], asked}));
+`
+	var got struct {
+		Small []string `json:"small"`
+		Big   []string `json:"big"`
+		Asked int      `json:"asked"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"30"}; !equalStrings(got.Small, want) {
+		t.Fatalf("framerates for 640x480 = %v, want %v", got.Small, want)
+	}
+	if want := []string{"5"}; !equalStrings(got.Big, want) {
+		t.Errorf("framerates after the size changed = %v, want %v", got.Big, want)
+	}
+	if got.Asked != 0 {
+		t.Errorf("asked the server %d times, want none — the modes it already has are enough", got.Asked)
+	}
+}
+
 // 進行中は 1 つでは足りません。
 //
 // A を待っている間に B へ変え、また A に戻すと、3 回目の A は「今 B を調べている」

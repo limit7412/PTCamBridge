@@ -3336,6 +3336,86 @@ func TestCameraModesFinishesTheLookupTheFirstCallerAbandoned(t *testing.T) {
 	}
 }
 
+// 終了は、走っている列挙も終わらせなければならない。
+//
+// 待たずに落ちると、ffmpeg が残ってカメラを掴んだままになり得る。Windows の
+// 子プロセスは親と一緒には死なない。カメラを解放しないまま終わることは、この
+// アプリケーションが最もしてはいけないこと。
+func TestStopEndsALookupThatIsStillRunning(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	ended := make(chan error, 1)
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		close(running)
+		<-ctx.Done()
+		ended <- ctx.Err()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	// 起動は失敗してよい (この機械に ffmpeg は無い)。要るのは生存期間だけ。
+	_ = b.Start(context.Background())
+	b.SetPaused(true)
+
+	go b.CameraModes(context.Background(), "Bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	b.Stop()
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the lookup ended with %v, want it to be cancelled", err)
+		}
+	default:
+		t.Error("Stop returned while a lookup was still holding the camera")
+	}
+}
+
+// キャプチャがカメラを開く前に、列挙にそれを手放させなければならない。
+//
+// 排他的なデバイスなので両方は開けない。ここで衝突すると、モードを見てから保存
+// した人 — つまりこの機能を使った人 — の設定だけが巻き戻る。
+func TestStartingCaptureTakesTheCameraFromAPendingLookup(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	running := make(chan struct{})
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		close(running)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	b.SetPaused(true)
+
+	asked := make(chan error, 1)
+	go func() {
+		_, err := b.CameraModes(context.Background(), "Bigeye")
+		asked <- err
+	}()
+	<-running
+
+	// 再開はキャプチャを立ち上げる。その前に列挙が手放していなければならない。
+	if err := b.SetPaused(false); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	select {
+	case err := <-asked:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the lookup ended with %v, want it to have been asked to let go", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("capture started while a lookup still held the camera")
+	}
+}
+
 // 初めて数えた顔ぶれは、変化ではない。
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、
