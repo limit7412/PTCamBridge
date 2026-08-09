@@ -37,3 +37,17 @@ func (b *Bridge) listingWaitersForTest() int {
 	}
 	return waiting
 }
+
+// openingCameraForTest は、ブリッジがそのカメラを開いている最中の状態に置く。
+// 通常は launchLocked が設定し、返るときに下ろす。
+func (b *Bridge) openingCameraForTest(device string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.opening = device
+	b.publishView()
+}
+
+// isOpeningForTest は、開いている最中と記録されているカメラを返す。
+func (b *Bridge) isOpeningForTest() string {
+	return b.view.Load().opening
+}

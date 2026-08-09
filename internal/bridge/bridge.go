@@ -125,7 +125,10 @@ type Bridge struct {
 	// 待たされます。
 	lifetime atomic.Pointer[context.Context]
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// opening は、launchLocked が今まさに開こうとしているカメラの名前です。
+	// view を通して公開します。capturing を参照。
+	opening string
 	cfg     config.Config
 	root    context.Context
 	cancel  context.CancelFunc
@@ -197,6 +200,10 @@ type modeLookup struct {
 type view struct {
 	cfg    config.Config
 	paused bool
+	// opening は、今まさに開こうとしているカメラです。設定そのものと違って、
+	// これは検証を通る前から公開します。何を開こうとしているかは、その時点で
+	// 確定しているからです。capturing を参照。
+	opening string
 }
 
 // provenLocked は、現在の設定の背後に動くソースがあるかどうかを返します。起動に
@@ -207,7 +214,7 @@ func (b *Bridge) provenLocked() bool {
 
 // publishView はロックフリーな写しを更新します。呼び出し側が mu を保持します。
 func (b *Bridge) publishView() {
-	b.view.Store(&view{cfg: b.cfg, paused: b.paused})
+	b.view.Store(&view{cfg: b.cfg, paused: b.paused, opening: b.opening})
 }
 
 // New は、渡された設定でブリッジを組み立てます。キャプチャを始めるには Start を
@@ -1012,15 +1019,26 @@ func awaitModes(ctx context.Context, call *modeLookup) ([]source.Mode, error) {
 	}
 }
 
-// capturing は、名前で指定されたカメラを今このブリッジが握っているかどうかを
-// 返します。一時停止中はカメラを解放しているので、握っていないと答えます。
+// capturing は、名前で指定されたカメラを今このブリッジが握っている — あるいは
+// まさに開こうとしている — かどうかを返します。一時停止中はカメラを解放している
+// ので、握っていないと答えます。
 func (b *Bridge) capturing(device string) bool {
+	if device == "" {
+		return false
+	}
 	v := b.view.Load()
+	// DirectShow のフレンドリ名は大文字小文字を区別しません。
+	if v.opening != "" && strings.EqualFold(v.opening, device) {
+		// 開いている最中。設定の側はまだ動いていないことがあります — 検証を
+		// 通っていない設定を公開しないので (applyLocked を参照)、その窓は最長で
+		// startVerifyTimeout です。それを「空いている」と読ませると、その 30 秒の
+		// あいだに来た問い合わせがカメラを開きに行き、起動と取り合います。
+		return true
+	}
 	if v.paused || v.cfg.Source.Type != config.SourceUVC {
 		return false
 	}
-	// DirectShow のフレンドリ名は大文字小文字を区別しません。
-	return device != "" && strings.EqualFold(v.cfg.Source.UVC.Device, device)
+	return strings.EqualFold(v.cfg.Source.UVC.Device, device)
 }
 
 // rememberModes / recallModes は、列挙に成功した答えを憶え、思い出します。
@@ -1190,7 +1208,18 @@ func (b *Bridge) launchLocked(verifyCtx context.Context) error {
 	// 開こうとしているカメラを列挙が掴んでいるなら、先に手放させます。排他的な
 	// デバイスなので、両方は開けません。ここで衝突すると、モードを見てから保存
 	// した人 — つまりこの機能を使った人 — の設定だけが巻き戻ります。
+	//
+	// 手放させるだけでは足りません。その後に来た問い合わせが、また開きに行きます。
+	// 開いている間は、こちらのものだと言い切ります。
 	if b.cfg.Source.Type == config.SourceUVC {
+		// 先に予約してから手放させます。逆にすると、手放した直後・開く直前に来た
+		// 問い合わせが、また同じカメラを開きに行きます。
+		b.opening = b.cfg.Source.UVC.Device
+		b.publishView()
+		defer func() {
+			b.opening = ""
+			b.publishView()
+		}()
 		b.cancelListing(b.cfg.Source.UVC.Device)
 	}
 

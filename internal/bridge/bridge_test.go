@@ -3416,6 +3416,96 @@ func TestStartingCaptureTakesTheCameraFromAPendingLookup(t *testing.T) {
 	}
 }
 
+// 開こうとしているカメラも、掴んでいるものとして扱わなければならない。
+//
+// 検証を通っていない設定は公開しないので、起動している間 view はまだ前のカメラを
+// 指している。それを「空いている」と読ませると、最長 30 秒のあいだに来た問い合わせが
+// カメラを開きに行き、起動と取り合う。
+func TestCameraModesLeavesTheCameraThatIsBeingOpenedAlone(t *testing.T) {
+	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
+	lister.install(t)
+
+	// 設定は別のカメラを指したまま。一時停止中でもある — どちらも「空いている」
+	// と読ませる材料になる。
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	b.SetPaused(true)
+	b.openingCameraForTest("Newcomer")
+
+	if _, err := b.CameraModes(context.Background(), "Newcomer"); err == nil {
+		t.Error("expected the camera being opened to be left alone")
+	}
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera being opened, want 0", got)
+	}
+
+	// 他のカメラは今までどおり調べられる。
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err != nil {
+		t.Errorf("CameraModes for another camera: %v", err)
+	}
+}
+
+// キャプチャを起動している間じゅう、そのカメラは予約されていなければならない。
+// そして開き終えたら下ろさなければならない — 残ると、そのカメラは二度と
+// 調べられなくなる。
+func TestStartingCaptureHoldsTheCameraForTheWholeLaunch(t *testing.T) {
+	onWindowsCameraRules(t)
+
+	var probes atomic.Int64
+	var started sync.Once
+	running := make(chan struct{})
+	release := make(chan struct{})
+	prev := listModes
+	listModes = func(ctx context.Context, _, _ string) ([]source.Mode, error) {
+		probes.Add(1)
+		started.Do(func() { close(running) })
+		// 諦めろと言われてもすぐには手放さない。本物の ffmpeg も、殺されてから
+		// カメラを離すまでには間があります。その間が、ここで見たい窓です。
+		<-release
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { listModes = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+	_ = b.Start(context.Background())
+	t.Cleanup(b.Stop)
+	b.SetPaused(true)
+
+	// この列挙は、起動が手放させるまで走り続ける。起動はその間ここで止まるので、
+	// 「開いている最中」を外から覗ける。
+	go b.CameraModes(context.Background(), "Bigeye") //nolint:errcheck // 答えは見ない
+	<-running
+
+	resumed := make(chan error, 1)
+	go func() { resumed <- b.SetPaused(false) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for b.isOpeningForTest() == "" {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the bridge never marked the camera as being opened")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// この瞬間に来た問い合わせは、カメラを開きに行ってはいけない。設定の側は
+	// まだ動いていないので、そこだけを見ると「空いている」と読める。
+	before := probes.Load()
+	if _, err := b.CameraModes(context.Background(), "Bigeye"); err == nil {
+		t.Error("a lookup was allowed while the camera was being opened")
+	}
+	if got := probes.Load() - before; got != 0 {
+		t.Errorf("ffmpeg ran %d times while the camera was being opened, want 0", got)
+	}
+
+	close(release)
+	if err := <-resumed; err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := b.isOpeningForTest(); got != "" {
+		t.Errorf("the bridge is still holding %q open after the launch returned", got)
+	}
+}
+
 // 初めて数えた顔ぶれは、変化ではない。
 //
 // カメラを訊く順序は決まっていない。一覧より先にモードを訊く経路があるので、
