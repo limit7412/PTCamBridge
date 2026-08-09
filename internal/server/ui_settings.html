@@ -712,6 +712,46 @@ function describeMode(m) {
   return out;
 }
 
+// seenReconnects は、最後に見たソースの再接続回数。listingDevices は、その
+// 数え直しが今走っているかどうか。
+let seenReconnects = null;
+let listingDevices = false;
+
+// noticeReconnects は、ソースが切れて繋ぎ直されたことに気づいたら、カメラの
+// 顔ぶれを数え直します。
+//
+// カメラを差し替えると、それを掴んでいたドライバは必ず一度切れます。だからこの数が
+// 動くことが、「今そこにあるカメラは、さっきまでのものではないかもしれない」の
+// 合図になります。同じフレンドリ名の別機種に差し替えられても名前は変わらないので、
+// 名前を見ていても気づけません。
+//
+// 数え直すこと自体に意味があります。ブリッジが入れ替わりを知るのは顔ぶれを数えた
+// ときだけで、そこで素性の変わったカメラの憶えを捨てます
+// (bridge.forgetModesIfCamerasChanged)。画面を開いたままだと、その機会が来ません。
+//
+// UVC を選んでいるときだけ数え直します。列挙は ffmpeg を起動して遅ければ 15 秒
+// かかるので、モードを見せていないソースのために払う代金ではありません。切れやすい
+// シリアルのボードは何度でもこの数を動かします。
+//
+// 最初の 1 回は合図になりません。比べる相手が無いので「変わった」と言えません。
+function noticeReconnects(reconnects) {
+  const before = seenReconnects;
+  seenReconnects = reconnects;
+  if (before === null || before === reconnects) return false;
+  if (chosenSource() !== "uvc") return false;
+  // 数え直しが走っている間は重ねません。切れ続けているカメラは 2 秒ごとにこの数を
+  // 動かせますが、列挙は 1 回に最大 15 秒かかるので、重ねると ffmpeg が積み上がります。
+  if (listingDevices) return false;
+
+  listingDevices = true;
+  devicesListed = loadDevices().finally(() => { listingDevices = false; });
+  // 候補も捨てます。名前は変わらないので、modesFor を下ろさなければ訊き直しません。
+  // 捨てた後の作り直しは loadCameraModes がします。
+  modesFor = null;
+  loadCameraModes();
+  return true;
+}
+
 el("uvc-device").addEventListener("change", loadCameraModes);
 el("uvc-device").addEventListener("blur", loadCameraModes);
 // 解像度が変わればフレームレートの候補も変わる。組み合わせで持っているものだから。
@@ -732,6 +772,8 @@ async function pollFFmpeg() {
     const response = await fetch("/ui/state", { cache: "no-store" });
     if (!response.ok) return;
     const state = await response.json();
+    // 切れて繋ぎ直されていれば、カメラが差し替わったかもしれません。
+    noticeReconnects(state.reconnects || 0);
     el("ffmpeg-actions").hidden = !state.has_ffmpeg;
     el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
     // 起動時の指定が優先される設定。ファイルに何を書いても次の起動でも変わらない
