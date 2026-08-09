@@ -387,7 +387,13 @@ el("settings").addEventListener("submit", async (event) => {
 });
 
 for (const radio of document.querySelectorAll('input[name="source-type"]')) {
-  radio.addEventListener("change", () => showSource(radio.value));
+  radio.addEventListener("change", () => {
+    showSource(radio.value);
+    // UVC を選んだ、まさにその瞬間が、そのカメラを調べてよくなる瞬間。
+    // loadCameraModes は他のソースでは何もしないので、ここで呼ばなければ、
+    // 切り替えた人はカメラ名の欄に触るまで候補を見られない。
+    if (radio.value === "uvc") loadCameraModes();
+  });
 }
 
 // options は datalist の中身を入れ替える。デバイス名にもカメラのモードにも使う。
@@ -438,14 +444,31 @@ async function loadDevices() {
 // 取りに行くのはカメラ名が決まったときだけ。覚えるのは成功したときだけで、
 // 失敗した名前は覚えない。ffmpeg を後から入れた人やカメラの一時停止を解いた人が、
 // ページを読み直さずにもう一度試せるようにするため。
+//
+// modesLoading は今調べている最中の名前。失敗を覚えない以上、これが無いと、
+// 入力欄から離れたときに change と blur の両方が同じ名前で入ってきて、同じ
+// カメラへ 2 本の ffmpeg を同時に走らせることになる。排他的なデバイスなので、
+// その 2 本は互いを失敗させ得る。
 let modesFor = null;
+let modesLoading = null;
 let cameraModes = [];
 
 const sayModes = (text) => el("camera-modes").textContent = text || "";
 
+const chosenSource = () => {
+  const radio = document.querySelector('input[name="source-type"]:checked');
+  return radio ? radio.value : "";
+};
+
 async function loadCameraModes() {
+  // UVC を選んでいないときは調べない。設定には前に使ったカメラ名が残っていて、
+  // fill() はそれを、隠れている UVC の入力欄にも書く。そのまま調べに行くと、
+  // 画面を開いただけで、使ってもいないカメラを開いて他のアプリと取り合うことに
+  // なる。ソースを UVC に変えた時点で改めて訊く。
+  if (chosenSource() !== "uvc") return;
+
   const device = el("uvc-device").value.trim();
-  if (device === modesFor) return;
+  if (device === modesFor || device === modesLoading) return;
 
   if (!device) {
     modesFor = null;
@@ -455,6 +478,14 @@ async function loadCameraModes() {
     return;
   }
 
+  // 前のカメラの候補はここで捨てる。列挙には 15 秒かかることがあり、その間ずっと
+  // 前のカメラの解像度を選べたままにすると、今のカメラが持っていない組み合わせを
+  // 保存できてしまう。
+  cameraModes = [];
+  refreshModeChoices();
+  sayModes(TEXT.modesLooking);
+
+  modesLoading = device;
   try {
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
@@ -476,6 +507,8 @@ async function loadCameraModes() {
     modesFor = null;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
+  } finally {
+    modesLoading = null;
   }
   refreshModeChoices();
 }

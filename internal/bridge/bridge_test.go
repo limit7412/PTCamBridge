@@ -3108,8 +3108,11 @@ func TestCameraModesFallsBackToWhatItLearnedWhenTheLookupFails(t *testing.T) {
 	}
 }
 
-// 憶えが無いまま自分の握っているカメラを訊かれたら、なぜ開けなかったのかを言う。
-// ffmpeg のエラーだけでは、名前を間違えたのか自分が握っているのかが読めない。
+// 憶えが無いまま自分の握っているカメラを訊かれたら、開きに行かずにその場で言う。
+//
+// 開けないと分かっているものを開きに行っても、列挙が 15 秒を使い切ってから同じ
+// 答えに辿り着くだけ。しかも失敗は憶えないので、画面がカメラ名に触れるたびに
+// それを払うことになる。
 func TestCameraModesSaysWhenItIsTheOneHoldingTheCamera(t *testing.T) {
 	lister := &fakeModeLister{err: errors.New("uvc: ffmpeg listed no modes for \"Bigeye\"")}
 	lister.install(t)
@@ -3122,9 +3125,8 @@ func TestCameraModesSaysWhenItIsTheOneHoldingTheCamera(t *testing.T) {
 	if !strings.Contains(err.Error(), "pause capture") {
 		t.Errorf("error = %q, want it to say how to get the modes", err)
 	}
-	// 元の失敗も残すこと。取り違えのほうが原因である可能性は消えていない。
-	if !strings.Contains(err.Error(), "listed no modes") {
-		t.Errorf("error = %q, want it to keep what ffmpeg said", err)
+	if got := lister.count(); got != 0 {
+		t.Errorf("ffmpeg ran %d times for a camera the bridge is holding, want 0", got)
 	}
 }
 

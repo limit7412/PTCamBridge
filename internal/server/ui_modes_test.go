@@ -175,7 +175,8 @@ console.log(JSON.stringify({inside, outside: listed["camera-framerates"]}));
 // 読み直すまで、候補は空のままです。
 func TestSettingsPageLooksAgainAfterAFailedLookup(t *testing.T) {
 	harness := `
-const TEXT = {modesUnknown: "unknown", modesFound: "found"};
+const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking"};
+globalThis.document = { querySelector: () => ({ value: "uvc" }) };
 const nodes = {"uvc-device": {value: "Bigeye"}, "uvc-size": {value: ""}, "camera-modes": {textContent: ""}};
 const el = (id) => nodes[id] || (nodes[id] = {value: "", textContent: ""});
 const listed = {};
@@ -259,6 +260,142 @@ func TestSettingsPageDescribesModesTheSameWayGoDoes(t *testing.T) {
 		if got[i] != m.String() {
 			t.Errorf("the settings page describes %v as %q, Go says %q", m, got[i], m.String())
 		}
+	}
+}
+
+// modesHarness は、loadCameraModes を踏むための土台。応答は release() を呼ぶまで
+// 返らないので、問い合わせの最中の状態を見られる。
+const modesHarness = `
+const TEXT = {modesUnknown: "unknown", modesFound: "found", modesLooking: "looking"};
+let sourceType = "uvc";
+globalThis.document = { querySelector: () => ({ value: sourceType }) };
+const nodes = {"uvc-device": {value: "A"}, "uvc-size": {value: ""}, "camera-modes": {textContent: ""}};
+const el = (id) => nodes[id] || (nodes[id] = {value: "", textContent: ""});
+const listed = {"camera-sizes": [], "camera-framerates": []};
+const options = (id, values) => { listed[id] = values; };
+
+// 待っている問い合わせは全部ためる。1 つしか覚えないと、重複を確かめるテストで
+// 2 本目だけが解けて、1 本目が永遠に待つ (テストは落ちるが、理由が読めない)。
+let pending = [];
+const release = () => { const waiting = pending; pending = []; for (const resolve of waiting) resolve(); };
+let asked = 0;
+globalThis.fetch = async () => {
+  asked++;
+  await new Promise((resolve) => { pending.push(resolve); });
+  return { ok: true, json: async () => ({
+    device: nodes["uvc-device"].value,
+    modes: [{min_size: nodes["uvc-device"].value === "A" ? "640x480" : "1280x720",
+             max_size: nodes["uvc-device"].value === "A" ? "640x480" : "1280x720",
+             min_fps: 30, max_fps: 30}],
+  }) };
+};
+`
+
+// 新しいカメラを調べ始めたら、前のカメラの候補は消さなければなりません。
+//
+// 列挙には 15 秒かかることがあります。その間ずっと前のカメラの解像度が候補に
+// 残っていると、ユーザーはそれを選んで保存でき、今のカメラが持っていない
+// 組み合わせが設定に入ります。
+func TestSettingsPageDropsTheOldCandidatesWhileItLooksUpTheNewCamera(t *testing.T) {
+	harness := modesHarness + `
+const first = loadCameraModes();
+release();
+await first;
+const afterA = listed["camera-sizes"];
+
+nodes["uvc-device"].value = "B";
+const second = loadCameraModes();
+const duringB = listed["camera-sizes"];
+release();
+await second;
+console.log(JSON.stringify({afterA, duringB, afterB: listed["camera-sizes"]}));
+`
+	var got struct {
+		AfterA  []string `json:"afterA"`
+		DuringB []string `json:"duringB"`
+		AfterB  []string `json:"afterB"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"640x480"}; !equalStrings(got.AfterA, want) {
+		t.Fatalf("sizes after looking up A = %v, want %v", got.AfterA, want)
+	}
+	if len(got.DuringB) != 0 {
+		t.Errorf("sizes while looking up B = %v, want A's candidates gone", got.DuringB)
+	}
+	if want := []string{"1280x720"}; !equalStrings(got.AfterB, want) {
+		t.Errorf("sizes after looking up B = %v, want %v", got.AfterB, want)
+	}
+}
+
+// 同じカメラの問い合わせを重ねてはいけません。
+//
+// 入力欄から離れると change と blur の両方が起きます。失敗した名前は覚えないので、
+// 進行中の印が無いと 2 本目がその判定をすり抜け、同じカメラへ 2 本の ffmpeg が
+// 同時に走ります。排他的なデバイスなので、その 2 本は互いを失敗させ得ます。
+func TestSettingsPageDoesNotAskTwiceForTheSameCameraAtOnce(t *testing.T) {
+	harness := modesHarness + `
+// change と blur が同じ一手で入ってくる。
+const both = [loadCameraModes(), loadCameraModes()];
+const asking = asked;
+release();
+await Promise.all(both);
+console.log(JSON.stringify({asking, total: asked}));
+`
+	var got struct {
+		Asking int `json:"asking"`
+		Total  int `json:"total"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Asking != 1 {
+		t.Errorf("started %d lookups for one camera, want 1", got.Asking)
+	}
+	if got.Total != 1 {
+		t.Errorf("ran %d lookups in total, want 1", got.Total)
+	}
+}
+
+// UVC を使っていないなら、カメラを開いてはいけません。
+//
+// 設定には前に使ったカメラ名が残り、fill() はそれを隠れている入力欄にも書きます。
+// そのまま調べに行くと、設定画面を開いただけで、使ってもいないカメラを他のアプリ
+// と取り合うことになります。
+func TestSettingsPageLeavesTheCameraAloneWhenAnotherSourceIsChosen(t *testing.T) {
+	harness := modesHarness + `
+sourceType = "serial";
+const quiet = loadCameraModes();
+const whileSerial = asked;
+release();
+await quiet;
+
+// UVC に切り替えたら、そこで初めて調べる。
+sourceType = "uvc";
+const now = loadCameraModes();
+release();
+await now;
+console.log(JSON.stringify({whileSerial, afterSwitch: asked}));
+`
+	var got struct {
+		WhileSerial int `json:"whileSerial"`
+		AfterSwitch int `json:"afterSwitch"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.WhileSerial != 0 {
+		t.Errorf("opened the camera %d times while the source was serial, want 0", got.WhileSerial)
+	}
+	if got.AfterSwitch != 1 {
+		t.Errorf("looked up %d times after switching to uvc, want 1", got.AfterSwitch)
 	}
 }
 

@@ -403,6 +403,7 @@ func uiText(p i18n.Printer) map[string]string {
 		"framerateHint":  i18n.UIFramerateHint,
 		"sizeHint":       i18n.UISizeHint,
 		"modesFound":     i18n.UIModesFound,
+		"modesLooking":   i18n.UIModesLooking,
 		"modesUnknown":   i18n.UIModesUnknown,
 		"writeCacheHint": i18n.UIWriteCacheHint,
 		"restartBadge":   i18n.UIRestartBadge,

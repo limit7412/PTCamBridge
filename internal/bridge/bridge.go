@@ -833,17 +833,16 @@ var listModes = source.ListModes
 // 別のソースへの切り替えでも — とカメラは解放されるので、そこで一度訊けば以降は
 // 憶えたもので答えられます。
 //
-// 憶えが無く、かつ訊かれたのが今キャプチャしているカメラだった場合は、なぜ開け
-// なかったのかを添えて失敗させます。ffmpeg のエラーだけでは、名前を間違えたのか
-// 自分が握っているのかが読み取れないからです。
+// 憶えが無く、かつ訊かれたのが今キャプチャしているカメラだった場合は、開きに
+// 行かずにその場で失敗させます。開けないと分かっているものを開きに行っても、
+// 列挙が自前の 15 秒を使い切ってから同じ答えに辿り着くだけです。しかも失敗は
+// 憶えないので、画面がカメラ名に触れるたびにそれを払うことになります。
 func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode, error) {
-	busy := b.capturing(device)
-	if busy {
-		// 開けないと分かっているものを開きに行かない。列挙は自前で 15 秒待つので、
-		// 画面がカメラ名を打つたびにそれを払うことになる。
+	if b.capturing(device) {
 		if modes, ok := b.recallModes(device); ok {
 			return modes, nil
 		}
+		return nil, fmt.Errorf("uvc: PTCamBridge is capturing %s right now and a UVC camera cannot be opened twice, so pause capture from the tray to look at its modes", device)
 	}
 
 	modes, err := listModes(ctx, b.Snapshot().Source.UVC.FFmpegPath, device)
@@ -851,12 +850,12 @@ func (b *Bridge) CameraModes(ctx context.Context, device string) ([]source.Mode,
 		b.rememberModes(device, modes)
 		return modes, nil
 	}
+	// 掴んでいないはずのカメラでも、名前の比較は完全ではありません。設定が
+	// フレンドリ名を持ち、画面が "@device_pnp_..." で訊けば (あるいはその逆なら)、
+	// 同じ 1 台でも別物に見えます。憶えがあるなら、気付けなくても答えは出せます。
 	if modes, ok := b.recallModes(device); ok {
 		b.log.Debug("could not list the camera modes; answering with what it said earlier", "device", device, "error", err)
 		return modes, nil
-	}
-	if busy {
-		return nil, fmt.Errorf("%w; PTCamBridge is capturing %s right now and a UVC camera cannot be opened twice, so pause capture from the tray to look at its modes", err, device)
 	}
 	return nil, err
 }
