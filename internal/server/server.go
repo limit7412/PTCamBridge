@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -543,14 +544,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg := received.Config
-		carryUnmentioned(&cfg, body, s.opts.Controller.Snapshot())
-		cfg.Normalise()
-		if err := cfg.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg, ifMatch(r.Header.Values("If-Match")))
+		applied, deferred, err := s.applyBody(r.Context(), received.Config, body, ifMatch(r.Header.Values("If-Match")))
 		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
@@ -804,17 +798,60 @@ func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 //
 // 対象が ui だけなのは、この API に対して何かが書かれ得るようになって以降に追加された
 // 設定がそれだけだからです。今後追加するものも、ここに属します。
-func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) {
+func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) bool {
 	var mentioned struct {
 		UI *json.RawMessage `json:"ui"`
 	}
 	if err := json.Unmarshal(body, &mentioned); err != nil {
 		// デコードできない本体がここに届くことはない。厳格なデコードが先に走っている。
-		return
+		return false
 	}
 	if mentioned.UI == nil {
 		cfg.UI = current.UI
+		return true
 	}
+	return false
+}
+
+// applyBody は、受け取った本体を適用します。
+//
+// 省略された項目をこちらで補うときは、**補った相手そのものの上で適用されなければ
+// なりません**。補うために読むのはロックの外なので、補ってから適用されるまでの間に
+// 設定が動けば、呼び出し側が送ってもいない項目が、別の設定の値で復活します
+// (A → B → A と戻る途中で B から補い、A の上で適用される、など。呼び出し側が
+// A の札を条件に付けていれば、その条件は成立してしまいます)。
+//
+// そこで、補ったときは**補った相手の札そのもの**を条件にします。呼び出し側の条件に
+// 無い札なら、要求を通しません — 2 つの読みが食い違っているので、どちらを信じても
+// 相手の意図から外れます。
+//
+// 動いていたら読み直してやり直します。補うために足した条件は呼び出し側の話ではない
+// ので、その食い違いを 412 として突き返す理由がありません。何度読んでも落ち着か
+// なければ、そこで初めて断ります。
+//
+// 何も補わなかったときは、今までどおり呼び出し側の条件だけで判断します。
+func (s *Server) applyBody(ctx context.Context, received config.Config, body []byte, ifAny []string) (config.Config, []string, error) {
+	const attempts = 4
+	for try := 0; try < attempts; try++ {
+		current := s.opts.Controller.Snapshot()
+		cfg := received
+		carried := carryUnmentioned(&cfg, body, current)
+		cfg.Normalise()
+		if err := cfg.Validate(); err != nil {
+			return config.Config{}, nil, err
+		}
+		if !carried {
+			return s.opts.Controller.Apply(ctx, cfg, ifAny)
+		}
+		token := config.Token(current)
+		if len(ifAny) == 0 || slices.Contains(ifAny, token) {
+			applied, deferred, err := s.opts.Controller.Apply(ctx, cfg, []string{token})
+			if !errors.Is(err, config.ErrRevisionMismatch) {
+				return applied, deferred, err
+			}
+		}
+	}
+	return config.Config{}, nil, fmt.Errorf("%w: it kept changing while the settings left out of the request were filled in", config.ErrRevisionMismatch)
 }
 
 // decodeStrict は、対象が持たないフィールドを含む本体と、最初の JSON 値より後ろに

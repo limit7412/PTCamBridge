@@ -387,6 +387,11 @@ type fakeController struct {
 	// next は、Apply の後に読まれる設定。別のクライアントの変更が割り込んだ
 	// 状況を作るためのもの。
 	next *config.Config
+	// drifting と drifts は、Snapshot が Apply の見る設定と食い違う状況を作る。
+	// 「ロックの外で読んでから、ロックの下で適用されるまでの間に動いた」を、
+	// 次の drifts 回の読みで再現する。
+	drifting *config.Config
+	drifts   int
 }
 
 func (c *fakeController) CameraModes(_ context.Context, device string) ([]source.Mode, error) {
@@ -398,6 +403,10 @@ func (c *fakeController) CameraModes(_ context.Context, device string) ([]source
 // Snapshot は、next が置かれている場合、Apply の後だけそちらを返す。「この PUT が
 // ロックを離した直後に、別のクライアントの変更が入った」状況そのもの。
 func (c *fakeController) Snapshot() config.Config {
+	if c.drifts > 0 && c.drifting != nil {
+		c.drifts--
+		return *c.drifting
+	}
 	if c.applied && c.next != nil {
 		return *c.next
 	}
@@ -1501,6 +1510,78 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		}
 		if !ctrl.applied {
 			t.Error("If-Match: * was refused")
+		}
+	})
+
+	// 省略された項目はこちらが現在の設定から補う。だからその設定の上で適用されな
+	// ければ、呼び出し側が送ってもいない項目が、別の設定の値で復活する。
+	t.Run("settings left out of the request are filled in from the settings the change lands on", func(t *testing.T) {
+		ctrl.applied = false
+		// 読みが 1 回だけ食い違う。ui だけが違う設定を返す。
+		drifted := ctrl.cfg
+		drifted.UI.Language = "ja"
+		ctrl.drifting, ctrl.drifts = &drifted, 1
+		t.Cleanup(func() { ctrl.drifting, ctrl.drifts = nil, 0 })
+		was := ctrl.cfg.UI.Language
+
+		// ui を省いた本体。古いスキーマのクライアントがこう送る。
+		full, _ := json.Marshal(ctrl.cfg)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(full, &fields); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(fields, "ui")
+		body, _ := json.Marshal(fields)
+
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if got := ctrl.cfg.UI.Language; got != was {
+			t.Errorf("ui.language = %q, want %q — the request never carried a ui, so it must come from the settings it landed on, not from a reading that had already moved on", got, was)
+		}
+		if len(ctrl.askedRevision) != 1 || ctrl.askedRevision[0] != config.Token(ctrl.cfg) {
+			t.Errorf("asked for %v, want the version of the settings the omitted parts were taken from", ctrl.askedRevision)
+		}
+		current = config.Token(ctrl.cfg)
+	})
+
+	// 落ち着かなければ断る。黙って別の設定の値を復活させるより、断るほうがよい。
+	t.Run("settings that keep moving while the gaps are filled are refused", func(t *testing.T) {
+		ctrl.applied = false
+		drifted := ctrl.cfg
+		drifted.UI.Language = "ja"
+		ctrl.drifting, ctrl.drifts = &drifted, 99
+		t.Cleanup(func() { ctrl.drifting, ctrl.drifts = nil, 0 })
+
+		full, _ := json.Marshal(ctrl.cfg)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(full, &fields); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(fields, "ui")
+		body, _ := json.Marshal(fields)
+
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied with a ui taken from a reading that never matched the settings underneath")
 		}
 	})
 
