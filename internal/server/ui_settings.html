@@ -579,12 +579,17 @@ async function loadDevices() {
       if (!response.ok) throw new Error(response.status);
       return await response.json();
     })();
-    options("camera-names", cameraChoices(devices.cameras || []));
+    // 出した候補をそのまま控えます。差し替えの後に訊いてよいかは「その名前が
+    // いま数えた一覧に居るか」で決めます — 居ないカメラを訊くと、ブリッジは
+    // 開けずに憶えで答え、それは差し替え前のものです (bridge.CameraModes)。
+    listedCameras = cameraChoices(devices.cameras || []);
+    options("camera-names", listedCameras);
     options("port-names", (devices.serial_ports || []).map((p) => p.name));
     failure("camera-error", devices.camera_error);
     failure("serial-error", devices.serial_error);
     return !devices.camera_error;
   } catch (err) {
+    listedCameras = null;
     failure("camera-error", String(err));
     failure("serial-error", String(err));
     return false;
@@ -617,6 +622,8 @@ async function loadDevices() {
 // を参照)。同じ判断を 2 つの言語で持つより、訊き直すほうが安い — 訊く先の
 // ブリッジは既に憶えていて、掴んでいるカメラならカメラを開かずに答える。
 let modesFor = null;
+// listedCameras は、最後に数えられた一覧が出した候補。数えられていなければ null。
+let listedCameras = null;
 // devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
 // これを待ちます。初期化を参照。
 let devicesListed = null;
@@ -899,9 +906,12 @@ let countedSwitches = 0;
 // とは違うので、成功するまで数え直す理由が残ります。
 let countFailed = false;
 
-// ADRIFT_RECOUNT_MS は、繋がらないまま漂っている UVC を数え直す間隔です。
-// 列挙は 1 回に最大 15 秒かかるので、これより短くすると ffmpeg が常駐します。
+// ADRIFT_RECOUNT_MS は、合図を待たずに数え直すときの間隔です。列挙は 1 回に
+// 最大 15 秒かかるので、これより短くすると ffmpeg が常駐します。
 const ADRIFT_RECOUNT_MS = 30000;
+
+// dueForRecount は、前に頼んでから間隔が空いたかどうか。
+const dueForRecount = () => countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS;
 
 // noticeCameras は、カメラが差し替わったかもしれない合図を拾います。
 //
@@ -972,6 +982,18 @@ function noticeCameras(state) {
       countCameras();
       return true;
     }
+    // 数えられていないままなら、UVC で動いていなくても間隔を空けて数え直します。
+    // **カメラを調べるために一時停止する**のはこの画面が案内している手順ですが、
+    // 止めると種別は空になるので (bridge.stopLocked)、動いているソースだけを見て
+    // いると、そこで転んだ列挙から二度と立ち直れません — 失敗した約束は待っている
+    // モードの問い合わせも止めるので、候補は読み直すまで空のままです。
+    //
+    // フォームが UVC を出している間だけです。他のソースを見ている人に、カメラの
+    // 列挙を繰り返す理由はありません。
+    if (countFailed && chosenSource() === "uvc" && dueForRecount()) {
+      countCameras();
+      return true;
+    }
     return false;
   }
 
@@ -991,8 +1013,7 @@ function noticeCameras(state) {
   //
   // 一時停止中は数えません。止めたのはユーザーで、再開が合図になります。
   const unsettled = !now.paused && (!now.connected || countFailed);
-  const adrift = unsettled
-    && (countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS);
+  const adrift = unsettled && dueForRecount();
   if (!changed && !adrift) return false;
   // 止まっている間は、止められた分を使い切りません。止まったまま数え直す機会
   // (ソースの切替など) があっても、**差し替えはその後に起こり得ます**。使い切ると、
@@ -1051,7 +1072,12 @@ async function countCameras() {
   // 訊き直すのは、**最後の一覧が数えられたときだけ**、しかも**繰り越しまで終えた
   // 後**です。途中の一覧で始めると、繰り越した列挙と同じカメラを同時に開きに行く
   // ことになります。
-  if (counted) {
+  // 訊くのは、選んでいるカメラが**いま数えた一覧に居るとき**だけです。居ないなら、
+  // ブリッジはそれを開けず、憶えで答えます — その憶えは差し替え前のものなので、
+  // 持っていない組み合わせを選ばせてしまいます。名前を手で打った人は候補が出なく
+  // なりますが、確かめられないものを確かめたことにするよりは良い形です。
+  const chosen = el("uvc-device").value.trim();
+  if (counted && (!chosen || (listedCameras && listedCameras.includes(chosen)))) {
     loadCameraModes();
   } else if (dropped) {
     // 途中では数えられたのに、最後が転んだ。憶えが古いことは分かっているので、

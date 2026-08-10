@@ -1619,7 +1619,7 @@ globalThis.fetch = async (url) => {
   if (String(url).startsWith("/api/v1/devices")) {
     listings++;
     await new Promise((resolve) => { devicePending.push(resolve); });
-    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
   }
   askedForModes++;
   return askedModes(url);
@@ -2431,5 +2431,189 @@ func TestSettingsPageNamesOnlyTheSettingsSomeoneElseChanged(t *testing.T) {
 	kept := settingsFunction(t, "function remember(cfg, revision) {")
 	if !strings.Contains(kept, "JSON.parse(JSON.stringify(cfg))") {
 		t.Error("the page keeps no copy of what it drew, so it cannot say what someone else changed since")
+	}
+}
+
+// 一時停止中でも、転んだ列挙からは立ち直らなければなりません。
+//
+// この画面は「カメラを調べるには一度止めてください」と案内しています。止めると
+// 種別は空になるので (bridge.stopLocked)、動いているソースの合図だけを見ていると、
+// 止めている間に転んだ列挙が二度と数え直されません。失敗した約束は待っている
+// モードの問い合わせも止めるので、候補は画面を読み直すまで空のままです。
+func TestSettingsPageCountsAgainAfterAFailedListingWhileItIsPaused(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let listingFails = true;
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    return { ok: true, json: async () => (listingFails
+      ? {cameras: [], serial_ports: [], camera_error: "uvc: ffmpeg is not installed"}
+      : {cameras: [{name: "A"}], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+const stopped = (over) => Object.assign({capturing: "", reconnects: 1, connected: false, paused: true}, over);
+
+let clock = 1000000;
+Date.now = () => clock;
+
+// 動いている間に 1 度数えて、そこで転ぶ。
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+const afterFailure = listings;
+
+// カメラを調べるために止める。間隔の内側では数え直さない。
+clock += 29000;
+noticeCameras(stopped());
+await settle();
+const tooSoon = listings;
+
+// 間隔を越えたら、止まっていても数え直す。
+clock += 2000;
+noticeCameras(stopped());
+await settle();
+const later = listings;
+
+// フォームが UVC を離れていれば数え直さない。カメラを見ていない人に列挙を
+// 繰り返す理由は無い。
+sourceType = "mjpeg";
+clock += 60000;
+noticeCameras(stopped());
+await settle();
+const elsewhere = listings;
+sourceType = "uvc";
+
+// 数えられたら止める。転んだままの間だけの繰り返し。
+listingFails = false;
+clock += 60000;
+noticeCameras(stopped());
+await settle();
+const onSuccess = listings;
+clock += 60000;
+noticeCameras(stopped());
+await settle();
+const afterSuccess = listings;
+
+console.log(JSON.stringify({afterFailure, tooSoon, later, elsewhere, onSuccess, afterSuccess}));
+release();
+`
+	var got struct {
+		AfterFailure int `json:"afterFailure"`
+		TooSoon      int `json:"tooSoon"`
+		Later        int `json:"later"`
+		Elsewhere    int `json:"elsewhere"`
+		OnSuccess    int `json:"onSuccess"`
+		AfterSuccess int `json:"afterSuccess"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterFailure != 1 {
+		t.Fatalf("counted %d times while it was running, want 1", got.AfterFailure)
+	}
+	if got.TooSoon != 1 {
+		t.Errorf("counted %d times inside the interval, want 1 — a listing takes up to 15s, so ffmpeg would never leave", got.TooSoon)
+	}
+	if got.Later != 2 {
+		t.Errorf("counted %d times after the interval passed while paused, want 2 — pausing is how this page tells people to inspect a camera, and a listing that failed there would never recover", got.Later)
+	}
+	if got.Elsewhere != 2 {
+		t.Errorf("counted %d times while the form was on another source, want 2", got.Elsewhere)
+	}
+	if got.OnSuccess != 3 {
+		t.Errorf("counted %d times when the listing could finally succeed, want 3", got.OnSuccess)
+	}
+	if got.AfterSuccess != 3 {
+		t.Errorf("counted %d times after the listing succeeded, want 3 — only a failed listing keeps asking", got.AfterSuccess)
+	}
+}
+
+// 数えた一覧に居ないカメラのモードは、訊きに行ってはいけません。
+//
+// ブリッジは開けなかったカメラには憶えで答えます (bridge.CameraModes の recallModes)。
+// 差し替えで名前が消えたカメラを訊くと、差し替え**前**の解像度が普通の答えとして
+// 返り、今のカメラが持っていない組み合わせを選べてしまいます。
+func TestSettingsPageDoesNotAskForTheModesOfACameraThatIsNotListed(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let askedForModes = 0;
+let cameraNames = ["A"];
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    return { ok: true, json: async () => ({cameras: cameraNames.map((name) => ({name})), serial_ports: []}) };
+  }
+  askedForModes++;
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+// 差し替え前の B の解像度を控える。
+nodes["uvc-device"].value = "B";
+const first = loadCameraModes();
+release();
+await first;
+const beforeSwap = {sizes: listed["camera-sizes"], asked: askedForModes};
+
+// 数え直すと、選んでいる B はもう一覧に居ない。
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+release();
+await settle();
+const absent = {sizes: listed["camera-sizes"], asked: askedForModes, listings};
+
+// 一覧に居る名前なら訊く。
+nodes["uvc-device"].value = "A";
+noticeCameras(running({reconnects: 3}));
+await settle();
+release();
+await settle();
+const present = {sizes: listed["camera-sizes"], asked: askedForModes};
+
+console.log(JSON.stringify({beforeSwap, absent, present}));
+release();
+`
+	type look struct {
+		Sizes    []string `json:"sizes"`
+		Asked    int      `json:"asked"`
+		Listings int      `json:"listings"`
+	}
+	var got struct {
+		BeforeSwap look `json:"beforeSwap"`
+		Absent     look `json:"absent"`
+		Present    look `json:"present"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"1280x720"}; !equalStrings(got.BeforeSwap.Sizes, want) || got.BeforeSwap.Asked != 1 {
+		t.Fatalf("before the swap: sizes %v after %d lookups, want %v after 1", got.BeforeSwap.Sizes, got.BeforeSwap.Asked, want)
+	}
+	if got.Absent.Listings != 1 {
+		t.Fatalf("counted %d times, want 1", got.Absent.Listings)
+	}
+	if got.Absent.Asked != 1 {
+		t.Errorf("asked for the modes %d times for a camera that is not listed, want 1 — the bridge cannot open it and answers from memory, which is what it remembered before the swap", got.Absent.Asked)
+	}
+	if len(got.Absent.Sizes) != 0 {
+		t.Errorf("sizes = %v after the chosen camera disappeared, want the candidates dropped", got.Absent.Sizes)
+	}
+	if got.Present.Asked != 2 {
+		t.Errorf("asked for the modes %d times for a camera that is listed, want 2", got.Present.Asked)
+	}
+	if want := []string{"640x480"}; !equalStrings(got.Present.Sizes, want) {
+		t.Errorf("sizes = %v after choosing a listed camera, want %v", got.Present.Sizes, want)
 	}
 }
