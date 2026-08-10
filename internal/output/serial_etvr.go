@@ -65,8 +65,11 @@ var writeStallCheck = 250 * time.Millisecond
 const AutoPort = "auto"
 
 // Frames は、この出力が購読する相手です。hub.Hub がこれを満たします。
+//
+// 内部向けの購読を使います。ここはクライアントではなくブリッジ自身の出口なので、
+// トレイと診断画面が見せる「クライアント数」に数えられてはいけません。
 type Frames interface {
-	Subscribe() (<-chan core.Frame, func())
+	SubscribeInternal() (<-chan core.Frame, func())
 }
 
 // SerialConfig は、シリアル出力の設定です。
@@ -193,7 +196,7 @@ func (s *Serial) Stats() Stats {
 // し直すと、その代わりに hub の購読者数が上下し、それを見て配信の有無を決めている
 // ものに嘘を伝えることになります。
 func (s *Serial) Run(ctx context.Context) error {
-	ch, cancel := s.frames.Subscribe()
+	ch, cancel := s.frames.SubscribeInternal()
 	defer cancel()
 
 	delay := backoffInitial

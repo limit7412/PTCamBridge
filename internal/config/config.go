@@ -653,6 +653,25 @@ func (c Config) Validate() error {
 			// 書く側で外すと、他人の機器へ毎秒何メガバイトも流し込むことになります。
 			return errors.New(`output.serial.port cannot be "auto"; name the port explicitly, because writing a video stream into a port that turns out to belong to another device cannot be taken back`)
 		}
+		// 読む側と書く側が同じポートを指していると、どちらも開けません。シリアル
+		// ポートは排他なので、起動時に 2 つが奪い合い、勝った方だけが残ります。
+		// しかもどちらが勝っても行き止まりです。出力が先に取れば、フレームを作る
+		// はずの入力が永久に再試行し、出力は書くものが無いままポートを抱えます。
+		// 入力が先に取れば、出力が永久に再試行します。
+		//
+		// 見るのは source.type が serial のときだけです。UVC で動いている機械の
+		// 設定に、使っていない source.serial.port が残っているのは普通のことで、
+		// それを理由に起動を止めるのは、使っていない機能のせいでブリッジが上がら
+		// ないという直しどころの分からない失敗になります。切り替えは Switch も
+		// ここを通るので、serial へ移ろうとした瞬間に理由付きで断られます。
+		//
+		// 大文字小文字は無視します。Windows の COM7 と com7 は同じポートです。
+		if c.Source.Type == SourceSerial &&
+			!strings.EqualFold(c.Source.Serial.Port, "auto") &&
+			strings.EqualFold(c.Source.Serial.Port, c.Output.Serial.Port) {
+			return fmt.Errorf("source.serial.port and output.serial.port are both %q; a serial port cannot be read and written by the same program, so give the output the other end of a virtual pair",
+				c.Output.Serial.Port)
+		}
 	}
 	// 有効かどうかに関わらず見ます。範囲外のバイトはどう解釈しても誤りで、
 	// 有効にした日に初めて知らされるより、書いた日に言われた方がましです。

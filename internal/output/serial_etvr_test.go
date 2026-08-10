@@ -369,14 +369,19 @@ func TestTheSerialOutputHoldsOneSubscriptionAcrossReconnects(t *testing.T) {
 	if got < 3 {
 		t.Fatalf("the port was opened %d times, want at least 3 reconnects to have happened", got)
 	}
-	if subs := frames.Subscribers(); subs != 1 {
-		t.Errorf("the hub has %d subscribers after %d reconnects, want 1", subs, got)
+	if subs := frames.InternalSubscribers(); subs != 1 {
+		t.Errorf("the hub has %d internal subscribers after %d reconnects, want 1", subs, got)
+	}
+	// この出口はクライアントではありません。トレイと診断画面が見せる数に
+	// 混ざると、誰も繋いでいないのに常に 1 が出ます。
+	if subs := frames.Subscribers(); subs != 0 {
+		t.Errorf("the hub counts %d stream clients while only the serial output is subscribed, want 0", subs)
 	}
 
 	cancel()
 	<-done
-	if subs := frames.Subscribers(); subs != 0 {
-		t.Errorf("the hub still has %d subscribers after Run returned, want 0", subs)
+	if subs := frames.InternalSubscribers(); subs != 0 {
+		t.Errorf("the hub still has %d internal subscribers after Run returned, want 0", subs)
 	}
 }
 

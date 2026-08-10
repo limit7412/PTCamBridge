@@ -926,3 +926,68 @@ func TestTheSerialOutputHeaderBecomesBytes(t *testing.T) {
 		t.Errorf("OutputSerialHeader = % x with no header set, want nil so core picks the default", got)
 	}
 }
+
+// シリアルポートは排他です。読む側と書く側が同じポートを指していると、起動時に
+// 奪い合って、どちらが勝っても行き止まりになります。
+func TestSettingsRefuseReadingAndWritingTheSameSerialPort(t *testing.T) {
+	base := func() Config {
+		cfg := Default()
+		cfg.Source.Type = SourceSerial
+		cfg.Source.Serial.Port = "COM7"
+		cfg.Output.Serial.Enabled = true
+		cfg.Output.Serial.Port = "COM7"
+		return cfg
+	}
+
+	cfg := base()
+	cfg.Normalise()
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted the same port for source.serial.port and output.serial.port, want it refused")
+	}
+
+	// Windows の COM7 と com7 は同じポートです。
+	cfg = base()
+	cfg.Output.Serial.Port = "com7"
+	cfg.Normalise()
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted COM7 and com7 as different ports, want the names compared without case")
+	}
+
+	// 仮想ペアの反対側を指すのが正しい使い方で、これは通らなければなりません。
+	cfg = base()
+	cfg.Output.Serial.Port = "COM8"
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with the two ends of a virtual pair: %v", err)
+	}
+}
+
+// UVC で動いている機械に、使っていない source.serial.port が残っているのは
+// 普通のことです。それを理由に起動を止めると、使っていない機能のせいでブリッジが
+// 上がらないという、直しどころの分からない失敗になります。
+func TestSettingsIgnoreTheUnusedSerialSourcePortWhenTheSourceIsNotSerial(t *testing.T) {
+	cfg := Default()
+	cfg.Source.Type = SourceUVC
+	cfg.Source.UVC.Device = "camera"
+	cfg.Source.Serial.Port = "COM7"
+	cfg.Output.Serial.Enabled = true
+	cfg.Output.Serial.Port = "COM7"
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate refused a leftover source.serial.port while the source is UVC: %v", err)
+	}
+}
+
+// "auto" は名前ではないので、突き合わせる相手がありません。ここで弾くと、
+// 探索させたいだけの設定が理由なく拒否されます。
+func TestSettingsDoNotCompareTheAutoSerialPortAgainstTheOutput(t *testing.T) {
+	cfg := Default()
+	cfg.Source.Type = SourceSerial
+	cfg.Source.Serial.Port = "auto"
+	cfg.Output.Serial.Enabled = true
+	cfg.Output.Serial.Port = "COM7"
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate refused an auto source port alongside a named output port: %v", err)
+	}
+}
