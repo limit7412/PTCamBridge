@@ -102,4 +102,12 @@ func TestTrackerCountsTheSourceSwitches(t *testing.T) {
 	if got := tr.Snapshot().Switches; got != 3 {
 		t.Errorf("switches = %d after restarting the same source, want 3 — nothing was swapped", got)
 	}
+
+	// 立て直しは必ず停止を挟みます (bridge.stopLocked が空文字を通します)。解像度を
+	// 変えて保存しただけ、一時停止して再開しただけで数が動いてはいけません。
+	tr.SetSource("")
+	tr.SetSource("uvc")
+	if got := tr.Snapshot().Switches; got != 3 {
+		t.Errorf("switches = %d after a stop and restart of the same source, want 3 — passing through the stopped state is not a switch", got)
+	}
 }

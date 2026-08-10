@@ -51,6 +51,7 @@ type Tracker struct {
 	paused         bool
 	pauses         uint64
 	switches       uint64
+	lastSource     string
 
 	// classify は、画面側が翻訳すべきエラーに対応するメッセージ名を返します。
 	// 注入にしているのは、どの失敗がそれに当たるかを知っているのはドライバ側
@@ -83,10 +84,18 @@ func New(opts ...Option) *Tracker {
 func (t *Tracker) SetSource(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// 数えるのは、別の種別へ移ったときだけです。同じソースを立て直しただけなら
-	// 何も入れ替わっていないので、数も動かしません。
-	if name != t.source {
+	// 数えるのは、別の種別へ**移った**ときだけです。
+	//
+	// 比べる相手が今の種別ではなく「最後に動いていた種別」なのは、止めると空文字を
+	// 通るからです (bridge.stopLocked)。ドライバの立て直しは必ず停止を挟むので、
+	// 今の種別と比べると、UVC を UVC のまま立て直しただけで 2 回動きます — 解像度を
+	// 変えて保存しただけ、一時停止して再開しただけで「別のソースを経由した」ことに
+	// なり、設定画面が要らないカメラの列挙を始めます。
+	if name != "" && name != t.lastSource {
 		t.switches++
+	}
+	if name != "" {
+		t.lastSource = name
 	}
 	t.source = name
 	t.connected = false
