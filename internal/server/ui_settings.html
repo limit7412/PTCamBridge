@@ -579,17 +579,27 @@ async function loadDevices() {
       if (!response.ok) throw new Error(response.status);
       return await response.json();
     })();
-    // 出した候補をそのまま控えます。差し替えの後に訊いてよいかは「その名前が
-    // いま数えた一覧に居るか」で決めます — 居ないカメラを訊くと、ブリッジは
-    // 開けずに憶えで答え、それは差し替え前のものです (bridge.CameraModes)。
-    listedCameras = cameraChoices(devices.cameras || []);
-    options("camera-names", listedCameras);
+    // 数えた一覧が持っている名前をすべて控えます。差し替えの後に訊いてよいかは
+    // 「その名前がいま数えた一覧に居るか」で決めます — 居ないカメラを訊くと、
+    // ブリッジは開けずに憶えで答え、それは差し替え前のものです (CameraModes)。
+    //
+    // 控えるのは**候補ではなく一覧そのもの**です。候補はフレンドリ名が重複した
+    // ときしか "@device_pnp_..." を並べませんが、設定にはどちらでも書けます
+    // (bridge.forgetModesIfCamerasChanged は両方を鍵にします)。大小文字も
+    // 揃えます — ブリッジもキャプチャも EqualFold で受けるので、表記だけが違う
+    // 設定を「居ない」と見なすと、そのカメラだけ候補が戻らなくなります。
+    listedNames = new Set();
+    for (const camera of devices.cameras || []) {
+      if (camera.name) listedNames.add(String(camera.name).toLowerCase());
+      if (camera.alternative) listedNames.add(String(camera.alternative).toLowerCase());
+    }
+    options("camera-names", cameraChoices(devices.cameras || []));
     options("port-names", (devices.serial_ports || []).map((p) => p.name));
     failure("camera-error", devices.camera_error);
     failure("serial-error", devices.serial_error);
     return !devices.camera_error;
   } catch (err) {
-    listedCameras = null;
+    listedNames = null;
     failure("camera-error", String(err));
     failure("serial-error", String(err));
     return false;
@@ -622,8 +632,9 @@ async function loadDevices() {
 // を参照)。同じ判断を 2 つの言語で持つより、訊き直すほうが安い — 訊く先の
 // ブリッジは既に憶えていて、掴んでいるカメラならカメラを開かずに答える。
 let modesFor = null;
-// listedCameras は、最後に数えられた一覧が出した候補。数えられていなければ null。
-let listedCameras = null;
+// listedNames は、最後に数えられた一覧が持っていた名前 (フレンドリ名と
+// "@device_pnp_..." の両方) を小文字で。数えられていなければ null。
+let listedNames = null;
 // devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
 // これを待ちます。初期化を参照。
 let devicesListed = null;
@@ -1076,8 +1087,8 @@ async function countCameras() {
   // ブリッジはそれを開けず、憶えで答えます — その憶えは差し替え前のものなので、
   // 持っていない組み合わせを選ばせてしまいます。名前を手で打った人は候補が出なく
   // なりますが、確かめられないものを確かめたことにするよりは良い形です。
-  const chosen = el("uvc-device").value.trim();
-  if (counted && (!chosen || (listedCameras && listedCameras.includes(chosen)))) {
+  const chosen = el("uvc-device").value.trim().toLowerCase();
+  if (counted && (!chosen || (listedNames && listedNames.has(chosen)))) {
     loadCameraModes();
   } else if (dropped) {
     // 途中では数えられたのに、最後が転んだ。憶えが古いことは分かっているので、

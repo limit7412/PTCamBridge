@@ -2540,22 +2540,33 @@ release();
 // ブリッジは開けなかったカメラには憶えで答えます (bridge.CameraModes の recallModes)。
 // 差し替えで名前が消えたカメラを訊くと、差し替え**前**の解像度が普通の答えとして
 // 返り、今のカメラが持っていない組み合わせを選べてしまいます。
+//
+// 照らすのは**一覧そのもの**で、候補ではありません。候補はフレンドリ名が重複した
+// ときしか "@device_pnp_..." を並べませんが、設定にはどちらでも書けます。大小文字も
+// 揃えます — ブリッジもキャプチャも EqualFold で受けるからです。
 func TestSettingsPageDoesNotAskForTheModesOfACameraThatIsNotListed(t *testing.T) {
 	harness := modesHarness + `
 let listings = 0;
 let askedForModes = 0;
-let cameraNames = ["A"];
+let cameraList = [{name: "A", alternative: "@device_pnp_a"}];
 const askedModes = globalThis.fetch;
 globalThis.fetch = async (url) => {
   if (String(url).startsWith("/api/v1/devices")) {
     listings++;
-    return { ok: true, json: async () => ({cameras: cameraNames.map((name) => ({name})), serial_ports: []}) };
+    return { ok: true, json: async () => ({cameras: cameraList, serial_ports: []}) };
   }
   askedForModes++;
   return askedModes(url);
 };
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
 const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+let signals = 1;
+const recount = async () => {
+  noticeCameras(running({reconnects: ++signals}));
+  await settle();
+  release();
+  await settle();
+};
 
 // 差し替え前の B の解像度を控える。
 nodes["uvc-device"].value = "B";
@@ -2566,21 +2577,26 @@ const beforeSwap = {sizes: listed["camera-sizes"], asked: askedForModes};
 
 // 数え直すと、選んでいる B はもう一覧に居ない。
 noticeCameras(running());
-noticeCameras(running({reconnects: 2}));
-await settle();
-release();
-await settle();
+await recount();
 const absent = {sizes: listed["camera-sizes"], asked: askedForModes, listings};
 
 // 一覧に居る名前なら訊く。
 nodes["uvc-device"].value = "A";
-noticeCameras(running({reconnects: 3}));
-await settle();
-release();
-await settle();
+await recount();
 const present = {sizes: listed["camera-sizes"], asked: askedForModes};
 
-console.log(JSON.stringify({beforeSwap, absent, present}));
+// 表記が違うだけなら居る。ブリッジもキャプチャも大小文字を無視して受ける。
+nodes["uvc-device"].value = "a";
+await recount();
+const folded = askedForModes;
+
+// 重複していないカメラの "@device_pnp_..." も居る。候補には並ばないが、
+// 設定にはこちらで書ける。
+nodes["uvc-device"].value = "@device_pnp_a";
+await recount();
+const byPath = askedForModes;
+
+console.log(JSON.stringify({beforeSwap, absent, present, folded, byPath}));
 release();
 `
 	type look struct {
@@ -2592,6 +2608,8 @@ release();
 		BeforeSwap look `json:"beforeSwap"`
 		Absent     look `json:"absent"`
 		Present    look `json:"present"`
+		Folded     int  `json:"folded"`
+		ByPath     int  `json:"byPath"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -2615,5 +2633,11 @@ release();
 	}
 	if want := []string{"640x480"}; !equalStrings(got.Present.Sizes, want) {
 		t.Errorf("sizes = %v after choosing a listed camera, want %v", got.Present.Sizes, want)
+	}
+	if got.Folded != 3 {
+		t.Errorf("asked for the modes %d times for a name that differs only in case, want 3 — the bridge and the capture both accept it with EqualFold", got.Folded)
+	}
+	if got.ByPath != 4 {
+		t.Errorf("asked for the modes %d times for the \"@device_pnp_...\" name of a camera whose friendly name is unique, want 4 — the candidate list leaves it out, but the setting may hold it", got.ByPath)
 	}
 }
