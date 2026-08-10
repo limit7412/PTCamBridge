@@ -2848,3 +2848,146 @@ release();
 		t.Errorf("the modes line still reads %q after leaving UVC, want it cleared", got.After.Modes)
 	}
 }
+
+// 数え直しを始めた時点で、出ている候補も下ろします。
+//
+// 合図は「差し替えがあったかもしれない」と言っており、列挙は最大 15 秒かかります。
+// その間ずっと差し替え前の解像度を選べたままにすると、今のカメラが持っていない
+// 組み合わせを保存できてしまいます。
+func TestSettingsPageTakesDownTheCandidatesWhileItCountsAgain(t *testing.T) {
+	harness := modesHarness + `
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+// A のモードを出しておく。
+nodes["uvc-device"].value = "A";
+const first = loadCameraModes();
+release();
+await first;
+const showing = {sizes: listed["camera-sizes"], modes: nodes["camera-modes"].textContent};
+
+// 差し替えの合図。列挙はまだ終わらない。
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+const counting = {sizes: listed["camera-sizes"], rates: listed["camera-framerates"], modes: nodes["camera-modes"].textContent};
+
+// 列挙が終われば訊き直し、候補は戻る。
+releaseDevices();
+await settle();
+release();
+await settle();
+const after = {sizes: listed["camera-sizes"], modes: nodes["camera-modes"].textContent};
+
+console.log(JSON.stringify({showing, counting, after}));
+release();
+`
+	type shown struct {
+		Sizes []string `json:"sizes"`
+		Rates []string `json:"rates"`
+		Modes string   `json:"modes"`
+	}
+	var got struct {
+		Showing  shown `json:"showing"`
+		Counting shown `json:"counting"`
+		After    shown `json:"after"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"640x480"}; !equalStrings(got.Showing.Sizes, want) {
+		t.Fatalf("sizes before the signal = %v, want %v", got.Showing.Sizes, want)
+	}
+	if len(got.Counting.Sizes) != 0 || len(got.Counting.Rates) != 0 {
+		t.Errorf("sizes %v and framerates %v are still offered while the cameras are being counted, want both taken down — the listing takes up to 15s, and the signal says the camera may have been swapped", got.Counting.Sizes, got.Counting.Rates)
+	}
+	if got.Counting.Modes != "looking" {
+		t.Errorf("the modes line reads %q while the cameras are being counted, want the looking text", got.Counting.Modes)
+	}
+	if want := []string{"640x480"}; !equalStrings(got.After.Sizes, want) {
+		t.Errorf("sizes after the listing = %v, want %v — the candidates come back from a fresh answer", got.After.Sizes, want)
+	}
+}
+
+// 合図より前に立った問い合わせの答えは、列挙の最中に届いても採り込みません。
+//
+// 世代を列挙が終わってから進めると、その間に届いた答えが「今の世代のもの」として
+// 通ります。その答えは合図より前のもの、つまり差し替え前のものです。
+func TestSettingsPageDropsAnAnswerFromBeforeTheRecountStarted(t *testing.T) {
+	harness := modesHarness + `
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+// A を調べ始める。答えはまだ返らない。
+nodes["uvc-device"].value = "A";
+loadCameraModes();
+await settle();
+
+// 差し替えの合図。列挙が始まるが、まだ終わらない。
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+
+// ここで古い答えが届く。合図より前に立ったものなので、採り込んではいけない。
+release();
+await settle();
+const midListing = {modesFor: modesFor || "", sizes: listed["camera-sizes"]};
+
+// 列挙が終われば訊き直し、新しい答えで戻る。
+releaseDevices();
+await settle();
+release();
+await settle();
+const after = {modesFor: modesFor || "", sizes: listed["camera-sizes"]};
+
+console.log(JSON.stringify({midListing, after}));
+release();
+`
+	type look struct {
+		ModesFor string   `json:"modesFor"`
+		Sizes    []string `json:"sizes"`
+	}
+	var got struct {
+		MidListing look `json:"midListing"`
+		After      look `json:"after"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.MidListing.ModesFor != "" {
+		t.Errorf("modesFor = %q from an answer that landed while the cameras were still being counted, want it dropped — the request went out before the signal, so the answer is from before the swap", got.MidListing.ModesFor)
+	}
+	if len(got.MidListing.Sizes) != 0 {
+		t.Errorf("sizes = %v from an answer that predates the signal, want the candidates left down", got.MidListing.Sizes)
+	}
+	if got.After.ModesFor != "A" {
+		t.Errorf("modesFor = %q once the listing finished, want the camera recorded from a fresh answer", got.After.ModesFor)
+	}
+	if want := []string{"640x480"}; !equalStrings(got.After.Sizes, want) {
+		t.Errorf("sizes after the listing = %v, want %v", got.After.Sizes, want)
+	}
+}

@@ -1086,8 +1086,23 @@ async function countCameras() {
     return;
   }
   listingDevices = true;
+  // **始めた時点で、出ているものを下ろします。** 合図は「差し替えがあったかも
+  // しれない」と言っており、列挙は最大 15 秒かかります。その間ずっと差し替え前の
+  // 解像度を選べたままにすると、今のカメラが持っていない組み合わせを保存できて
+  // しまいます — この画面が別のカメラを調べ始めるときに候補を捨てるのと同じ理由です。
+  //
+  // 世代もここで進めます。進めないと、**合図より前に立った問い合わせ**の答えが、
+  // 列挙の最中に届いたときに今の世代のものとして受理されます。捨てた側は印を
+  // 下ろした後に訊き直し、その訊き直しは下の列挙を待ちます。
+  //
+  // modesFor はここでは触りません。数えられたときだけ (下のループ) 下ろします —
+  // 転んだ列挙の後に訊き直しても、ブリッジは素性を照らし合わせていないので、
+  // 返るのは同じ古い憶えです。
+  cameraGeneration++;
+  cameraModes = [];
+  refreshModeChoices();
+  sayModes(TEXT.modesLooking);
   let counted = false;
-  let dropped = false;
   try {
     do {
       listAgain = false;
@@ -1104,7 +1119,6 @@ async function countCameras() {
         cameraGeneration++;
         // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
         modesFor = null;
-        dropped = true;
       }
     } while (listAgain);
   } finally {
@@ -1120,14 +1134,11 @@ async function countCameras() {
   const chosen = el("uvc-device").value.trim();
   if (counted && (!chosen || listedHere(chosen))) {
     loadCameraModes();
-  } else if (dropped) {
-    // 途中では数えられたのに、最後が転んだ。憶えが古いことは分かっているので、
-    // **出ている候補も下ろします** — modesFor を下ろすだけだと、選べる解像度は
-    // 差し替え前のまま残ります。訊き直すのは次の数え直しに任せます (訊いても
-    // 照合の済んでいない答えが返るだけで、countFailed が立っているので 30 秒後に
-    // 来ます)。
-    cameraModes = [];
-    refreshModeChoices();
+  } else {
+    // 訊きに行かない。候補は始めた時点で下ろしてあるので、残っているのは
+    // 「調べています」の行だけです。訊き直すのは次の数え直しに任せます — 転んだ
+    // 列挙の後に訊いても照合の済んでいない答えが返るだけで、countFailed が
+    // 立っているので 30 秒後に来ます。
     sayModes("");
   }
 }
