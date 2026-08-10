@@ -117,9 +117,10 @@ type Bridge struct {
 	modesMu    sync.Mutex
 	modes      map[string]modeMemory
 	identities map[string][]string
-	// scan は、今走っているカメラの列挙です。要求をまたいで 1 本にまとめます。
-	// Devices を参照。
+	// scan は今走っているカメラの列挙、queued はその次に走らせる 1 本です。要求を
+	// またいでまとめますが、**走っているものには相乗りさせません**。Devices を参照。
 	scan    *deviceScan
+	queued  *deviceScan
 	listing map[string]*modeLookup
 	// listingWG は走っている列挙です。Stop が終わりを待ちます。stopped は、その
 	// 待ちが済んだ後です — 以降は新しい列挙を始めません。
@@ -343,6 +344,13 @@ func (b *Bridge) stopLookups() {
 	b.lookupsStopped = true
 	if b.scan != nil {
 		b.scan.cancel()
+	}
+	// 予約は誰も走らせません。走っている 1 本が終わってもここから続けないので、
+	// 待っている要求はこの場で帰します。
+	if queued := b.queued; queued != nil {
+		b.queued = nil
+		queued.err = errors.New("uvc: PTCamBridge is shutting down")
+		close(queued.done)
 	}
 	for _, call := range b.listing {
 		call.cancel()
@@ -1015,11 +1023,37 @@ func (b *Bridge) listCamerasOnce(ctx context.Context) ([]source.Device, error) {
 		b.modesMu.Unlock()
 		return nil, errors.New("uvc: PTCamBridge is shutting down")
 	}
-	if scan := b.scan; scan != nil {
+	if b.scan != nil {
+		// **走っているものには相乗りさせません。** その列挙は、この要求より前に
+		// 顔ぶれを見ています。差し替えに気づいて数え直しに来た要求へその答えを
+		// 渡すと、差し替え前の一覧を「数え直した結果」として受け取ることになり、
+		// forgetModesIfCamerasChanged もその一覧で走るので、素性も憶えも古いまま
+		// 残ります。以後は様子が動かなければ合図も来ないので、設定画面は新しい
+		// カメラに前の機種のモードを出し続けます。
+		//
+		// 画面側の繰り越し (ui_settings.html の listAgain) は同じことをページの
+		// 中でしています。あちらが知っているのはそのページのことだけなので、
+		// 別のタブや診断画面、トレイが始めた列挙には効きません。
+		//
+		// 代わりに**次の 1 本を予約**します。走っている間に来た要求は何本でも
+		// その 1 本を共有するので、払うのは列挙 1 回分です。
+		if b.queued == nil {
+			b.queued = &deviceScan{done: make(chan struct{})}
+		}
+		scan := b.queued
 		scan.waiting++
 		b.modesMu.Unlock()
 		return awaitDevices(ctx, scan)
 	}
+	scan := &deviceScan{done: make(chan struct{})}
+	b.startScanLocked(scan)
+	b.modesMu.Unlock()
+
+	return awaitDevices(ctx, scan)
+}
+
+// startScanLocked は、その列挙を 1 本走らせます。呼び出し側が modesMu を保持します。
+func (b *Bridge) startScanLocked(scan *deviceScan) {
 	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
 	// 同じ答えを待っている他の要求まで巻き添えになります。しかもこの列挙は顔ぶれの
 	// 照らし合わせ (forgetModesIfCamerasChanged) も兼ねていて、その成果は待っている
@@ -1030,19 +1064,16 @@ func (b *Bridge) listCamerasOnce(ctx context.Context) ([]source.Device, error) {
 		lifetime = *lt
 	}
 	runCtx, cancel := context.WithCancel(lifetime)
-
-	scan := &deviceScan{done: make(chan struct{}), cancel: cancel}
+	scan.cancel = cancel
 	b.scan = scan
 	// 数えるのは登録と同じロックの下です。解いた後に足すと、その隙間に入った
 	// Stop が「走っているものは無い」と見て待ち終え、その後で列挙が始まります。
 	b.listingWG.Add(1)
-	b.modesMu.Unlock()
 
-	ffmpegPath := b.Snapshot().Source.UVC.FFmpegPath
 	go func() {
 		defer b.listingWG.Done()
 		defer cancel()
-		cameras, err := listDevices(runCtx, ffmpegPath)
+		cameras, err := listDevices(runCtx, b.Snapshot().Source.UVC.FFmpegPath)
 		b.modesMu.Lock()
 		b.scan = nil
 		if err == nil {
@@ -1057,12 +1088,17 @@ func (b *Bridge) listCamerasOnce(ctx context.Context) ([]source.Device, error) {
 			// 転んだ拍子に憶えを捨てることになります。
 			b.forgetModesIfCamerasChangedLocked(cameras)
 		}
+		// 予約があれば、ここから続けて走らせます。待っていた要求が去っていても
+		// 走らせます — この列挙は顔ぶれの照らし合わせも兼ねていて、その成果は
+		// 待っている人だけのものではないからです (上を参照)。
+		if next := b.queued; next != nil && !b.lookupsStopped {
+			b.queued = nil
+			b.startScanLocked(next)
+		}
 		b.modesMu.Unlock()
 		scan.cameras, scan.err = cameras, err
 		close(scan.done)
 	}()
-
-	return awaitDevices(ctx, scan)
 }
 
 // awaitDevices は、走っている列挙の答えを待ちます。

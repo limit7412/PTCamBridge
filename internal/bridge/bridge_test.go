@@ -4071,71 +4071,70 @@ func TestCameraModesAnswersUnderTheOtherNameOfTheSameCamera(t *testing.T) {
 	}
 }
 
-// 重なった要求は、1 本の列挙にまとめなければならない。
+// 重なった要求は 1 本にまとめる。ただし**走っているものには相乗りさせない**。
 //
-// 読む側は 1 つではない (設定画面、診断画面、トレイ、差し替えの合図からの数え直し)。
-// 設定画面を 2 つのタブで開いていれば、どちらも同じ合図を同じ瞬間に見る。画面側の
-// 抑止はそのページの中だけなので、まとめられるのは要求を受ける側だけ。Windows の
-// 列挙は ffmpeg を起こすので、遅ければ 1 回 15 秒かかる。
-func TestDevicesRunsOneListingForOverlappingRequests(t *testing.T) {
+// 走っている列挙は、後から来た要求より前に顔ぶれを見ている。差し替えに気づいて
+// 数え直しに来た要求へその答えを渡すと、差し替え前の一覧を「数え直した結果」として
+// 受け取ることになる。画面側の繰り越しは同じことをページの中でしているが、あちらが
+// 知っているのはそのページのことだけで、別のタブや診断画面が始めた列挙には効かない。
+//
+// 予約は 1 本に共有させる。3 本重なっても払うのは列挙 2 回分。
+func TestDevicesQueuesAScanForRequestsThatArriveMidListing(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	var once sync.Once
 	var calls atomic.Int64
 	prev := listDevices
 	listDevices = func(context.Context, string) ([]source.Device, error) {
-		calls.Add(1)
-		once.Do(func() { close(started) })
-		<-release
-		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
+		if calls.Add(1) == 1 {
+			once.Do(func() { close(started) })
+			<-release
+			return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
+		}
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_new"}}, nil
 	}
 	t.Cleanup(func() { listDevices = prev })
 
 	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
 
-	const callers = 3
-	answers := make(chan server.Devices, callers)
-	var wg sync.WaitGroup
-	// 1 本目が走り出してから重ねる。走る前に並べると、まとめられたのか
-	// たまたま直列に並んだのかを区別できない。listDevices まで来ていれば
-	// 登録は済んでいる (listCamerasOnce は登録してから goroutine を起こす)。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		answers <- b.Devices(context.Background())
-	}()
+	first := make(chan server.Devices, 1)
+	go func() { first <- b.Devices(context.Background()) }()
 	<-started
-	for range callers - 1 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			answers <- b.Devices(context.Background())
-		}()
+
+	// 1 本目が顔ぶれを見た**後**に来た 2 本。差し替えはこの間に起きたかもしれない。
+	const late = 2
+	answers := make(chan server.Devices, late)
+	for range late {
+		go func() { answers <- b.Devices(context.Background()) }()
 	}
-	// 相乗りが登録されるのを待つ。ここで待たずに解くと、1 本目が終わって登録が
-	// 解けた後に後続が来ることがあり、まとめていなくても 1 本に見える。
-	waitFor(t, 2*time.Second, "the overlapping requests to join the listing", func() bool {
-		return b.scanWaitersForTest() == callers-1
+	// 予約に並ぶのを待つ。待たずに解くと、1 本目が終わった後に来ることがあり、
+	// 予約しているのかどうかを区別できない。
+	waitFor(t, 2*time.Second, "the late requests to queue a scan", func() bool {
+		return b.scanWaitersForTest() == late
 	})
 
 	close(release)
-	wg.Wait()
-	close(answers)
 
-	if got := calls.Load(); got != 1 {
-		t.Errorf("ffmpeg ran %d times for %d overlapping requests, want 1", got, callers)
+	if devices := <-first; len(devices.Cameras) != 1 || devices.Cameras[0].Alternative != "@device_pnp_old" {
+		t.Errorf("the first request got %v, want the listing it started", devices.Cameras)
 	}
-	for devices := range answers {
+	for range late {
+		devices := <-answers
 		if devices.CameraError != "" {
 			t.Fatalf("Devices: %s", devices.CameraError)
 		}
-		if len(devices.Cameras) != 1 || devices.Cameras[0].Alternative != "@device_pnp_old" {
-			t.Errorf("cameras = %v, want everyone to share the one listing", devices.Cameras)
+		if len(devices.Cameras) != 1 || devices.Cameras[0].Alternative != "@device_pnp_new" {
+			t.Errorf("a request that arrived mid-listing got %v, want a listing that started after it asked", devices.Cameras)
 		}
+	}
+
+	b.Stop()
+	if got := calls.Load(); got != 2 {
+		t.Errorf("ffmpeg ran %d times for %d requests, want 2 — the late ones share one queued scan", got, late+1)
 	}
 }
 
-// 相乗りした要求の 1 本が去っても、走っている列挙を止めてはいけない。
+// 予約した要求の 1 本が去っても、走っている列挙も予約も止めてはいけない。
 //
 // 止めれば、同じ答えを待っている他の要求まで巻き添えになる。しかもこの列挙は
 // 顔ぶれの照らし合わせも兼ねていて、その成果は待っている人だけのものではない。
@@ -4161,12 +4160,11 @@ func TestDevicesKeepsListingWhenOneRequestGivesUp(t *testing.T) {
 	go func() { stayed <- b.Devices(context.Background()) }()
 	<-started
 
-	// 2 本目は相乗りしてから諦める。1 本目が listDevices まで来ている以上、
-	// 走っている列挙は既に登録済みなので、後から来たものは必ず相乗りする。
+	// 2 本目は次の列挙を予約してから諦める。
 	leaving, giveUp := context.WithCancel(context.Background())
 	left := make(chan server.Devices, 1)
 	go func() { left <- b.Devices(leaving) }()
-	waitFor(t, 2*time.Second, "the second request to join the listing", func() bool {
+	waitFor(t, 2*time.Second, "the second request to queue a scan", func() bool {
 		return b.scanWaitersForTest() == 1
 	})
 	giveUp()
@@ -4183,6 +4181,7 @@ func TestDevicesKeepsListingWhenOneRequestGivesUp(t *testing.T) {
 	if len(devices.Cameras) != 1 {
 		t.Errorf("cameras = %v, want the listing to have finished for the caller that stayed", devices.Cameras)
 	}
+	b.Stop()
 }
 
 // 顔ぶれを反映するのは、いつでも**最後に終わった列挙**でなければならない。
