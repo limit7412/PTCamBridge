@@ -749,11 +749,21 @@ console.log(JSON.stringify({refused, fixed, afterSwitch: nodes["uvc-framerate"].
 // やめた瞬間は隠れた欄の拒否を解く瞬間です。どちらの判断も中にあります。
 func TestSettingsPageRunsTheModeLogicOnEverySourceChange(t *testing.T) {
 	body := settingsFunction(t, `for (const radio of document.querySelectorAll('input[name="source-type"]')) {`)
-	if strings.Contains(body, `if (radio.value === "uvc") loadCameraModes()`) {
-		t.Error("the source switch must call loadCameraModes for every source; the branch that clears the refusals lives inside it")
-	}
 	if !strings.Contains(body, "loadCameraModes();") {
 		t.Error("the source switch does not run the mode logic at all")
+	}
+	// UVC をやめたときも必ず通らなければなりません。隠れた欄の拒否を解くのも、
+	// 走っている問い合わせを無効にするのも、loadCameraModes の中にあります。
+	left := strings.Index(body, `if (radio.value === "uvc")`)
+	ran := strings.Index(body, "loadCameraModes();")
+	if left >= 0 && ran >= 0 && ran < left {
+		t.Error("the source switch only runs the mode logic when UVC is chosen; leaving UVC has to go through it too")
+	}
+	// UVC へ戻る瞬間は、顔ぶれを数え直す瞬間でもあります。訊くだけでは足りません
+	// — 新しいカメラが挿さっていなかったり掴まれていたりすると、ブリッジは調べに
+	// 失敗して差し替え前の憶えで答えます。
+	if !strings.Contains(body, "countCameras();") {
+		t.Error("coming back to UVC does not count the cameras, so the bridge can still answer from what it remembered before the swap")
 	}
 }
 

@@ -500,11 +500,21 @@ el("settings").addEventListener("submit", async (event) => {
 for (const radio of document.querySelectorAll('input[name="source-type"]')) {
   radio.addEventListener("change", () => {
     showSource(radio.value);
-    // どのソースを選んでも呼ぶ。UVC を選んだ瞬間は、そのカメラを調べてよくなる
-    // 瞬間 — ここで呼ばなければ、切り替えた人はカメラ名の欄に触るまで候補を
-    // 見られない。UVC をやめた瞬間は、隠れた欄の拒否を解く瞬間 — 解かなければ、
-    // 見えない欄のせいで保存そのものが始まらない。どちらの判断も
-    // loadCameraModes の中にある。
+    // UVC へ戻る瞬間は、顔ぶれを数え直す瞬間でもある。離れている間の差し替えは
+    // 合図にならない (合図はいま動いているソースで絞る)。訊くだけでは足りない —
+    // 新しいカメラがまだ挿さっていなかったり他のアプリに掴まれていたりすると、
+    // ブリッジは調べに失敗して**憶えで答える** (bridge.CameraModes の recallModes)。
+    // その憶えは差し替え前のものなので、持っていない組み合わせを選ばせてしまう。
+    // 数え直せば、そこで素性を照らし合わせて憶えのほうが捨てられる。
+    //
+    // 数え直しは訊き直しまで面倒を見る (countCameras) ので、ここでは呼ばない。
+    if (radio.value === "uvc") {
+      countCameras();
+      return;
+    }
+    // UVC をやめた瞬間は、隠れた欄の拒否を解く瞬間 — 解かなければ、見えない欄の
+    // せいで保存そのものが始まらない。走っている問い合わせを無効にするのも
+    // ここから。どちらの判断も loadCameraModes の中にある。
     loadCameraModes();
   });
 }
