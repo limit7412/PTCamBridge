@@ -2991,3 +2991,86 @@ release();
 		t.Errorf("sizes after the listing = %v, want %v", got.After.Sizes, want)
 	}
 }
+
+// 数え直しの最中も、立っている拒否は解きません。
+//
+// 候補を下ろすついでに refreshModeChoices を通すと、拒否も一緒に引き直されます。
+// あの判定は「このカメラのモードを知っているときだけ言う」ので、モードを空にした
+// 直後では何も言えず、**前のカメラが持っていなかった値が保存できるようになります**。
+// 列挙は最大 15 秒かかるので、拒否がいちばん効いていてほしい窓がまるごと空きます。
+func TestSettingsPageKeepsTheRefusalWhileItCountsAgain(t *testing.T) {
+	harness := modesHarness + `
+let modeSize = "640x480";
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
+  }
+  const device = decodeURIComponent(String(url).split("device=")[1]);
+  await new Promise((resolve) => { pending.push(resolve); });
+  return { ok: true, json: async () => ({
+    device,
+    modes: [{min_size: modeSize, max_size: modeSize, min_fps: 30, max_fps: 30}],
+  }) };
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+// A のモードを出し、そのカメラが持っていない大きさを入れておく。
+nodes["uvc-device"].value = "A";
+const first = loadCameraModes();
+release();
+await first;
+nodes["uvc-size"].value = "1920x1080";
+refreshModeChoices();
+const refused = nodes["uvc-size"].invalid;
+
+// 差し替えの合図。列挙はまだ終わらない。
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+const counting = {invalid: nodes["uvc-size"].invalid, sizes: listed["camera-sizes"]};
+
+// 新しいカメラはその大きさを持っている。答えが返れば拒否は解ける。
+modeSize = "1920x1080";
+releaseDevices();
+await settle();
+release();
+await settle();
+const after = {invalid: nodes["uvc-size"].invalid, sizes: listed["camera-sizes"]};
+
+console.log(JSON.stringify({refused, counting, after}));
+release();
+`
+	type state struct {
+		Invalid string   `json:"invalid"`
+		Sizes   []string `json:"sizes"`
+	}
+	var got struct {
+		Refused  string `json:"refused"`
+		Counting state  `json:"counting"`
+		After    state  `json:"after"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Refused == "" {
+		t.Fatalf("the size the camera does not have was accepted before the signal, so there is no refusal to keep")
+	}
+	if got.Counting.Invalid == "" {
+		t.Errorf("the refusal was lifted while the cameras were being counted, so a size the camera does not have could be saved during the listing")
+	}
+	if len(got.Counting.Sizes) != 0 {
+		t.Errorf("sizes = %v while the cameras are being counted, want the candidates taken down", got.Counting.Sizes)
+	}
+	if got.After.Invalid != "" {
+		t.Errorf("the refusal is still %q after an answer that does have the size, want it lifted", got.After.Invalid)
+	}
+	if want := []string{"1920x1080"}; !equalStrings(got.After.Sizes, want) {
+		t.Errorf("sizes after the fresh answer = %v, want %v", got.After.Sizes, want)
+	}
+}

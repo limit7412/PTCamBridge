@@ -1098,9 +1098,17 @@ async function countCameras() {
   // modesFor はここでは触りません。数えられたときだけ (下のループ) 下ろします —
   // 転んだ列挙の後に訊き直しても、ブリッジは素性を照らし合わせていないので、
   // 返るのは同じ古い憶えです。
+  //
+  // 下ろすのは**候補欄だけ**で、refreshModeChoices は通しません。あちらは候補と
+  // 一緒に拒否も引き直しますが、その判定は「このカメラのモードを知っているとき
+  // だけ言う」ので、モードを空にした直後に通すと、**立っていた拒否が解けます** —
+  // 前のカメラが持っていなかった値が、列挙の 15 秒のあいだ保存できるようになり、
+  // それは拒否がいちばん効いていてほしい瞬間です。拒否はそのまま残し、答えが
+  // 返ってから引き直します。
   cameraGeneration++;
   cameraModes = [];
-  refreshModeChoices();
+  options("camera-sizes", []);
+  options("camera-framerates", []);
   sayModes(TEXT.modesLooking);
   let counted = false;
   try {
