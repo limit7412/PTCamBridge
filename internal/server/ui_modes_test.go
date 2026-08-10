@@ -1515,6 +1515,70 @@ release();
 	}
 }
 
+// 数え直しをまたいだ答えは、名前が合っていても差し替え前のものです。
+//
+// 問い合わせが返るのを待っている間に差し替えを検知して数え直すと、そこから出る
+// 訊き直しは「もう調べている」と見なされて帰ります。その後に届く古い答えを名前だけで
+// 採り込むと、差し替え前の候補を調べ済みとして刻み直します。
+func TestSettingsPageDropsTheAnswerThatCameFromBeforeTheRecount(t *testing.T) {
+	harness := modesHarness + `
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+// A を調べ始める。答えはまだ返らない。
+nodes["uvc-device"].value = "A";
+loadCameraModes();
+await settle();
+const askedFirst = asked;
+
+// 待っている間に差し替えに気づいて数え直す。ここから出る訊き直しは、走っている
+// 問い合わせがあるので帰る。
+await countCameras();
+await settle();
+
+// そこへ、数え直しより前に立った答えが届く。
+release();
+await settle();
+const staleKept = modesFor || "";
+const askedAgain = asked;
+
+// 訊き直しに答える。
+release();
+await settle();
+
+console.log(JSON.stringify({askedFirst, staleKept, askedAgain, modesFor: modesFor || ""}));
+`
+	var got struct {
+		AskedFirst int    `json:"askedFirst"`
+		StaleKept  string `json:"staleKept"`
+		AskedAgain int    `json:"askedAgain"`
+		ModesFor   string `json:"modesFor"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AskedFirst != 1 {
+		t.Fatalf("asked for the modes %d times before the recount, want 1", got.AskedFirst)
+	}
+	if got.StaleKept != "" {
+		t.Errorf("modesFor = %q from an answer that was already in flight when the cameras were counted again, want it dropped", got.StaleKept)
+	}
+	if got.AskedAgain != 2 {
+		t.Errorf("asked %d times in total after dropping the stale answer, want 2 — dropping without asking again leaves the candidates empty until the capture moves", got.AskedAgain)
+	}
+	if got.ModesFor != "A" {
+		t.Errorf("modesFor = %q after the fresh answer came back, want the camera recorded", got.ModesFor)
+	}
+}
+
 // 状態の polling がこの合図を拾わなければ、気づく機会がありません。初回の列挙も
 // 同じ入口を通さないと、その 15 秒の最中に来た合図が 2 本目を始めます。
 func TestSettingsPageWatchesTheCaptureForCameraChanges(t *testing.T) {

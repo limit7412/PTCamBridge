@@ -508,6 +508,9 @@ let modesFor = null;
 // devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
 // これを待ちます。初期化を参照。
 let devicesListed = null;
+// countedTimes は、カメラの顔ぶれを数え直せた回数。走っている問い合わせが、
+// 数え直しをまたいだかどうかを見分けるために使います。
+let countedTimes = 0;
 const modesLoading = new Set();
 let cameraModes = [];
 
@@ -559,6 +562,9 @@ async function loadCameraModes() {
   if (modesLoading.has(device)) return;
 
   modesLoading.add(device);
+  // この問い合わせが立った時点の世代。答えが返る頃にこれが古くなっていたら、
+  // 数え直しをまたいだということです。
+  const generation = countedTimes;
   try {
     // 個体の照合が先。待つのは最初の一覧が終わるまでで、以降は素通りします。
     //
@@ -581,7 +587,11 @@ async function loadCameraModes() {
     // 候補を書き換えると、今いる名前とは無関係なモードを勧めることになる。
     // ソースも見る — UVC をやめた後に採り込むと、隠れた欄に拒否が戻り、
     // 別のソースの設定が保存できなくなる。
-    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim()) return;
+    //
+    // 世代も見る。名前は差し替えても変わらないので、**数え直しをまたいだ答えは
+    // 名前が合っていても差し替え前のもの**。採り込むと、それを調べ済みとして
+    // 刻み直すことになる。捨てた分は下で訊き直します。
+    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim() || generation !== countedTimes) return;
 
     cameraModes = found.modes || [];
     if (found.error) {
@@ -595,11 +605,15 @@ async function loadCameraModes() {
     // 成功の側と同じ判定。古い要求が転んだからといって、今のカメラについて
     // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
     // B の候補は次に入力の合図が来るまで戻らない。
-    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim()) return;
+    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim() || generation !== countedTimes) return;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {
     modesLoading.delete(device);
+    // 数え直しをまたいでいたら、その最中に来た訊き直しは「もう調べている」と
+    // 見なされて帰っています。捨てただけで終わると、次に様子が動くまで候補が
+    // 戻りません。印を下ろしたここで、改めて訊きに行きます。
+    if (generation !== countedTimes) loadCameraModes();
   }
   refreshModeChoices();
 }
@@ -815,6 +829,9 @@ async function countCameras() {
       // 2 本目を始めてしまいます。
       devicesListed = loadDevices();
       if (await devicesListed) {
+        // 数えられた。ここから先、これより前に立った問い合わせの答えは、
+        // 差し替え前のものかもしれません。
+        countedTimes++;
         // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
         modesFor = null;
         loadCameraModes();
