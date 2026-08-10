@@ -4560,7 +4560,7 @@ func TestSwitchingToSerialClashesWithTheRunningOutputNotTheSavedOne(t *testing.T
 	if err == nil {
 		t.Fatal("Switch to serial on COM7 was accepted while the running output still holds COM7")
 	}
-	if !strings.Contains(err.Error(), "running output.serial.port") {
+	if !strings.Contains(err.Error(), "running in this process") {
 		t.Errorf("Switch failed with %v, want it to name the clash with the running output", err)
 	}
 }
@@ -4572,17 +4572,62 @@ func TestSwitchingToSerialIgnoresAnOutputThatIsOnlyPending(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
 	b := New(serialOutputConfig(t, "COM7", "", false), path, hub.New(), status.New(), discardLogger())
 
+	// ペアの反対側なので、いま動いている出力とも、保存される設定とも衝突しません。
 	next := b.Snapshot()
 	next.Output.Serial.Enabled = true
-	next.Output.Serial.Port = "COM7"
+	next.Output.Serial.Port = "COM8"
 	if _, _, err := b.Apply(context.Background(), next, nil); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	// 切り替えそのものは、この環境に COM7 が無いので失敗して構いません。確かめたい
-	// のは、**衝突を理由に**断られないことです。
+	// 切り替えそのものは、この環境に COM8 も COM7 も無いので失敗して構いません。
+	// 確かめたいのは、**衝突を理由に**断られないことです。
 	err := b.Switch(context.Background(), config.SourceSerial)
-	if err != nil && strings.Contains(err.Error(), "running output.serial.port") {
-		t.Errorf("Switch was refused over a clash with an output that is only pending: %v", err)
+	if err != nil && strings.Contains(err.Error(), "same port") {
+		t.Errorf("Switch was refused over a clash that does not exist: %v", err)
+	}
+}
+
+// 動いている出力と衝突しなくても、**保存される設定**が衝突していれば断ります。
+// 通してしまうと、設定は受理・保存されたのに次の起動で main がプロセスごと止め、
+// 設定画面から保存できた設定で二度と立ち上がらなくなります。
+func TestSavingAnOutputThatWouldClashAtTheNextStartIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	cfg := serialOutputConfig(t, "COM7", "", false)
+	cfg.Source.Type = config.SourceSerial
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+
+	// 起動時の出力は無効なので、いま COM7 を握っているものはありません。しかし
+	// この設定を保存すると、次の起動では読む側と書く側が同じ COM7 になります。
+	next := b.Snapshot()
+	next.Output.Serial.Enabled = true
+	next.Output.Serial.Port = "COM7"
+
+	_, _, err := b.Apply(context.Background(), next, nil)
+	if err == nil {
+		t.Fatal("Apply accepted settings that would stop the next start")
+	}
+	if !strings.Contains(err.Error(), "next time") {
+		t.Errorf("Apply failed with %v, want it to say the settings would break the next start", err)
+	}
+
+	// 断ったのだから、保存もされていてはいけません。
+	if got := b.Snapshot().Output.Serial; got.Enabled || got.Port == "COM7" {
+		t.Errorf("the refused settings were kept anyway: %+v", got)
+	}
+}
+
+// 同じデバイスを指す 2 通りの書き方を、別物として見逃してはいけません。Windows の
+// COM7 と \\.\COM7 は同じポートで、go.bug.st/serial はどちらでも開きます。
+func TestTheDeviceNamespacePrefixDoesNotHideAClash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	cfg := serialOutputConfig(t, `\\.\COM7`, "COM7", true)
+	cfg.Source.Type = config.SourceSerial
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+
+	if err := b.Switch(context.Background(), config.SourceSerial); err == nil {
+		t.Fatal(`Switch accepted \\.\COM7 against COM7, want them recognised as the same port`)
+	} else if !strings.Contains(err.Error(), "same port") {
+		t.Errorf("Switch failed with %v, want it to name the port clash", err)
 	}
 }

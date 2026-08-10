@@ -723,17 +723,35 @@ func (c Config) Validate() error {
 // "auto" は突き合わせません。名前ではないので比べる相手がありません (探索が出力の
 // ポートを掴み得る点は別の問題で、issue #46 で追っています)。
 //
-// 大文字小文字は無視します。Windows の COM7 と com7 は同じポートです。
+// 名前は正規化してから比べます。理由は normalisePortName を参照してください。
 func SerialPortConflict(source Source, running OutputSerial) error {
 	if !running.Enabled || source.Type != SourceSerial {
 		return nil
 	}
-	port := strings.TrimSpace(source.Serial.Port)
-	if strings.EqualFold(port, "auto") || !strings.EqualFold(port, strings.TrimSpace(running.Port)) {
+	port := normalisePortName(source.Serial.Port)
+	if strings.EqualFold(port, "auto") || !strings.EqualFold(port, normalisePortName(running.Port)) {
 		return nil
 	}
-	return fmt.Errorf("source.serial.port and the running output.serial.port are both %q; a serial port cannot be read and written by the same program, so give the output the other end of a virtual pair",
-		running.Port)
+	return fmt.Errorf("source.serial.port (%q) and output.serial.port (%q) are the same port; a serial port cannot be read and written by the same program, so give the output the other end of a virtual pair",
+		strings.TrimSpace(source.Serial.Port), strings.TrimSpace(running.Port))
+}
+
+// normalisePortName は、同じデバイスを指す書き方を 1 つに揃えます。
+//
+// Windows のシリアルポートは COM7 とも \\.\COM7 とも書けて、どちらも同じデバイス
+// です。しかも両方が実際に通ります — go.bug.st/serial は前置きが無ければ自分で
+// 足してから開くので (serial_windows.go の nativeOpen)、設定にどちらを書いても
+// ポートは開きます。文字列のまま比べると、同じポートを指す 2 つの設定を別物と
+// 見なして素通りさせ、入力と出力が同じ排他ポートを奪い合います。
+//
+// 揃えるのはこの前置きだけです。ここで正規化する値は、そのまま serial.Open へ
+// 渡る名前であって、こちらが解釈してよい対象ではありません。前置きを剥がすのは、
+// ライブラリ自身がそれを付け外ししていると分かっているからです。
+//
+// 大文字小文字は呼び出し側が EqualFold で無視します。Windows の COM7 と com7 は
+// 同じポートです。
+func normalisePortName(name string) string {
+	return strings.TrimPrefix(strings.TrimSpace(name), `\\.\`)
 }
 
 // CoreTransform は、設定を core が適用する変換に変換します。

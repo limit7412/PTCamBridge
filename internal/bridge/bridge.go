@@ -465,10 +465,7 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifAny []string) (
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// 突き合わせる相手は起動時の出力です。output.serial.* は起動時にしか読まれない
-	// ので、設定が述べる出力ポートと、実際に握られているポートは食い違い得ます。
-	// 詳しくは config.SerialPortConflict を参照してください。
-	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
+	if err := b.serialPortConflicts(cfg); err != nil {
 		return b.cfg, nil, err
 	}
 	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(b.cfg)) {
@@ -892,6 +889,30 @@ func captureUnchanged(previous, next config.Config) bool {
 //
 // 名前は TOML のキーそのものです。翻訳しません。ユーザーが設定ファイルを開いた
 // ときに探す文字列だからです。
+// serialPortConflicts は、この設定が読む側と書く側を同じシリアルポートへ向けて
+// いないかを、**2 つの時点について**確かめます。
+//
+// 2 回要るのは、出力が起動時にしか読まれないからです。「いま動くか」と「次の起動で
+// 動くか」は別の問いで、片方だけを見ると、もう片方が黙って壊れます。
+//
+//   - 動いている出力との衝突。これがあると、この要求はその場で失敗します。ソースは
+//     出力が握っているポートを開けません
+//   - 保存される設定そのものの衝突。これを通すと、設定は受理・保存されたのに、
+//     次の起動で main がプロセスごと止めます。設定画面から保存できた設定で
+//     二度と立ち上がらない、という最悪の形です
+//
+// 動いている方を先に見ます。両方が当てはまるとき、ユーザーが今いる場所について
+// 述べているのはそちらだからです。
+func (b *Bridge) serialPortConflicts(cfg config.Config) error {
+	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
+		return fmt.Errorf("the serial output running in this process is using that port: %w", err)
+	}
+	if err := config.SerialPortConflict(cfg.Source, cfg.Output.Serial); err != nil {
+		return fmt.Errorf("these settings would stop PTCamBridge from starting next time: %w", err)
+	}
+	return nil
+}
+
 // startupOnlyChange は、この要求が起動時にしか読まれない葉だけを動かしたかどうかを
 // 返します。
 //
@@ -992,7 +1013,7 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
+	if err := b.serialPortConflicts(cfg); err != nil {
 		return err
 	}
 	// ソース種別は動作中に変えられるものなので、保留になる葉は生まれない。

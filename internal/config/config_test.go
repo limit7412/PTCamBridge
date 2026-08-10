@@ -994,3 +994,30 @@ func TestValidateLeavesTheRunningPortQuestionAlone(t *testing.T) {
 		t.Errorf("Validate refused a config over a clash it cannot judge: %v", err)
 	}
 }
+
+// Windows のシリアルポートは COM7 とも \\.\COM7 とも書けて、どちらも同じデバイス
+// です。go.bug.st/serial は前置きが無ければ自分で足してから開くので、設定には
+// どちらを書いても通ります。文字列のまま比べると同じポートを見逃します。
+func TestSerialPortConflictSeesThroughTheDeviceNamespacePrefix(t *testing.T) {
+	for _, tc := range []struct{ source, output string }{
+		{`\\.\COM7`, "COM7"},
+		{"COM7", `\\.\COM7`},
+		{`\\.\COM7`, `\\.\com7`},
+	} {
+		err := SerialPortConflict(
+			Source{Type: SourceSerial, Serial: Serial{Port: tc.source}},
+			OutputSerial{Enabled: true, Port: tc.output},
+		)
+		if err == nil {
+			t.Errorf("SerialPortConflict(%q, %q) found no clash, want the two spellings recognised as one port", tc.source, tc.output)
+		}
+	}
+
+	// 前置きを剥がしても別のポートは別のポートのままです。
+	if err := SerialPortConflict(
+		Source{Type: SourceSerial, Serial: Serial{Port: `\\.\COM7`}},
+		OutputSerial{Enabled: true, Port: "COM8"},
+	); err != nil {
+		t.Errorf("SerialPortConflict reported a clash between COM7 and COM8: %v", err)
+	}
+}
