@@ -977,7 +977,7 @@ async function countCameras() {
   }
   listingDevices = true;
   let counted = false;
-  let everCounted = false;
+  let dropped = false;
   try {
     do {
       listAgain = false;
@@ -986,24 +986,35 @@ async function countCameras() {
       devicesListed = loadDevices();
       counted = await devicesListed;
       countFailed = !counted;
-      if (counted) everCounted = true;
+      if (counted) {
+        // **数えられた瞬間に**進めます。ここでブリッジは素性を照らし合わせている
+        // ので、これより前に立った問い合わせの答えは、もう差し替え前のものです。
+        // ループを抜けるまで待つと、繰り越しが走っている間に届いた答えが、今の
+        // 世代のものとして受理されます。
+        countedTimes++;
+        // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
+        modesFor = null;
+        dropped = true;
+      }
     } while (listAgain);
   } finally {
     listingDevices = false;
   }
-  // 途中で一度でも数えられていれば、ブリッジは素性を照らし合わせ済みです。
-  // 最後の一覧が転んでも、こちらの憶えはもう古い — 捨てておかないと、差し替え前の
-  // 候補と、走っていた古い世代の答えが、次の数え直しまで有効なまま残ります。
-  if (everCounted) {
-    countedTimes++;
-    // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
-    modesFor = null;
-  }
   // 訊き直すのは、**最後の一覧が数えられたときだけ**、しかも**繰り越しまで終えた
   // 後**です。途中の一覧で始めると、繰り越した列挙と同じカメラを同時に開きに行く
-  // ことになります。最後が転んでいれば、訊いても照合の済んでいない答えが返るだけ
-  // なので、次の数え直しに任せます (countFailed が立っているので 30 秒後に来ます)。
-  if (counted) loadCameraModes();
+  // ことになります。
+  if (counted) {
+    loadCameraModes();
+  } else if (dropped) {
+    // 途中では数えられたのに、最後が転んだ。憶えが古いことは分かっているので、
+    // **出ている候補も下ろします** — modesFor を下ろすだけだと、選べる解像度は
+    // 差し替え前のまま残ります。訊き直すのは次の数え直しに任せます (訊いても
+    // 照合の済んでいない答えが返るだけで、countFailed が立っているので 30 秒後に
+    // 来ます)。
+    cameraModes = [];
+    refreshModeChoices();
+    sayModes("");
+  }
 }
 
 el("uvc-device").addEventListener("change", loadCameraModes);
