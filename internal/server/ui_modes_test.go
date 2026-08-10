@@ -1205,50 +1205,73 @@ const beforeResume = listings;
 const resumed = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 1}));
 await settle();
 
+// 止まったまま数え直しても、動き出したことは合図として残ります。
+//
+// 止まっている間にソースを切り替えると、それも合図なので数え直します。そこで
+// 止められた分まで使い切ると、**その後に差し替えて再開しても**、数はもう動いた後
+// なので合図が出ません。差し替えは止めている間のどこで起きてもおかしくありません。
+const beforePausedSwitch = listings;
+noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 3, switches: 0}));
+await settle();
+const pausedSwitch = noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 3, switches: 1}));
+await settle();
+const afterPausedSwitch = listings - beforePausedSwitch;
+
+// 動き出した。止めている間に差し替えられていても、新しいカメラが今のモードを
+// 受け付けなければ繋がらないので、他の合図は出ない。
+const beforeWoke = listings;
+const woke = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 3, switches: 1}));
+await settle();
+const afterWoke = listings - beforeWoke;
+
 // 止めて差し替えて再開するまでが、読みと読みの間で終わった。前後の標本はどちらも
 // 動いていて、命令による停止では reconnects も増えないので、今の状態を比べるだけ
 // では何も変わって見えない。背景のタブでは読む間隔が分単位まで伸びるので、これは
 // 十分あり得る。
 const beforeQuick = listings;
-const quick = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 2}));
+const quick = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 4, switches: 1}));
 await settle();
 const afterQuick = listings - beforeQuick;
 
 // 別のソースへ移り、そこで同名のカメラを差し替えて UVC へ戻した。ソースの切替では
 // reconnects は増えず (status.SetSource は数を触らない)、次に見るまでに繋がって
 // いれば connected も動かないので、他の合図はどれも出ない。
-noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 2, switches: 1});
+noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 4, switches: 2});
 await settle();
 const beforeReturn = listings;
-const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 2, switches: 2});
+const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 4, switches: 3});
 await settle();
 
 // 移って戻るまでが、読みと読みの間で終わった。前後の種別はどちらも uvc で、
 // 切替では切れた回数も増えない。数だけが動く。
 const beforeRound = listings;
-const roundTrip = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 2, switches: 4});
+const roundTrip = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 4, switches: 5});
 await settle();
 const afterRound = listings - beforeRound;
 
-console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforeQuick - beforeResume, quick, afterQuick, returned, afterReturn: beforeRound - beforeReturn, roundTrip, afterRound}));
+console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforePausedSwitch - beforeResume, pausedSwitch, afterPausedSwitch, woke, afterWoke, quick, afterQuick, returned, afterReturn: beforeRound - beforeReturn, roundTrip, afterRound}));
 release();
 `
 	var got struct {
-		First       bool `json:"first"`
-		AfterFirst  int  `json:"afterFirst"`
-		Same        bool `json:"same"`
-		Dropped     bool `json:"dropped"`
-		AfterDrop   int  `json:"afterDrop"`
-		Back        bool `json:"back"`
-		AfterBack   int  `json:"afterBack"`
-		Resumed     bool `json:"resumed"`
-		AfterResume int  `json:"afterResume"`
-		Quick       bool `json:"quick"`
-		AfterQuick  int  `json:"afterQuick"`
-		Returned    bool `json:"returned"`
-		AfterReturn int  `json:"afterReturn"`
-		RoundTrip   bool `json:"roundTrip"`
-		AfterRound  int  `json:"afterRound"`
+		First             bool `json:"first"`
+		AfterFirst        int  `json:"afterFirst"`
+		Same              bool `json:"same"`
+		Dropped           bool `json:"dropped"`
+		AfterDrop         int  `json:"afterDrop"`
+		Back              bool `json:"back"`
+		AfterBack         int  `json:"afterBack"`
+		Resumed           bool `json:"resumed"`
+		AfterResume       int  `json:"afterResume"`
+		PausedSwitch      bool `json:"pausedSwitch"`
+		AfterPausedSwitch int  `json:"afterPausedSwitch"`
+		Woke              bool `json:"woke"`
+		AfterWoke         int  `json:"afterWoke"`
+		Quick             bool `json:"quick"`
+		AfterQuick        int  `json:"afterQuick"`
+		Returned          bool `json:"returned"`
+		AfterReturn       int  `json:"afterReturn"`
+		RoundTrip         bool `json:"roundTrip"`
+		AfterRound        int  `json:"afterRound"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -1269,6 +1292,12 @@ release();
 	}
 	if !got.Resumed || got.AfterResume != 1 {
 		t.Errorf("counted %d times after resuming, want 1 — a swap while paused never disconnects anything", got.AfterResume)
+	}
+	if !got.PausedSwitch || got.AfterPausedSwitch != 1 {
+		t.Errorf("counted %d times after switching sources while paused, want 1", got.AfterPausedSwitch)
+	}
+	if !got.Woke || got.AfterWoke != 1 {
+		t.Errorf("counted %d times after it woke up, want 1 — counting while it was still paused must not spend the pause, because the swap can happen at any point before it wakes", got.AfterWoke)
 	}
 	if !got.Quick || got.AfterQuick != 1 {
 		t.Errorf("counted %d times after a pause that started and ended between two readings, want 1 — comparing only the current state sees nothing", got.AfterQuick)
@@ -1848,6 +1877,66 @@ console.log(JSON.stringify({listings, modesFor: modesFor || "", modes: cameraMod
 	looped := strings.Index(body, "} while (listAgain);")
 	if bumped < 0 || looped < 0 || bumped > looped {
 		t.Error("the generation only advances once the whole run is over, so an answer that lands while the carried-over listing runs is taken as current")
+	}
+}
+
+// 最初の標本が、最初の列挙より後に繋がったものなら、数え直します。
+//
+// 最初の状態が読めなかったり遅れたりしている間に初回の列挙が終わり、その一覧に
+// カメラがまだ載っていなかった場合、ブリッジは「消えたカメラ」の憶えを残します
+// (bridge.forgetModesIfCamerasChanged)。その後で新しい個体が繋がると、最初に届く
+// 標本は既に接続済みで、以後は数も動きません。
+func TestSettingsPageCountsAgainWhenTheFirstReadingArrivedAfterTheListing(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+
+// 初回の列挙が終わる。状態はまだ一度も読めていない。
+await countCameras();
+await settle();
+const afterListing = listings;
+
+// そこへ、既に接続済みの標本が最初に届く。この列挙より前に繋がったのか後に
+// 繋がったのかは、こちらからは決められない。
+const first = noticeCameras(running());
+await settle();
+const afterFirst = listings;
+
+// 二度は数えない。
+noticeCameras(running());
+await settle();
+
+console.log(JSON.stringify({afterListing, first, afterFirst, settled: listings}));
+release();
+`
+	var got struct {
+		AfterListing int  `json:"afterListing"`
+		First        bool `json:"first"`
+		AfterFirst   int  `json:"afterFirst"`
+		Settled      int  `json:"settled"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterListing != 1 {
+		t.Fatalf("%d listings before any reading, want 1", got.AfterListing)
+	}
+	if !got.First || got.AfterFirst != 2 {
+		t.Errorf("counted %d times in total after the first reading, want 2 — that reading may be newer than the listing, and the listing may have been taken while the camera was gone", got.AfterFirst)
+	}
+	if got.Settled != 2 {
+		t.Errorf("counted %d times in total, want 2 — only the first reading is unordered", got.Settled)
 	}
 }
 

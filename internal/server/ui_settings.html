@@ -927,6 +927,18 @@ function noticeCameras(state) {
   if (!before || now.capturing !== "uvc") {
     countedPauses = now.pauses;
     countedSwitches = now.switches;
+    // 最初の標本が、最初の列挙より**後に**繋がったものかもしれません。その列挙は
+    // まだカメラが挿さっていない一覧を見ている可能性があり、そこでは憶えが
+    // 捨てられません (bridge.forgetModesIfCamerasChanged は、消えたカメラの憶えを
+    // 残します)。以後は繋がったままで数も動かないので、誰も気づきません。
+    //
+    // 順番が決められないときだけ数え直します。列挙がまだ走っているなら、こちらの
+    // 標本のほうが先なので待てば済みますし、列挙が一度も無いなら、古くなりようが
+    // ありません。
+    if (!before && now.capturing === "uvc" && now.connected && devicesListed && !listingDevices) {
+      countCameras();
+      return true;
+    }
     return false;
   }
 
@@ -949,7 +961,10 @@ function noticeCameras(state) {
   const adrift = unsettled
     && (countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS);
   if (!changed && !adrift) return false;
-  countedPauses = now.pauses;
+  // 止まっている間は、止められた分を使い切りません。止まったまま数え直す機会
+  // (ソースの切替など) があっても、**差し替えはその後に起こり得ます**。使い切ると、
+  // 動き出したことが合図にならなくなります。
+  if (!now.paused) countedPauses = now.pauses;
   countedSwitches = now.switches;
   countCameras();
   return true;
