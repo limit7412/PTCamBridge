@@ -52,3 +52,32 @@ func TestTrackerWithoutAClassifier(t *testing.T) {
 		t.Errorf("LastErrorKey = %q, want empty with no classifier", snapshot.LastErrorKey)
 	}
 }
+
+// 一時停止は数えます。今の状態だけを載せると、状態を読む側の 2 回の読みの間で
+// 止めて再開まで済ませた操作が見えません。読む間隔は、背景のタブでは分単位まで
+// 伸びます。
+func TestTrackerCountsThePauses(t *testing.T) {
+	tr := New()
+	if got := tr.Snapshot().Pauses; got != 0 {
+		t.Fatalf("pauses = %d before anything happened, want 0", got)
+	}
+
+	tr.SetPaused(true)
+	tr.SetPaused(false)
+	if got := tr.Snapshot().Pauses; got != 1 {
+		t.Errorf("pauses = %d after one pause and resume, want 1", got)
+	}
+
+	tr.SetPaused(true)
+	tr.SetPaused(false)
+	if got := tr.Snapshot().Pauses; got != 2 {
+		t.Errorf("pauses = %d after a second pause, want 2", got)
+	}
+
+	// 同じことを二度命じても状態は動いていないので、数も動かしません。
+	tr.SetPaused(true)
+	tr.SetPaused(true)
+	if got := tr.Snapshot().Pauses; got != 3 {
+		t.Errorf("pauses = %d after being told to pause twice, want 3 — nothing moved the second time", got)
+	}
+}

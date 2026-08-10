@@ -25,6 +25,11 @@ type Snapshot struct {
 	StartedAt      time.Time `json:"started_at"`
 	UptimeSeconds  float64   `json:"uptime_seconds"`
 	Paused         bool      `json:"paused"`
+	// Pauses は、一時停止された回数です。今の状態 (Paused) だけでは、標本と標本の
+	// 間で止めて再開まで済ませた操作が見えません。読む側が 2 秒ごとに見ていても、
+	// 背景のタブでは間隔が分単位まで伸びるので、その間に一時停止して差し替えて
+	// 再開する、というのは十分あり得ます。数なら、何度あっても取りこぼしません。
+	Pauses uint64 `json:"pauses"`
 }
 
 // Tracker は、ソースの接続状態の遷移を記録します。ドライバが報告に使う
@@ -40,6 +45,7 @@ type Tracker struct {
 	connectedSince time.Time
 	startedAt      time.Time
 	paused         bool
+	pauses         uint64
 
 	// classify は、画面側が翻訳すべきエラーに対応するメッセージ名を返します。
 	// 注入にしているのは、どの失敗がそれに当たるかを知っているのはドライバ側
@@ -118,6 +124,11 @@ func (t *Tracker) Disconnected(source string, err error) {
 func (t *Tracker) SetPaused(paused bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// 数えるのは、止まっていなかったものを止めたときだけです。同じことを二度
+	// 命じても状態は動いていないので、数も動かしません。
+	if paused && !t.paused {
+		t.pauses++
+	}
 	t.paused = paused
 	if paused {
 		t.connected = false
@@ -146,5 +157,6 @@ func (t *Tracker) Snapshot() Snapshot {
 		StartedAt:      t.startedAt,
 		UptimeSeconds:  time.Since(t.startedAt).Seconds(),
 		Paused:         t.paused,
+		Pauses:         t.pauses,
 	}
 }

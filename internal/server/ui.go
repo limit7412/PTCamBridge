@@ -104,11 +104,16 @@ type uiState struct {
 	//
 	// State と Source が表示用なのに対して、こちらは読み手が比べるためのものです。
 	// 表示用の文字列は翻訳されるので、それで判断すると言語ごとに違う動きになります。
-	// 設定画面はこの 3 つで「カメラが差し替わったかもしれない」を見ます
+	// 設定画面はこれらで「カメラが差し替わったかもしれない」を見ます
 	// (ui_settings.html の noticeCameras を参照)。
+	//
+	// Pauses は一時停止された回数です。Paused だけだと、読みと読みの間で止めて
+	// 再開まで済ませた操作が見えません — 背景のタブでは読む間隔が分単位まで
+	// 伸びるので、その間に一時停止して差し替えて再開する、というのは十分あり得ます。
 	Capturing string `json:"capturing,omitempty"`
 	Connected bool   `json:"connected"`
 	Paused    bool   `json:"paused"`
+	Pauses    uint64 `json:"pauses"`
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +285,7 @@ func newUIState(p i18n.Printer, snapshot status.Snapshot, frames hub.Stats, ffmp
 		Capturing:  snapshot.Source,
 		Connected:  snapshot.Connected,
 		Paused:     snapshot.Paused,
+		Pauses:     snapshot.Pauses,
 	}
 	if out.LastError == "" {
 		out.LastError = p.S(i18n.UINone)

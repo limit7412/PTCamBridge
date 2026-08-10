@@ -1196,25 +1196,34 @@ const back = noticeCameras(running({reconnects: 2, connected: true}));
 await settle();
 const afterBack = listings;
 
-// 一時停止から戻った。止めている間の差し替えでは、ドライバは命じられて止まって
-// いるので切れたことにならない。まだフレームも来ていない (connected は false の
-// まま) ので、繋がったことも合図にならない。
-noticeCameras(running({reconnects: 2, connected: false, paused: true}));
+// 一時停止して差し替え、再開した。止めている間の差し替えでは、ドライバは命じられて
+// 止まっているので切れたことにならない。まだフレームも来ていない (connected は
+// false のまま) ので、繋がったことも合図にならない。止まっている間は数えない。
+noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 1}));
 await settle();
 const beforeResume = listings;
-const resumed = noticeCameras(running({reconnects: 2, connected: false, paused: false}));
+const resumed = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 1}));
 await settle();
+
+// 止めて差し替えて再開するまでが、読みと読みの間で終わった。前後の標本はどちらも
+// 動いていて、命令による停止では reconnects も増えないので、今の状態を比べるだけ
+// では何も変わって見えない。背景のタブでは読む間隔が分単位まで伸びるので、これは
+// 十分あり得る。
+const beforeQuick = listings;
+const quick = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 2}));
+await settle();
+const afterQuick = listings - beforeQuick;
 
 // 別のソースへ移り、そこで同名のカメラを差し替えて UVC へ戻した。ソースの切替では
 // reconnects は増えず (status.SetSource は数を触らない)、次に見るまでに繋がって
 // いれば connected も動かないので、他の合図はどれも出ない。
-noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false});
+noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 2});
 await settle();
 const beforeReturn = listings;
-const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false});
+const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 2});
 await settle();
 
-console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: listings - beforeResume - (listings - beforeReturn), returned, afterReturn: listings - beforeReturn}));
+console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforeQuick - beforeResume, quick, afterQuick, returned, afterReturn: listings - beforeReturn}));
 release();
 `
 	var got struct {
@@ -1227,6 +1236,8 @@ release();
 		AfterBack   int  `json:"afterBack"`
 		Resumed     bool `json:"resumed"`
 		AfterResume int  `json:"afterResume"`
+		Quick       bool `json:"quick"`
+		AfterQuick  int  `json:"afterQuick"`
 		Returned    bool `json:"returned"`
 		AfterReturn int  `json:"afterReturn"`
 	}
@@ -1249,6 +1260,9 @@ release();
 	}
 	if !got.Resumed || got.AfterResume != 1 {
 		t.Errorf("counted %d times after resuming, want 1 — a swap while paused never disconnects anything", got.AfterResume)
+	}
+	if !got.Quick || got.AfterQuick != 1 {
+		t.Errorf("counted %d times after a pause that started and ended between two readings, want 1 — comparing only the current state sees nothing", got.AfterQuick)
 	}
 	if !got.Returned || got.AfterReturn != 1 {
 		t.Errorf("counted %d times after coming back to UVC, want 1 — switching sources moves neither the counter nor the connection", got.AfterReturn)
@@ -1587,6 +1601,83 @@ release();
 	}
 	if got.After.AskedForModes != 1 {
 		t.Errorf("asked for the modes %d times after the last listing, want 1", got.After.AskedForModes)
+	}
+}
+
+// 列挙を待っているモードの問い合わせも、繰り越した最後の一覧まで待ちます。
+//
+// 待ち始めた時点の約束を掴んだままだと、繰り越しで入れ替わったことに気づけません。
+// 1 本目が解けた時点で訊きに行き、2 本目の列挙と同じカメラを開く ffmpeg が並びます。
+func TestSettingsPageWaitsForTheCarriedOverListingToo(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let askedForModes = 0;
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+  }
+  askedForModes++;
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0}, over);
+
+nodes["uvc-device"].value = "A";
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+
+// 列挙を待つモードの問い合わせ。カメラ名の change/blur から起きる。
+loadCameraModes();
+await settle();
+const waiting = askedForModes;
+
+// 走っている間にもう一度合図。繰り越される。
+noticeCameras(running({reconnects: 3}));
+await settle();
+
+// 1 本目が終わる。掴んだ約束はここで解けるが、まだ訊きに行ってはいけない。
+releaseDevices();
+await settle();
+const between = {listings, askedForModes};
+
+// 2 本目が終わる。ここで初めて訊く。
+releaseDevices();
+await settle();
+const after = askedForModes;
+
+console.log(JSON.stringify({waiting, between, after}));
+release();
+`
+	var got struct {
+		Waiting int `json:"waiting"`
+		Between struct {
+			Listings      int `json:"listings"`
+			AskedForModes int `json:"askedForModes"`
+		} `json:"between"`
+		After int `json:"after"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Waiting != 0 {
+		t.Fatalf("asked for the modes %d times while the first listing was still running, want 0", got.Waiting)
+	}
+	if got.Between.Listings != 2 {
+		t.Errorf("the carried-over listing did not start (%d listings, want 2)", got.Between.Listings)
+	}
+	if got.Between.AskedForModes != 0 {
+		t.Errorf("asked for the modes %d times once the first listing resolved, want 0 — the carried-over listing is still running and would open the same camera", got.Between.AskedForModes)
+	}
+	if got.After != 1 {
+		t.Errorf("asked for the modes %d times after the last listing, want 1", got.After)
 	}
 }
 

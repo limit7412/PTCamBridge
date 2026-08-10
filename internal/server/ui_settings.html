@@ -572,7 +572,20 @@ async function loadCameraModes() {
     // 失敗したとき素性を照らし合わせないので (bridge.forgetModesIfCamerasChanged)、
     // ここで訊くと差し替え前の憶えを受け取り、それを調べ済みとして刻み直します。
     // 理由は上の camera-error に出ているので、ここは黙って引き下がります。
-    if (devicesListed && !(await devicesListed)) {
+    //
+    // 待つのは**最後の一覧**です。繰り越しがあると devicesListed は途中で入れ替わる
+    // ので、掴んだ 1 本を待つだけでは、まだ次の列挙が走っている最中に訊きに行き、
+    // 同じカメラを開く ffmpeg が並びます。しかも途中の一覧が差し替え前のもので
+    // 繰り越した側だけが転んだ場合、世代が進まないので、その答えが有効なものとして
+    // 受理されます。
+    let listed = devicesListed;
+    let ready = true;
+    while (listed) {
+      ready = await listed;
+      if (listed === devicesListed && !listingDevices) break;
+      listed = devicesListed;
+    }
+    if (!ready) {
       sayModes("");
       return;
     }
@@ -748,6 +761,10 @@ let cameras = null;
 let listingDevices = false;
 let listAgain = false;
 let countedAt = null;
+// countedPauses は、最後に数え直したときに見た「止められた回数」。止まっている間は
+// 数えないので、前の標本と比べるだけでは足りません (止まった標本を見た時点で
+// 前の値が追いついてしまい、再開が合図にならなくなります)。
+let countedPauses = 0;
 // countFailed は、最後の数え直しが失敗したかどうか。失敗した一覧は「1 台も無い」
 // とは違うので、成功するまで数え直す理由が残ります。
 let countFailed = false;
@@ -765,8 +782,11 @@ const ADRIFT_RECOUNT_MS = 30000;
 //     必ず一度切れます
 //   - 繋がった。抜いてから挿すまでの間に数え直すと、そこには**まだ新しいカメラが
 //     いません**。切れたことだけを合図にすると、その一覧で終わってしまいます
-//   - 一時停止から戻った。止めている間の差し替えでは、ドライバは命じられて
-//     止まっているので切れたことになりません (status.SetPaused を参照)
+//   - 止められた後、動き出した。止めている間の差し替えでは、ドライバは命じられて
+//     止まっているので切れたことになりません (status.SetPaused を参照)。今の状態
+//     ではなく**止められた回数**を見るのは、読みと読みの間で止めて再開まで済ませた
+//     操作を取りこぼさないためです — 背景のタブでは読む間隔が分単位まで伸びるので、
+//     その間に一時停止して差し替えて再開する、というのは十分あり得ます
 //   - UVC へ入った。別のソースで動かしている間に差し替えて戻した場合、ソースの
 //     切替では数は増えず (status.SetSource は reconnects を触りません)、次に
 //     見るまでに繋がっていれば繋がったことにもなりません
@@ -789,17 +809,24 @@ function noticeCameras(state) {
   const now = {
     capturing: state.capturing || "",
     reconnects: state.reconnects || 0,
+    pauses: state.pauses || 0,
     connected: !!state.connected,
     paused: !!state.paused,
   };
   const before = cameras;
   cameras = now;
-  if (!before || now.capturing !== "uvc") return false;
+  if (!before || now.capturing !== "uvc") {
+    countedPauses = now.pauses;
+    return false;
+  }
 
   const changed = before.capturing !== "uvc"
     || now.reconnects !== before.reconnects
     || (now.connected && !before.connected)
-    || (before.paused && !now.paused);
+    // 止められた回数が、最後に数えたときから動いている。動いていても、止まって
+    // いる間は数えません — 差し替えは再開の前でも後でも起こり得るので、動き出して
+    // から数えれば 1 回で足ります。
+    || (!now.paused && now.pauses !== countedPauses);
   // 数え直す理由が残っている状態。合図を待っていても来ません。
   //
   //   - 繋がらないまま漂っている。切れた時点で繋がっていなければ reconnects は
@@ -812,6 +839,7 @@ function noticeCameras(state) {
   const adrift = unsettled
     && (countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS);
   if (!changed && !adrift) return false;
+  countedPauses = now.pauses;
   countCameras();
   return true;
 }
