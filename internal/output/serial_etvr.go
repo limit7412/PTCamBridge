@@ -47,15 +47,18 @@ const (
 // 座っていることではありません。
 var backoffInitial = 1 * time.Second
 
-// writeStallTimeout は、1 回の Write が返らないまま許される時間です。var なのは、
-// テストがこれを使い切らずに済むようにするためです。
+// writeStallGrace は、1 回の Write に、そのパケットを線に載せるのに最低限かかる
+// 時間へ上乗せして与える猶予です。var なのは、テストがこれを使い切らずに
+// 済むようにするためです。
 //
-// これが要るのは、書き込みに期限を設ける手段が他に無いからです。
+// 期限そのものが要るのは、書き込みに期限を設ける手段が他に無いからです。
 // go.bug.st/serial の Port が持っているのは読み取りのタイムアウトだけで、
 // 相手が読まない仮想ポートへの Write は永久に返らないことがあります。そうなると
 // このアプリケーションは黙って止まり、終了することすらできません。閉じれば Write は
 // 返るので、閉じる仕事を見張り役の goroutine に持たせます。
-var writeStallTimeout = 5 * time.Second
+//
+// 猶予だけを固定にして、期限の残りは速度と長さから計算します (writeAllowance)。
+var writeStallGrace = 5 * time.Second
 
 // writeStallCheck は、見張り役が止まった書き込みを探しに来る間隔です。
 var writeStallCheck = 250 * time.Millisecond
@@ -121,15 +124,18 @@ type Serial struct {
 	// 何が起きるかは、詰まるポートを与えられなければ確かめられません。
 	openPort func(name string, baud int) (serialPort, error)
 
-	// writeStartedAt は、いま走っている Write が始まった時刻 (UnixNano) で、
-	// 何も走っていなければ 0 です。見張り役がこれを読んで、返らなくなった
-	// 書き込みを見つけます。session を書いているのは常に 1 本の goroutine だけ
+	// writeDeadlineAt は、いま走っている Write が終わっていなければならない時刻
+	// (UnixNano) で、何も走っていなければ 0 です。見張り役がこれを読んで、返らなく
+	// なった書き込みを見つけます。session を書いているのは常に 1 本の goroutine だけ
 	// ですが、見張り役が別の goroutine なので atomic です。
+	//
+	// 経過時間ではなく期限を持つのは、許される長さがパケットごとに違うからです
+	// (writeAllowance)。見張り役はパケットを見ないので、比べられる形にして渡します。
 	//
 	// 接続をまたいで持ち越されることはありません。0 に戻すのは Write が返った
 	// 直後で、それは失敗して返ったときも通ります。だから接続の始めに改めて
 	// 消す必要はありません。
-	writeStartedAt atomic.Int64
+	writeDeadlineAt atomic.Int64
 
 	mu    sync.Mutex
 	stats Stats
@@ -179,7 +185,38 @@ func NewSerial(cfg SerialConfig, frames Frames, log *slog.Logger) (*Serial, erro
 // writeInFlight は、いま Write が走っているかどうかを返します。テストのために
 // あります。書き込みが詰まったときの振る舞いは、書き込みが本当に詰まってから
 // でないと確かめられず、それを外から知る手段が他にありません。
-func (s *Serial) writeInFlight() bool { return s.writeStartedAt.Load() != 0 }
+func (s *Serial) writeInFlight() bool { return s.writeDeadlineAt.Load() != 0 }
+
+// writeAllowance は、そのパケット 1 つの書き込みに与える時間です。
+//
+// 固定値にはできません。載せられる上限いっぱいの 65535 バイトは、8N1 の
+// 115200 baud なら線に流すだけで 5.7 秒かかります。57600 baud なら 20 キロバイトの
+// フレームでも 3.5 秒です。固定の 5 秒だと、順調に流れている書き込みを停滞と
+// 読んで毎回ポートを閉じることになり、大きなフレームは 1 枚も届きません。しかも
+// 症状は「延々と再接続する出力」なので、原因が速度の設定にあるとは見えません。
+//
+// そこで「この速度でこの量を送るのに最低限かかる時間」に、詰まりを見分けるための
+// 一定の猶予を足したものを期限にします。**上限は設けません。** 設ければ、遅い速度で
+// まさに同じ誤検出が戻ってきます。期限が長くてもアプリケーションが降りられなく
+// なることはありません。終了は見張り役の ctx の側が受け持っていて、そちらは
+// パケットの長さを見ないからです。
+func (s *Serial) writeAllowance(packet int) time.Duration {
+	return writeStallGrace + wireTime(packet, s.cfg.Baud)
+}
+
+// wireTime は、8N1 でそのバイト数を送り切るのに最低限かかる時間です。1 バイト
+// あたり 10 ビット (スタート 1 + データ 8 + ストップ 1) で数えます。
+//
+// 8N1 を決め打ちにしているのは、このドライバがポートをそう開くからです
+// (serial.Mode の既定)。設定できるのは速度だけなので、他の枠を想定する必要は
+// ありません。
+func wireTime(packet, baud int) time.Duration {
+	if baud <= 0 || packet <= 0 {
+		return 0
+	}
+	const bitsPerByte = 10
+	return time.Duration(float64(packet) * bitsPerByte / float64(baud) * float64(time.Second))
+}
 
 // Stats は、この出力のカウンタのスナップショットを返します。
 func (s *Serial) Stats() Stats {
@@ -253,10 +290,11 @@ func (s *Serial) session(ctx context.Context, ch <-chan core.Frame) error {
 				closer.Close()
 				return
 			case <-ticker.C:
-				at := s.writeStartedAt.Load()
-				if at != 0 && time.Since(time.Unix(0, at)) > writeStallTimeout {
-					s.log.Warn("the serial output is not draining, closing the port",
-						"port", s.cfg.Port, "blocked_for", writeStallTimeout)
+				deadline := s.writeDeadlineAt.Load()
+				if deadline != 0 && time.Now().UnixNano() > deadline {
+					s.log.Warn("the serial output did not finish a write in the time its size and baud rate allow, closing the port",
+						"port", s.cfg.Port, "baud", s.cfg.Baud,
+						"overdue_by", time.Since(time.Unix(0, deadline)).Round(time.Millisecond))
 					closer.Close()
 					return
 				}
@@ -302,9 +340,9 @@ func (s *Serial) session(ctx context.Context, ch <-chan core.Frame) error {
 				continue
 			}
 
-			s.writeStartedAt.Store(time.Now().UnixNano())
+			s.writeDeadlineAt.Store(time.Now().Add(s.writeAllowance(len(packet))).UnixNano())
 			n, err := port.Write(packet)
-			s.writeStartedAt.Store(0)
+			s.writeDeadlineAt.Store(0)
 			switch {
 			case err != nil:
 				// 見張り役がポートを閉じたのなら、Write はそのせいで失敗します。

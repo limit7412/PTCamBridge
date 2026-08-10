@@ -22,6 +22,9 @@ type fakePort struct {
 	// block が nil でない間、Write はそれが閉じられるまで返りません。相手が
 	// 読まない仮想ポートを表しています。
 	block chan struct{}
+	// delay は、Write が返るまでにかかる時間です。詰まっているのではなく、
+	// 単に線が遅いポートを表します。閉じられれば途中でも返ります。
+	delay time.Duration
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -41,6 +44,15 @@ func (p *fakePort) Write(b []byte) (int, error) {
 		case <-block:
 		case <-p.closed:
 			return 0, errors.New("fake port: closed while writing")
+		}
+	}
+	if p.delay > 0 {
+		timer := time.NewTimer(p.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-p.closed:
+			return 0, errors.New("fake port: closed part-way through a slow write")
 		}
 	}
 	select {
@@ -385,11 +397,11 @@ func TestTheSerialOutputHoldsOneSubscriptionAcrossReconnects(t *testing.T) {
 	}
 }
 
-func shortenStall(t *testing.T, timeout, check time.Duration) {
+func shortenStall(t *testing.T, grace, check time.Duration) {
 	t.Helper()
-	oldTimeout, oldCheck := writeStallTimeout, writeStallCheck
-	writeStallTimeout, writeStallCheck = timeout, check
-	t.Cleanup(func() { writeStallTimeout, writeStallCheck = oldTimeout, oldCheck })
+	oldGrace, oldCheck := writeStallGrace, writeStallCheck
+	writeStallGrace, writeStallCheck = grace, check
+	t.Cleanup(func() { writeStallGrace, writeStallCheck = oldGrace, oldCheck })
 }
 
 func shortenBackoff(t *testing.T, d time.Duration) {
@@ -397,4 +409,94 @@ func shortenBackoff(t *testing.T, d time.Duration) {
 	old := backoffInitial
 	backoffInitial = d
 	t.Cleanup(func() { backoffInitial = old })
+}
+
+// 期限はパケットの長さと速度から決めます。固定値だと、上限いっぱいの
+// 65535 バイトは 115200 baud で 5.7 秒かかるので、順調に流れている書き込みを
+// 毎回停滞と読んでポートを閉じ、大きなフレームは 1 枚も届きません。
+func TestTheWriteAllowanceGrowsWithThePacketAndTheBaudRate(t *testing.T) {
+	// Codex が挙げた組み合わせそのもの。上限いっぱいのパケットを 115200 baud で。
+	s, err := NewSerial(SerialConfig{Port: "COM7", Baud: 115200}, hub.New(), discardLogger())
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	const biggest = 0xFFFF + 6 // ヘッダー 4 + 長さ 2 + ペイロード上限
+	wire := wireTime(biggest, 115200)
+	if wire < 5*time.Second {
+		t.Fatalf("wireTime for the largest packet at 115200 baud = %s, want the test to be exercising a case over 5s", wire)
+	}
+	if got := s.writeAllowance(biggest); got <= wire {
+		t.Errorf("writeAllowance = %s for a packet that needs %s on the wire, want more than the wire time", got, wire)
+	}
+
+	// 速いポートでは、期限が猶予から大きく離れてはいけません。離れると、
+	// 本当に詰まったポートを見つけるのが遅くなります。
+	fast, err := NewSerial(SerialConfig{Port: "COM7", Baud: DefaultBaud}, hub.New(), discardLogger())
+	if err != nil {
+		t.Fatalf("NewSerial: %v", err)
+	}
+	if got := fast.writeAllowance(biggest); got > writeStallGrace+time.Second {
+		t.Errorf("writeAllowance = %s at %d baud, want it close to the grace of %s", got, DefaultBaud, writeStallGrace)
+	}
+}
+
+// 同じ「遅いが進んでいる」書き込みが、速いポートでは停滞、遅いポートでは正常と
+// 判定されなければなりません。差を作るのは baud だけです。
+func TestASlowButProgressingWriteSurvivesAtASlowBaudRate(t *testing.T) {
+	const writeTakes = 300 * time.Millisecond
+	shortenStall(t, 50*time.Millisecond, 10*time.Millisecond)
+	shortenBackoff(t, 10*time.Millisecond)
+
+	run := func(t *testing.T, baud int) (closed bool, wrote bool) {
+		t.Helper()
+		frames := hub.New()
+		port := newFakePort()
+		port.delay = writeTakes
+
+		s, err := NewSerial(SerialConfig{Port: "COM-test", Baud: baud}, frames, discardLogger())
+		if err != nil {
+			t.Fatalf("NewSerial: %v", err)
+		}
+		opened := make(chan struct{}, 4)
+		s.openPort = func(string, int) (serialPort, error) {
+			select {
+			case opened <- struct{}{}:
+			default:
+			}
+			return port, nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { defer close(done); _ = s.Run(ctx) }()
+
+		waitFor(t, 2*time.Second, "the port to open", func() bool { return s.Stats().Open })
+		frames.Publish(core.Frame{Data: testJPEG(64)})
+
+		// 書き込みが終わるはずの時刻を過ぎるまで待って、結果を見ます。
+		deadline := time.Now().Add(writeTakes + time.Second)
+		for time.Now().Before(deadline) {
+			if port.isClosed() || len(port.packets()) > 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		closed, wrote = port.isClosed(), len(port.packets()) > 0
+		cancel()
+		<-done
+		return closed, wrote
+	}
+
+	// 3000000 baud では、70 バイト程度のパケットに 300 ミリ秒もかかるはずが
+	// ありません。猶予 50 ミリ秒を大きく超えるので、詰まったと判断します。
+	if closed, wrote := run(t, DefaultBaud); !closed || wrote {
+		t.Errorf("at %d baud the 300ms write was closed=%v written=%v, want it cut off as a stall", DefaultBaud, closed, wrote)
+	}
+
+	// 2000 baud なら 70 バイトで 350 ミリ秒かかるのが当たり前なので、
+	// 同じ書き込みが通らなければなりません。
+	if closed, wrote := run(t, 2000); closed || !wrote {
+		t.Errorf("at 2000 baud the same 300ms write was closed=%v written=%v, want it allowed through", closed, wrote)
+	}
 }
