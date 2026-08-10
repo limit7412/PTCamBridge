@@ -23,6 +23,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/config"
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/server"
 	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
@@ -4070,24 +4071,133 @@ func TestCameraModesAnswersUnderTheOtherNameOfTheSameCamera(t *testing.T) {
 	}
 }
 
-// 遅れて戻った古い一覧で、顔ぶれを巻き戻してはいけない。
+// 重なった要求は、1 本の列挙にまとめなければならない。
 //
-// 一覧は数秒かかることがあり、要求は重なる (トレイと設定画面、タブが 2 つ)。
-// 戻る順は始めた順とは限らない。巻き戻すと、差し替えた直後のカメラの素性が
-// 前のものに戻り、動いているカメラを「別のカメラ」と答えるようになる。
-func TestDevicesDoesNotRollTheCamerasBackToAnOlderListing(t *testing.T) {
+// 読む側は 1 つではない (設定画面、診断画面、トレイ、差し替えの合図からの数え直し)。
+// 設定画面を 2 つのタブで開いていれば、どちらも同じ合図を同じ瞬間に見る。画面側の
+// 抑止はそのページの中だけなので、まとめられるのは要求を受ける側だけ。Windows の
+// 列挙は ffmpeg を起こすので、遅ければ 1 回 15 秒かかる。
+func TestDevicesRunsOneListingForOverlappingRequests(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	var calls atomic.Int64
+	prev := listDevices
+	listDevices = func(context.Context, string) ([]source.Device, error) {
+		calls.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+
+	const callers = 3
+	answers := make(chan server.Devices, callers)
+	var wg sync.WaitGroup
+	// 1 本目が走り出してから重ねる。走る前に並べると、まとめられたのか
+	// たまたま直列に並んだのかを区別できない。listDevices まで来ていれば
+	// 登録は済んでいる (listCamerasOnce は登録してから goroutine を起こす)。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		answers <- b.Devices(context.Background())
+	}()
+	<-started
+	for range callers - 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			answers <- b.Devices(context.Background())
+		}()
+	}
+	// 相乗りが登録されるのを待つ。ここで待たずに解くと、1 本目が終わって登録が
+	// 解けた後に後続が来ることがあり、まとめていなくても 1 本に見える。
+	waitFor(t, 2*time.Second, "the overlapping requests to join the listing", func() bool {
+		return b.scanWaitersForTest() == callers-1
+	})
+
+	close(release)
+	wg.Wait()
+	close(answers)
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("ffmpeg ran %d times for %d overlapping requests, want 1", got, callers)
+	}
+	for devices := range answers {
+		if devices.CameraError != "" {
+			t.Fatalf("Devices: %s", devices.CameraError)
+		}
+		if len(devices.Cameras) != 1 || devices.Cameras[0].Alternative != "@device_pnp_old" {
+			t.Errorf("cameras = %v, want everyone to share the one listing", devices.Cameras)
+		}
+	}
+}
+
+// 相乗りした要求の 1 本が去っても、走っている列挙を止めてはいけない。
+//
+// 止めれば、同じ答えを待っている他の要求まで巻き添えになる。しかもこの列挙は
+// 顔ぶれの照らし合わせも兼ねていて、その成果は待っている人だけのものではない。
+func TestDevicesKeepsListingWhenOneRequestGivesUp(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	prev := listDevices
+	listDevices = func(ctx context.Context, _ string) ([]source.Device, error) {
+		once.Do(func() { close(started) })
+		select {
+		case <-release:
+			return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	t.Cleanup(func() { listDevices = prev })
+
+	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
+
+	stayed := make(chan server.Devices, 1)
+	go func() { stayed <- b.Devices(context.Background()) }()
+	<-started
+
+	// 2 本目は相乗りしてから諦める。1 本目が listDevices まで来ている以上、
+	// 走っている列挙は既に登録済みなので、後から来たものは必ず相乗りする。
+	leaving, giveUp := context.WithCancel(context.Background())
+	left := make(chan server.Devices, 1)
+	go func() { left <- b.Devices(leaving) }()
+	waitFor(t, 2*time.Second, "the second request to join the listing", func() bool {
+		return b.scanWaitersForTest() == 1
+	})
+	giveUp()
+
+	if devices := <-left; devices.CameraError == "" {
+		t.Error("the request that gave up reported no error, so it waited for something it no longer needed")
+	}
+
+	close(release)
+	devices := <-stayed
+	if devices.CameraError != "" {
+		t.Fatalf("the request that stayed lost its answer: %s", devices.CameraError)
+	}
+	if len(devices.Cameras) != 1 {
+		t.Errorf("cameras = %v, want the listing to have finished for the caller that stayed", devices.Cameras)
+	}
+}
+
+// 顔ぶれを反映するのは、いつでも**最後に終わった列挙**でなければならない。
+//
+// 反映を登録の解除と同じ区間でやらないと、次の列挙が先に反映を済ませているところへ
+// 古い顔ぶれを上書きできる。差し替えた直後にそれが起きると、素性が前のカメラへ
+// 巻き戻り、動いているカメラを「別のカメラ」と答えるようになる。
+func TestDevicesReflectsTheNewestListing(t *testing.T) {
 	lister := &fakeModeLister{modes: []source.Mode{{MinSize: "640x480", MaxSize: "640x480"}}}
 	lister.install(t)
 
-	release := make(chan struct{})
-	slowStarted := make(chan struct{})
-	var started sync.Once
 	var calls atomic.Int64
 	prev := listDevices
 	listDevices = func(context.Context, string) ([]source.Device, error) {
 		if calls.Add(1) == 1 {
-			started.Do(func() { close(slowStarted) })
-			<-release
 			return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_old"}}, nil
 		}
 		return []source.Device{{Name: "Bigeye", Alternative: "@device_pnp_new"}}, nil
@@ -4096,18 +4206,8 @@ func TestDevicesDoesNotRollTheCamerasBackToAnOlderListing(t *testing.T) {
 
 	b := New(uvcConfig("Bigeye"), "", hub.New(), status.New(), discardLogger())
 
-	slow := make(chan struct{})
-	go func() {
-		defer close(slow)
-		b.Devices(context.Background())
-	}()
-	<-slowStarted
-
-	// 後から始めた一覧が先に戻る。
 	b.Devices(context.Background())
-
-	close(release)
-	<-slow
+	b.Devices(context.Background())
 
 	// 新しい代替名は、動いているカメラと同じ 1 台を指していなければならない。
 	// 巻き戻っていれば、それは知らない名前になり、開きに行ってしまう。

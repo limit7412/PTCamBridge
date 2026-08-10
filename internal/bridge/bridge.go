@@ -117,11 +117,10 @@ type Bridge struct {
 	modesMu    sync.Mutex
 	modes      map[string]modeMemory
 	identities map[string][]string
-	// countedListing は、いま反映されているデバイス一覧の札です。遅れて戻った
-	// 古い一覧に巻き戻されないために持ちます。Devices を参照。
-	countedListing uint64
-	nextListing    uint64
-	listing        map[string]*modeLookup
+	// scan は、今走っているカメラの列挙です。要求をまたいで 1 本にまとめます。
+	// Devices を参照。
+	scan    *deviceScan
+	listing map[string]*modeLookup
 	// listingWG は走っている列挙です。Stop が終わりを待ちます。stopped は、その
 	// 待ちが済んだ後です — 以降は新しい列挙を始めません。
 	listingWG      sync.WaitGroup
@@ -212,6 +211,20 @@ type modeLookup struct {
 	// 数えます。
 	waiting int
 	modes   []source.Mode
+	err     error
+}
+
+// deviceScan は、走っているカメラの列挙 1 本と、その答えを待っている側への
+// 受け渡しです。cameras と err は done を閉じる前に書き、閉じた後は読むだけです。
+type deviceScan struct {
+	done chan struct{}
+	// cancel は、この列挙を諦めさせます。使うのは終了のときだけです — 要求 1 本が
+	// 去っただけでは使いません。listCamerasOnce を参照。
+	cancel context.CancelFunc
+	// waiting は、この 1 本の答えを待っている呼び出しの数です。modesMu の下で
+	// 数えます。
+	waiting int
+	cameras []source.Device
 	err     error
 }
 
@@ -328,6 +341,9 @@ func (b *Bridge) stopLookups() {
 	// 印を立てるのは待つ前です。待っている間に始まった列挙は、この Wait では
 	// 拾えません。拾えないものを止める唯一の方法は、始めさせないことです。
 	b.lookupsStopped = true
+	if b.scan != nil {
+		b.scan.cancel()
+	}
 	for _, call := range b.listing {
 		call.cancel()
 	}
@@ -960,22 +976,10 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	var devices server.Devices
 
-	// 始めた順に札を取ります。列挙は数秒かかることがあり、要求は重なります
-	// (トレイと設定画面、タブが 2 つ、など)。戻る順は始めた順とは限らないので、
-	// 札が無いと、遅れて戻った古い一覧が新しい顔ぶれを上書きします。差し替えた
-	// 直後にそれが起きると、素性が前のカメラへ巻き戻り、動いているカメラを
-	// 「別のカメラ」と答えるようになります。
-	started := b.nextDeviceListing()
-
-	cameras, err := listDevices(ctx, b.Snapshot().Source.UVC.FFmpegPath)
+	cameras, err := b.listCamerasOnce(ctx)
 	if err != nil {
 		b.log.Warn("could not list capture devices", "error", err)
 		devices.CameraError = err.Error()
-	} else {
-		// 列挙できたときだけ照らし合わせる。失敗した一覧は「1 台も無い」とは
-		// 違うので、それを顔ぶれの変化として読むと、ffmpeg が一度でも転んだ
-		// 拍子に憶えを捨てることになる。
-		b.forgetModesIfCamerasChanged(started, cameras)
 	}
 	devices.Cameras = cameras
 
@@ -987,6 +991,91 @@ func (b *Bridge) Devices(ctx context.Context) server.Devices {
 	devices.SerialPorts = ports
 
 	return devices
+}
+
+// listCamerasOnce は、カメラの列挙を要求をまたいで 1 本にまとめます。走っている
+// ものがあれば、新しい要求はその答えを待って同じものを受け取ります。
+//
+// 読む側は 1 つではありません — 設定画面、診断画面、トレイのメニュー、そして
+// 「カメラが差し替わったかもしれない」合図からの数え直し。**設定画面を 2 つの
+// タブで開いていると、どちらも同じ合図を同じ瞬間に見ます。** 画面側の抑止は
+// そのページの中の変数なので、タブをまたいでは効きません。まとめられるのは要求を
+// 受ける側だけです。Windows の列挙は ffmpeg を起こすので、遅ければ 1 回 15 秒
+// かかります。
+//
+// まとめるのはカメラの列挙だけです。シリアルポートの列挙は ffmpeg を起こさず、
+// 失敗の仕方も独立しています (Devices を参照)。
+//
+// **たった今終わった列挙の答えを使い回すことはしません。** 走っている間だけ
+// まとめます。使い回すと、差し替えの直後に来た数え直しが差し替え前の顔ぶれを
+// 受け取り、それは数え直しがいちばん要る瞬間です。
+func (b *Bridge) listCamerasOnce(ctx context.Context) ([]source.Device, error) {
+	b.modesMu.Lock()
+	if b.lookupsStopped {
+		b.modesMu.Unlock()
+		return nil, errors.New("uvc: PTCamBridge is shutting down")
+	}
+	if scan := b.scan; scan != nil {
+		scan.waiting++
+		b.modesMu.Unlock()
+		return awaitDevices(ctx, scan)
+	}
+	// 列挙は、始めた要求のものではありません。始めたタブが閉じただけで止めると、
+	// 同じ答えを待っている他の要求まで巻き添えになります。しかもこの列挙は顔ぶれの
+	// 照らし合わせ (forgetModesIfCamerasChanged) も兼ねていて、その成果は待っている
+	// 人だけのものではありません。だから要求の期限からは切り離し、代わりにこの
+	// アプリケーションの生存期間に結びます。
+	lifetime := context.Background()
+	if lt := b.lifetime.Load(); lt != nil {
+		lifetime = *lt
+	}
+	runCtx, cancel := context.WithCancel(lifetime)
+
+	scan := &deviceScan{done: make(chan struct{}), cancel: cancel}
+	b.scan = scan
+	// 数えるのは登録と同じロックの下です。解いた後に足すと、その隙間に入った
+	// Stop が「走っているものは無い」と見て待ち終え、その後で列挙が始まります。
+	b.listingWG.Add(1)
+	b.modesMu.Unlock()
+
+	ffmpegPath := b.Snapshot().Source.UVC.FFmpegPath
+	go func() {
+		defer b.listingWG.Done()
+		defer cancel()
+		cameras, err := listDevices(runCtx, ffmpegPath)
+		b.modesMu.Lock()
+		b.scan = nil
+		if err == nil {
+			// 反映するのは、登録を解くのと**同じロックの下**です。解いてから
+			// 反映すると、その隙間に始まった次の列挙が先に反映を済ませている
+			// ことがあり、そこへ古い顔ぶれを上書きします。差し替えた直後に
+			// それが起きると、素性が前のカメラへ巻き戻り、動いているカメラを
+			// 「別のカメラ」と答えるようになります。
+			//
+			// 列挙できたときだけ照らし合わせます。失敗した一覧は「1 台も無い」
+			// とは違うので、それを顔ぶれの変化として読むと、ffmpeg が一度でも
+			// 転んだ拍子に憶えを捨てることになります。
+			b.forgetModesIfCamerasChangedLocked(cameras)
+		}
+		b.modesMu.Unlock()
+		scan.cameras, scan.err = cameras, err
+		close(scan.done)
+	}()
+
+	return awaitDevices(ctx, scan)
+}
+
+// awaitDevices は、走っている列挙の答えを待ちます。
+//
+// 写しを渡すのは、待っていた全員が同じ 1 本を書き換え合わないためです。呼び出し側の
+// 要求が先に終わればそちらを返します。列挙は止めません。
+func awaitDevices(ctx context.Context, scan *deviceScan) ([]source.Device, error) {
+	select {
+	case <-scan.done:
+		return slices.Clone(scan.cameras), scan.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // listModes は差し替えられるようにしてあります。本物は Windows でしか答えず
@@ -1263,15 +1352,6 @@ func (b *Bridge) cameraChangedLocked(device, started string) bool {
 	return started != "" && b.identityOfLocked(device) != started
 }
 
-// nextDeviceListing は、これから始めるデバイス一覧の札を配ります。大きいほど
-// 新しく、遅れて戻った古い一覧はこれで見分けます。
-func (b *Bridge) nextDeviceListing() uint64 {
-	b.modesMu.Lock()
-	defer b.modesMu.Unlock()
-	b.nextListing++
-	return b.nextListing
-}
-
 // forgetModesIfCamerasChanged は、素性の変わったカメラの憶えだけを捨てます。
 //
 // モードが変わらないのは同じ 1 台についてだけです。憶えの鍵は名前ですが、名前は
@@ -1286,7 +1366,9 @@ func (b *Bridge) nextDeviceListing() uint64 {
 // 捨てるのは素性が変わったものだけです。顔ぶれ全体で一致を見ると、無関係な
 // カメラを 1 台挿しただけで全部消えます。そのとき今キャプチャしているカメラは
 // もう調べ直せないので、正しかった答えを二度と出せなくなります。
-func (b *Bridge) forgetModesIfCamerasChanged(started uint64, cameras []source.Device) {
+// 呼び出し側が modesMu を保持します。列挙の登録を解くのと同じ区間で反映しないと、
+// 次の列挙に追い越されます (listCamerasOnce を参照)。
+func (b *Bridge) forgetModesIfCamerasChangedLocked(cameras []source.Device) {
 	// 名前でも "@device_pnp_..." でも引けるようにします。画面はどちらでも
 	// 訊けるので、憶えの鍵もどちらにもなり得ます。
 	//
@@ -1307,14 +1389,6 @@ func (b *Bridge) forgetModesIfCamerasChanged(started uint64, cameras []source.De
 		}
 	}
 
-	b.modesMu.Lock()
-	defer b.modesMu.Unlock()
-	// 自分より後に始まった一覧が先に反映されていれば、こちらは古い。捨てます。
-	if started < b.countedListing {
-		b.log.Debug("a newer device listing already landed, not rolling the cameras back")
-		return
-	}
-	b.countedListing = started
 	b.identities = identities
 	for key, entry := range b.modes {
 		now, listed := b.identityOfLocked(key), len(identities[key]) > 0
