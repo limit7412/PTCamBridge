@@ -610,9 +610,9 @@ let modesFor = null;
 // devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
 // これを待ちます。初期化を参照。
 let devicesListed = null;
-// countedTimes は、カメラの顔ぶれを数え直せた回数。走っている問い合わせが、
+// cameraGeneration は、カメラについて知っていることの世代。走っている問い合わせが、
 // 数え直しをまたいだかどうかを見分けるために使います。
-let countedTimes = 0;
+let cameraGeneration = 0;
 const modesLoading = new Set();
 let cameraModes = [];
 
@@ -629,14 +629,20 @@ async function loadCameraModes() {
   // 画面を開いただけで、使ってもいないカメラを開いて他のアプリと取り合うことに
   // なる。ソースを UVC に変えた時点で改めて訊く。
   if (chosenSource() !== "uvc") {
-    // 憶えは持ち越しません。**離れている間に差し替えられるかもしれない**からです。
-    // 持ち越すと、戻ったときに名前が同じなので下の `device === modesFor` が成立し、
-    // 差し替え前の候補をそのまま使わせてしまいます — 新しいカメラが持っていない
-    // 組み合わせを選んで保存でき、UVC の起動がそこで転びます。
+    // 知っていることは持ち越しません。**離れている間に差し替えられるかもしれない**
+    // からです。持ち越すと、戻ったときに名前が同じなので下の `device === modesFor`
+    // が成立し、差し替え前の候補をそのまま使わせてしまいます — 新しいカメラが
+    // 持っていない組み合わせを選んで保存でき、UVC の起動がそこで転びます。
+    //
+    // **走っている問い合わせも同じです。** 世代を進めて無効にしないと、戻ったときに
+    // 名前もソースも世代も揃ってしまい、差し替え前の答えが採り込まれます (戻った
+    // 時点の訊き直しは modesLoading に阻まれるので、それが最後の答えになります)。
+    // 捨てた側は、印を下ろした後に訊き直します。
     //
     // ここで数え直す必要はありません。UVC で動いていないならカメラは掴まれて
     // いないので、戻って訊けばブリッジがそれを開いて本当のモードを返します
     // (bridge.CameraModes)。候補欄は、戻ったときにこの関数が作り直します。
+    cameraGeneration++;
     modesFor = null;
     cameraModes = [];
     // 隠れた入力欄もフォームの検証を受けます。UVC の欄に拒否を残したまま
@@ -676,7 +682,7 @@ async function loadCameraModes() {
   modesLoading.add(device);
   // この問い合わせが立った時点の世代。答えが返る頃にこれが古くなっていたら、
   // 数え直しをまたいだということです。
-  const generation = countedTimes;
+  const generation = cameraGeneration;
   try {
     // 個体の照合が先。待つのは最初の一覧が終わるまでで、以降は素通りします。
     //
@@ -707,7 +713,7 @@ async function loadCameraModes() {
     // 世代もここで見ます。待っている間に数え直しが終わっていれば、この問い合わせは
     // 既に古い — 送っても答えは下で捨てられ、finally から訊き直すことになるので、
     // 15 秒の列挙を 2 回直列に走らせるだけです。送る前にやめます。
-    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device || generation !== countedTimes) return;
+    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device || generation !== cameraGeneration) return;
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
     const found = await response.json();
@@ -719,7 +725,7 @@ async function loadCameraModes() {
     // 世代も見る。名前は差し替えても変わらないので、**数え直しをまたいだ答えは
     // 名前が合っていても差し替え前のもの**。採り込むと、それを調べ済みとして
     // 刻み直すことになる。捨てた分は下で訊き直します。
-    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim() || generation !== countedTimes) return;
+    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim() || generation !== cameraGeneration) return;
 
     cameraModes = found.modes || [];
     if (found.error) {
@@ -733,7 +739,7 @@ async function loadCameraModes() {
     // 成功の側と同じ判定。古い要求が転んだからといって、今のカメラについて
     // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
     // B の候補は次に入力の合図が来るまで戻らない。
-    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim() || generation !== countedTimes) return;
+    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim() || generation !== cameraGeneration) return;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {
@@ -741,7 +747,7 @@ async function loadCameraModes() {
     // 数え直しをまたいでいたら、その最中に来た訊き直しは「もう調べている」と
     // 見なされて帰っています。捨てただけで終わると、次に様子が動くまで候補が
     // 戻りません。印を下ろしたここで、改めて訊きに行きます。
-    if (generation !== countedTimes) loadCameraModes();
+    if (generation !== cameraGeneration) loadCameraModes();
   }
   refreshModeChoices();
 }
@@ -1023,7 +1029,7 @@ async function countCameras() {
         // ので、これより前に立った問い合わせの答えは、もう差し替え前のものです。
         // ループを抜けるまで待つと、繰り越しが走っている間に届いた答えが、今の
         // 世代のものとして受理されます。
-        countedTimes++;
+        cameraGeneration++;
         // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
         modesFor = null;
         dropped = true;

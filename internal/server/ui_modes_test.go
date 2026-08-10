@@ -1896,7 +1896,7 @@ console.log(JSON.stringify({listings, modesFor: modesFor || "", modes: cameraMod
 	// 覆い隠すため) — 順序で押さえます。数えられた瞬間に進めないと、繰り越しが
 	// 走っている間に届いた答えが、いったん今の世代のものとして受理されます。
 	body := settingsFunction(t, "async function countCameras() {")
-	bumped := strings.Index(body, "countedTimes++")
+	bumped := strings.Index(body, "cameraGeneration++")
 	looped := strings.Index(body, "} while (listAgain);")
 	if bumped < 0 || looped < 0 || bumped > looped {
 		t.Error("the generation only advances once the whole run is over, so an answer that lands while the carried-over listing runs is taken as current")
@@ -2096,6 +2096,66 @@ console.log(JSON.stringify({afterFirst, afterLeaving, askedAfterReturn: asked, m
 	}
 }
 
+// UVC を離れたら、走っている問い合わせの答えも捨てます。
+//
+// 応答を待っている間に別のソースへ移り、カメラを交換してから戻ると、名前もソースも
+// 揃うので、そのままでは差し替え前の答えが採り込まれます。戻った時点の訊き直しは
+// 「もう調べている」と見なされて帰るので、それが最後の答えになります。
+func TestSettingsPageDropsTheAnswerItWasWaitingForWhenItLeavesUVC(t *testing.T) {
+	harness := modesHarness + `
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+// A を調べ始める。答えはまだ返らない。
+nodes["uvc-device"].value = "A";
+loadCameraModes();
+await settle();
+const askedFirst = asked;
+
+// 別のソースへ移り、また UVC へ戻る。答えはまだ返っていない。
+sourceType = "serial";
+await loadCameraModes();
+await settle();
+sourceType = "uvc";
+loadCameraModes();
+await settle();
+
+// そこへ、離れる前に立った答えが届く。
+release();
+await settle();
+const staleKept = modesFor || "";
+const askedAgain = asked;
+
+// 訊き直しに答える。
+release();
+await settle();
+
+console.log(JSON.stringify({askedFirst, staleKept, askedAgain, modesFor: modesFor || ""}));
+`
+	var got struct {
+		AskedFirst int    `json:"askedFirst"`
+		StaleKept  string `json:"staleKept"`
+		AskedAgain int    `json:"askedAgain"`
+		ModesFor   string `json:"modesFor"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AskedFirst != 1 {
+		t.Fatalf("asked for the modes %d times before leaving, want 1", got.AskedFirst)
+	}
+	if got.StaleKept != "" {
+		t.Errorf("modesFor = %q from an answer that was already in flight when the page left UVC, want it dropped — the camera can be swapped while the page is looking elsewhere", got.StaleKept)
+	}
+	if got.AskedAgain != 2 {
+		t.Errorf("asked %d times in total after dropping it, want 2 — the lookup that came back on return is turned away by the loading mark, so this one has to ask again", got.AskedAgain)
+	}
+	if got.ModesFor != "A" {
+		t.Errorf("modesFor = %q after the fresh answer came back, want the camera recorded", got.ModesFor)
+	}
+}
+
 // 数えられなかったら、合図を待たずに数え直します。
 //
 // 列挙が一度転ぶと、ブリッジは憶えを捨てず、その一覧を待っているモードの問い合わせも
@@ -2236,7 +2296,7 @@ console.log(JSON.stringify({askedFirst, staleKept, askedAgain, modesFor: modesFo
 	// 訊き直すことになるので、15 秒の列挙を 2 回直列に走らせるだけ。
 	body := settingsFunction(t, "async function loadCameraModes() {")
 	sending := strings.Index(body, `fetch("/api/v1/camera-modes`)
-	checked := strings.LastIndex(body[:max(sending, 0)], "generation !== countedTimes")
+	checked := strings.LastIndex(body[:max(sending, 0)], "generation !== cameraGeneration")
 	if sending < 0 || checked < 0 {
 		t.Error("nothing checks, before sending, whether the cameras were counted again while this lookup waited — the request is sent only to have its answer thrown away")
 	}
