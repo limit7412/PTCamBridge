@@ -676,8 +676,8 @@ func ifMatch(headers []string) []string {
 		if strings.HasPrefix(tag, "W/") {
 			continue
 		}
-		if unquoted, err := strconv.Unquote(tag); err == nil {
-			tokens = append(tokens, unquoted)
+		if opaque, ok := opaqueTag(tag); ok {
+			tokens = append(tokens, opaque)
 		}
 	}
 	// 1 つも読めなくても、条件が無かったことにはしません。どの札とも一致しない
@@ -686,6 +686,29 @@ func ifMatch(headers []string) []string {
 		return []string{header}
 	}
 	return tokens
+}
+
+// opaqueTag は、entity-tag の中身を取り出します。取り出せなければ ok が false です。
+//
+// 中身は Go の文字列リテラルではありません。二重引用符で挟まれた**不透明なバイト列
+// そのもの**で、エスケープはありません (RFC 9110 の etagc: %x21 / %x23-7E / obs-text)。
+// strconv.Unquote に通すと "\x61bc" が abc になり、**書き方の違う別の札が、今の札に
+// 化けます** — 強い比較のはずが、2 つの違うものを同じものとして通してしまいます。
+// バッククォートで挟んだものも Go としては読めてしまいますが、entity-tag では
+// ありません。
+func opaqueTag(tag string) (string, bool) {
+	if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+		return "", false
+	}
+	inside := tag[1 : len(tag)-1]
+	for i := 0; i < len(inside); i++ {
+		switch c := inside[i]; {
+		case c == 0x21, c >= 0x23 && c <= 0x7E, c >= 0x80:
+		default:
+			return "", false
+		}
+	}
+	return inside, true
 }
 
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {

@@ -1585,6 +1585,37 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		}
 	})
 
+	// entity-tag の中身は Go の文字列リテラルではなく、不透明なバイト列そのもの。
+	// エスケープを展開すると、書き方の違う別の札が今の札に化ける。
+	t.Run("a version written with escapes is a different version", func(t *testing.T) {
+		ctrl.applied = false
+		// 先頭の 1 文字だけを \xNN で書いた札。Go の文字列としては今の札と同じに
+		// なるが、entity-tag としては別物。
+		escaped := fmt.Sprintf(`"\x%02x%s"`, current[0], current[1:])
+		resp := put(t, escaped)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d for %s, want 412: %s", resp.StatusCode, escaped, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on a tag that only matches once Go's escapes are expanded, which entity-tags do not have")
+		}
+	})
+
+	// 引用符で挟まれていないものは entity-tag ではない。Go の文字列としては
+	// 読めても通してはいけない。
+	t.Run("a version in backquotes is not a version", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, "`"+current+"`")
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on a Go raw string literal, which is not an entity-tag")
+		}
+	})
+
 	// 読めない条件は落とさない。落として「条件なし」に変えると、競合を防いだ
 	// つもりの要求が、防がないまま通る。どの札とも一致しないものとして断る。
 	t.Run("an unreadable condition still refuses", func(t *testing.T) {
