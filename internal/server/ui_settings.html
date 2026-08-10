@@ -635,6 +635,9 @@ let modesFor = null;
 // listedNames は、最後に数えられた一覧が持っていた名前 (フレンドリ名と
 // "@device_pnp_..." の両方) を小文字で。数えられていなければ null。
 let listedNames = null;
+// listedHere は、その名前が最後に数えた一覧に居るか。一度も数えられていなければ
+// 誰も否定できないので、居ることにします。
+const listedHere = (device) => !listedNames || listedNames.has(device.toLowerCase());
 // devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
 // これを待ちます。初期化を参照。
 let devicesListed = null;
@@ -742,6 +745,17 @@ async function loadCameraModes() {
     // 既に古い — 送っても答えは下で捨てられ、finally から訊き直すことになるので、
     // 15 秒の列挙を 2 回直列に走らせるだけです。送る前にやめます。
     if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device || generation !== cameraGeneration) return;
+    // 数えた一覧に居ないカメラは訊きません。ブリッジは開けなかったカメラに憶えで
+    // 答えるので (bridge.CameraModes の recallModes)、差し替えで名前が消えたカメラを
+    // 訊くと、差し替え**前**の解像度が普通の答えとして返ります。
+    //
+    // 判定は**この関数の中**に置きます。数え直しをまたいだ問い合わせは、下の
+    // finally から自分で訊き直します — 呼び出し側だけで見ていると、その経路が
+    // 素通りして、捨てたはずの候補を憶えから復元します。
+    if (!listedHere(device)) {
+      sayModes("");
+      return;
+    }
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
     const found = await response.json();
@@ -972,11 +986,21 @@ function noticeCameras(state) {
   // 数で見るものは、見送るときも刻んでおきます。刻まないと、画面を開いた最初の
   // 1 回や、UVC 以外で動いている間に溜まった分が、次に見たとき合図になります。
   if (!before || now.capturing !== "uvc") {
-    // 止まっている間は、止められた分を使い切りません。**一時停止するとソースは
-    // 空になる**ので (bridge.stopLocked)、止まっている標本はここを通ります。ここで
-    // 使い切ると、動き出したことが合図にならなくなります — 立て直しでは移った回数も
-    // 動かないので (status.SetSource)、代わりになる合図もありません。
-    if (!now.paused) countedPauses = now.pauses;
+    // 止められた分を使い切るのは、**別のソースが実際に動いているとき**だけです。
+    // **一時停止するとソースは空になる**ので (bridge.stopLocked)、止まっている標本は
+    // ここを通ります。ここで使い切ると、動き出したことが合図にならなくなります —
+    // 立て直しでは移った回数も動かないので (status.SetSource)、代わりになる合図も
+    // ありません。
+    //
+    // 止まっている印だけでは足りません。**再開の途中には、種別が空のまま paused
+    // だけが下りた標本があります** — bridge.SetPaused は status.SetPaused(false) を
+    // 済ませてから startLocked を呼び、その中の cancelListing は走っている列挙が
+    // 終わるまで待つので、その窓は列挙 1 回分 (最大 15 秒) まで広がります。2 秒ごとの
+    // 読みはそこに十分入ります。その標本で使い切ると、UVC が動き出した標本には
+    // 合図が残りません — 止めている間に差し替えた新しい個体が今のモードで繋がら
+    // なければ、切れた・挿さった・移ったのどれも動かないので、数え直しは 30 秒後の
+    // 漂いまで来ません。
+    if (!now.paused && now.capturing !== "") countedPauses = now.pauses;
     countedSwitches = now.switches;
     // 最初の標本が、最初の列挙より**後に**繋がったものかもしれません。その列挙は
     // まだカメラが挿さっていない一覧を見ている可能性があり、そこでは憶えが
@@ -1087,8 +1111,8 @@ async function countCameras() {
   // ブリッジはそれを開けず、憶えで答えます — その憶えは差し替え前のものなので、
   // 持っていない組み合わせを選ばせてしまいます。名前を手で打った人は候補が出なく
   // なりますが、確かめられないものを確かめたことにするよりは良い形です。
-  const chosen = el("uvc-device").value.trim().toLowerCase();
-  if (counted && (!chosen || (listedNames && listedNames.has(chosen)))) {
+  const chosen = el("uvc-device").value.trim();
+  if (counted && (!chosen || listedHere(chosen))) {
     loadCameraModes();
   } else if (dropped) {
     // 途中では数えられたのに、最後が転んだ。憶えが古いことは分かっているので、

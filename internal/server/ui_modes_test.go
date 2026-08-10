@@ -1693,7 +1693,7 @@ globalThis.fetch = async (url) => {
   if (String(url).startsWith("/api/v1/devices")) {
     listings++;
     await new Promise((resolve) => { devicePending.push(resolve); });
-    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
   }
   askedForModes++;
   return askedModes(url);
@@ -2253,7 +2253,7 @@ func TestSettingsPageDropsTheAnswerThatCameFromBeforeTheRecount(t *testing.T) {
 const askedModes = globalThis.fetch;
 globalThis.fetch = async (url) => {
   if (String(url).startsWith("/api/v1/devices")) {
-    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
   }
   return askedModes(url);
 };
@@ -2639,5 +2639,158 @@ release();
 	}
 	if got.ByPath != 4 {
 		t.Errorf("asked for the modes %d times for the \"@device_pnp_...\" name of a camera whose friendly name is unique, want 4 — the candidate list leaves it out, but the setting may hold it", got.ByPath)
+	}
+}
+
+// 数え直しからの訊き直しも、一覧に居ないカメラでは止まります。
+//
+// 答えを待っている間に数え直しが挟まると、届いた答えは世代で捨てられ、finally が
+// 自分で訊き直します。呼び出し側だけで一覧を照らしていると、その経路が素通りして、
+// 捨てたはずの候補をブリッジの憶えから復元します (recallModes)。
+func TestSettingsPageDoesNotAskAgainForACameraTheRecountDropped(t *testing.T) {
+	harness := modesHarness + `
+let askedForModes = 0;
+let cameraList = [{name: "B"}];
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    return { ok: true, json: async () => ({cameras: cameraList, serial_ports: []}) };
+  }
+  askedForModes++;
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+// B を調べ始める。答えはまだ返らない。
+nodes["uvc-device"].value = "B";
+loadCameraModes();
+await settle();
+const asking = askedForModes;
+
+// 待っている間に差し替え。数え直すと B は一覧から消えている。
+cameraList = [{name: "A"}];
+await countCameras();
+await settle();
+const afterRecount = askedForModes;
+
+// 古い答えが返る。世代で捨てられ、finally が訊き直しに行く。
+release();
+await settle();
+release();
+await settle();
+
+console.log(JSON.stringify({
+  asking,
+  afterRecount,
+  asked: askedForModes,
+  modesFor: modesFor || "",
+  sizes: listed["camera-sizes"],
+}));
+release();
+`
+	var got struct {
+		Asking       int      `json:"asking"`
+		AfterRecount int      `json:"afterRecount"`
+		Asked        int      `json:"asked"`
+		ModesFor     string   `json:"modesFor"`
+		Sizes        []string `json:"sizes"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Asking != 1 || got.AfterRecount != 1 {
+		t.Fatalf("asked %d times before the recount and %d right after it, want 1 and 1", got.Asking, got.AfterRecount)
+	}
+	if got.Asked != 1 {
+		t.Errorf("asked %d times in total, want 1 — the retry from the dropped answer went out for a camera that is no longer listed, and the bridge answers those from memory", got.Asked)
+	}
+	if got.ModesFor != "" {
+		t.Errorf("modesFor = %q, want nothing recorded for a camera that is not listed", got.ModesFor)
+	}
+	if len(got.Sizes) != 0 {
+		t.Errorf("sizes = %v, want the candidates left dropped", got.Sizes)
+	}
+}
+
+// 再開の途中の標本で、止められた回数を使い切ってはいけません。
+//
+// bridge.SetPaused(false) は status.SetPaused(false) を済ませてから startLocked を
+// 呼び、その中の cancelListing は走っている列挙が終わるまで待ちます。その間の読みは
+// 「種別は空、paused は false、止められた回数は増えている」を見ます。そこで使い切ると、
+// UVC が動き出した標本に合図が残りません — 止めている間に差し替えた個体が今のモードで
+// 繋がらなければ、切れた・挿さった・移ったのどれも動きません。
+func TestSettingsPageKeepsThePauseSignalUntilTheSourceIsBack(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    return { ok: true, json: async () => ({cameras: [{name: "A"}], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+// 時計はこちらが進める。漂いによる数え直しに助けられていないことを確かめるため、
+// この試験では一度も進めない。
+let clock = 1000000;
+Date.now = () => clock;
+
+// 動いているところから。2 つ目の合図で 1 回数える。
+noticeCameras({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0});
+await settle();
+noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 0});
+await settle();
+const running = listings;
+
+// 一時停止。種別は空になる (bridge.stopLocked)。
+noticeCameras({capturing: "", reconnects: 2, connected: false, paused: true, pauses: 1});
+await settle();
+const whilePaused = listings;
+
+// 再開の途中。paused は下りたが、ソースはまだ設定されていない。
+noticeCameras({capturing: "", reconnects: 2, connected: false, paused: false, pauses: 1});
+await settle();
+const midResume = listings;
+
+// UVC が動き出した。差し替えた個体は今のモードで繋がらないので、他の合図は動かない。
+noticeCameras({capturing: "uvc", reconnects: 2, connected: false, paused: false, pauses: 1});
+await settle();
+const afterResume = listings;
+
+// 使い切ったので、同じ標本をもう一度見ても数え直さない。
+noticeCameras({capturing: "uvc", reconnects: 2, connected: false, paused: false, pauses: 1});
+await settle();
+const settled = listings;
+
+console.log(JSON.stringify({running, whilePaused, midResume, afterResume, settled}));
+release();
+`
+	var got struct {
+		Running     int `json:"running"`
+		WhilePaused int `json:"whilePaused"`
+		MidResume   int `json:"midResume"`
+		AfterResume int `json:"afterResume"`
+		Settled     int `json:"settled"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Running != 1 {
+		t.Fatalf("counted %d times while it was running, want 1", got.Running)
+	}
+	if got.WhilePaused != 1 || got.MidResume != 1 {
+		t.Errorf("counted %d times while paused and %d mid-resume, want 1 and 1 — neither sample is a signal on its own", got.WhilePaused, got.MidResume)
+	}
+	if got.AfterResume != 2 {
+		t.Errorf("counted %d times once UVC was back up, want 2 — the mid-resume sample spent the pause signal, and nothing else moves when the swapped camera cannot connect at the current mode", got.AfterResume)
+	}
+	if got.Settled != 2 {
+		t.Errorf("counted %d times on the next identical reading, want 2 — the signal is spent once UVC is actually back", got.Settled)
 	}
 }
