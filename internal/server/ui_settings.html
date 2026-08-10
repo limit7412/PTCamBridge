@@ -397,17 +397,26 @@ el("settings").addEventListener("submit", async (event) => {
     //
     // 「描いてから動いたか」は、こちらで札を見比べて確かめる。サーバの 412 に
     // 任せられないのは、まさに A → B → A では札が戻ってしまうから。
-    let ground = await getConfig();
+    // 触った葉は**いちばん先に**拾う。競合の判定は「ユーザーが触った項目が、その間に
+    // 変えられていたか」を見るので、拾う前に判定すると、触った項目が 1 つも無いことに
+    // なって、何も訊かずに上書きする — 画面を描いてから最初の読みまでの間に相手が
+    // 同じ葉を変えた場合が、まさにそれ。この機能が防ごうとしているものそのもの。
+    //
+    // 1 回読めば足りる。保存の間フォームは凍っているので、周ごとに読み直しても同じ
+    // 値しか出てこない。
+    const edits = [];
+    const typed = readForm();
+    FIELDS.forEach((field, i) => {
+      if (typed[i] !== baseline[i]) {
+        dirty.add(i);
+        edits.push([field.path, typed[i]]);
+      }
+    });
     const overlay = (cfg) => {
-      const now = readForm();
-      FIELDS.forEach((field, i) => {
-        if (now[i] !== baseline[i]) {
-          dirty.add(i);
-          put(cfg, field.path, now[i]);
-        }
-      });
+      edits.forEach(([path, value]) => put(cfg, path, value));
       return cfg;
     };
+    let ground = await getConfig();
     let mine = rendered;
 
     sent = true;

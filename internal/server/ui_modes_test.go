@@ -1217,6 +1217,15 @@ func TestSettingsPageAsksBeforeWritingOverSomeoneElsesChange(t *testing.T) {
 	if !strings.Contains(body, "mine = JSON.parse(JSON.stringify(ground.cfg));") {
 		t.Error("the next round compares against an object the overlay is about to rewrite, so settings the user already accepted come up again")
 	}
+	// 触った葉は、競合の判定より先に拾わなければならない。判定は「ユーザーが触った
+	// 項目が動いていたか」を見るので、拾う前に判定すると、触った項目が 1 つも無い
+	// ことになって、何も訊かずに上書きする — 画面を描いてから最初の読みまでの間に
+	// 相手が同じ葉を変えた場合が、まさにそれ。
+	touched := strings.Index(body, "dirty.add(i)")
+	building := strings.Index(body, "const overlay = (cfg) =>")
+	if touched < 0 || building < 0 || touched > building {
+		t.Error("the page works out which settings the user touched only while building the body, so the first conflict check sees nothing and overwrites without asking")
+	}
 }
 
 // 何が変わったかを言うときに比べる相手は、こちらが土台にした設定です。重ねた後の
