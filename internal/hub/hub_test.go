@@ -164,3 +164,52 @@ func TestConcurrentPublishAndSubscribe(t *testing.T) {
 	}
 	<-done
 }
+
+// ブリッジ自身の出口が取りこぼした分を、ストリームクライアントの取りこぼしに
+// 混ぜてはいけません。混ぜると、HTTP に誰も繋がっていないのに診断画面の「破棄」が
+// 増え続け、原因を指すものがどこにもなくなります。シリアル出力の相手が居ないだけで
+// 起きる見え方です。
+func TestDropsAreCountedSeparatelyForTheBridgesOwnOutlets(t *testing.T) {
+	h := New()
+
+	// どちらも読まないので、2 枚目から取りこぼしが始まる。
+	external, cancelExternal := h.Subscribe()
+	defer cancelExternal()
+	internal, cancelInternal := h.SubscribeInternal()
+	defer cancelInternal()
+	_, _ = external, internal
+
+	for i := 0; i < 4; i++ {
+		h.Publish(core.Frame{Data: []byte{0xFF, 0xD8, 0xFF, 0xD9}})
+	}
+
+	stats := h.Stats()
+	if stats.Dropped == 0 || stats.DroppedInternal == 0 {
+		t.Fatalf("Dropped = %d, DroppedInternal = %d, want both sides to have dropped something",
+			stats.Dropped, stats.DroppedInternal)
+	}
+	if stats.Dropped != stats.DroppedInternal {
+		t.Errorf("Dropped = %d but DroppedInternal = %d; both subscribers stalled the same way",
+			stats.Dropped, stats.DroppedInternal)
+	}
+}
+
+// 出口だけが詰まっているとき、ストリームクライアント側の破棄は 0 のままでなければ
+// なりません。ここが動くと、HTTP 配信に問題があるように見えます。
+func TestAStalledOutletDoesNotShowUpAsClientDrops(t *testing.T) {
+	h := New()
+	internal, cancel := h.SubscribeInternal()
+	defer cancel()
+	_ = internal
+
+	for i := 0; i < 4; i++ {
+		h.Publish(core.Frame{Data: []byte{0xFF, 0xD8, 0xFF, 0xD9}})
+	}
+
+	if got := h.Stats().Dropped; got != 0 {
+		t.Errorf("Dropped = %d with no stream client subscribed, want 0", got)
+	}
+	if got := h.Stats().DroppedInternal; got == 0 {
+		t.Error("DroppedInternal = 0, want the stalled outlet counted somewhere")
+	}
+}

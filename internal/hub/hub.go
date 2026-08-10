@@ -24,18 +24,38 @@ const fpsGapReset = 2 * time.Second
 
 // Stats は hub の活動のスナップショットで、/stats エンドポイントが返します。
 type Stats struct {
-	Published     uint64    `json:"published"`
-	Dropped       uint64    `json:"dropped"`
-	Subscribers   int       `json:"subscribers"`
-	InputFPS      float64   `json:"input_fps"`
-	LastFrameSize int       `json:"last_frame_size"`
-	LastFrameAt   time.Time `json:"last_frame_at"`
+	Published uint64 `json:"published"`
+	// Dropped は、ストリームクライアントが受け取れなかったフレーム数です。
+	// ブリッジ自身の出口の取りこぼしは DroppedInternal に分けてあります。理由は
+	// subscriber を参照してください。
+	Dropped uint64 `json:"dropped"`
+	// DroppedInternal は、ブリッジ自身の出口 (SubscribeInternal) が受け取れなかった
+	// フレーム数です。シリアル出力が繋がっていない間や、書き込みが詰まっている間に
+	// 増えます。HTTP 配信は何も失っていないので、そちらの数と混ぜてはいけません。
+	DroppedInternal uint64    `json:"dropped_internal"`
+	Subscribers     int       `json:"subscribers"`
+	InputFPS        float64   `json:"input_fps"`
+	LastFrameSize   int       `json:"last_frame_size"`
+	LastFrameAt     time.Time `json:"last_frame_at"`
+}
+
+// subscriber は、1 人の購読者への枠と、それが誰であるかです。
+//
+// internal を分けているのは、この数を読む人が知りたいことが「HTTP のストリームに
+// 何人繋がっているか」だからです。ブリッジ自身の出口 (internal/output) も同じ
+// 仕組みでフレームを受け取りますが、それはクライアントではありません。混ぜると、
+// シリアル出力を有効にした人のトレイと診断画面は、誰も繋いでいないのに常に 1 を
+// 表示します。「クライアント数が 0 のままなら HTTP 経路は使われていない」という
+// 切り分けは、まさにそこで壊れます。
+type subscriber struct {
+	ch       chan core.Frame
+	internal bool
 }
 
 // Hub は、生産者 1 に対し消費者が多数のフレーム配信器です。
 type Hub struct {
 	mu        sync.Mutex
-	subs      map[uint64]chan core.Frame
+	subs      map[uint64]subscriber
 	nextID    uint64
 	seq       uint64
 	latest    core.Frame
@@ -43,13 +63,18 @@ type Hub struct {
 
 	published uint64
 	dropped   uint64
-	fps       float64
-	lastAt    time.Time
+	// droppedInternal は、ブリッジ自身の出口が取りこぼした分です。分けて数えるのは、
+	// 混ぜると「HTTP のクライアントは 1 つも繋がっていないのに破棄が増え続ける」と
+	// いう、原因の分からない見え方になるからです。シリアル出力の相手が居ないだけで
+	// 起きます。
+	droppedInternal uint64
+	fps             float64
+	lastAt          time.Time
 }
 
 // New は空の hub を返します。
 func New() *Hub {
-	return &Hub{subs: make(map[uint64]chan core.Frame)}
+	return &Hub{subs: make(map[uint64]subscriber)}
 }
 
 // Publish はフレームを配信します。連番は hub が振り、到着時刻も呼び出し側が
@@ -83,7 +108,8 @@ func (h *Hub) Publish(f core.Frame) {
 	}
 	h.lastAt = f.RecvedAt
 
-	for _, ch := range h.subs {
+	for _, sub := range h.subs {
+		ch := sub.ch
 		select {
 		case ch <- f:
 			continue
@@ -94,27 +120,49 @@ func (h *Hub) Publish(f core.Frame) {
 		// 落とすことになる。
 		select {
 		case <-ch:
-			h.dropped++
+			h.noteDropLocked(sub.internal)
 		default:
 		}
 		select {
 		case ch <- f:
 		default:
-			h.dropped++
+			h.noteDropLocked(sub.internal)
 		}
 	}
+}
+
+// noteDropLocked は、取りこぼしを相手に応じた側へ数えます。mu は保持済みです。
+func (h *Hub) noteDropLocked(internal bool) {
+	if internal {
+		h.droppedInternal++
+		return
+	}
+	h.dropped++
 }
 
 // Subscribe は、フレームのチャネルと、購読を解除してそれを閉じる関数を返します。
 // 解除関数は冪等ですが、hub がそのクライアントを忘れるためには購読ごとに必ず
 // 一度は呼ぶ必要があります。
+//
+// これで購読したものは Subscribers に数えられます。外から繋いできたストリーム
+// クライアントのためのものです。
 func (h *Hub) Subscribe() (<-chan core.Frame, func()) {
+	return h.subscribe(false)
+}
+
+// SubscribeInternal は Subscribe と同じですが、Subscribers には数えません。
+// ブリッジ自身の出口のためのものです。理由は subscriber を参照してください。
+func (h *Hub) SubscribeInternal() (<-chan core.Frame, func()) {
+	return h.subscribe(true)
+}
+
+func (h *Hub) subscribe(internal bool) (<-chan core.Frame, func()) {
 	ch := make(chan core.Frame, 1)
 
 	h.mu.Lock()
 	h.nextID++
 	id := h.nextID
-	h.subs[id] = ch
+	h.subs[id] = subscriber{ch: ch, internal: internal}
 	h.mu.Unlock()
 
 	var once sync.Once
@@ -139,11 +187,30 @@ func (h *Hub) Latest() (core.Frame, bool) {
 	return h.latest, h.hasLatest
 }
 
-// Subscribers は、接続中のストリームクライアント数を返します。
+// Subscribers は、接続中のストリームクライアント数を返します。ブリッジ自身の
+// 出口 (SubscribeInternal) は入りません。
 func (h *Hub) Subscribers() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.subs)
+	return h.countLocked(false)
+}
+
+// InternalSubscribers は、ブリッジ自身の出口がいくつ購読しているかを返します。
+func (h *Hub) InternalSubscribers() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.countLocked(true)
+}
+
+// countLocked は、内部かどうかで数えます。呼び出し側が mu を保持します。
+func (h *Hub) countLocked(internal bool) int {
+	n := 0
+	for _, sub := range h.subs {
+		if sub.internal == internal {
+			n++
+		}
+	}
+	return n
 }
 
 // Stats は hub のカウンタのスナップショットを返します。
@@ -152,10 +219,11 @@ func (h *Hub) Stats() Stats {
 	defer h.mu.Unlock()
 
 	s := Stats{
-		Published:   h.published,
-		Dropped:     h.dropped,
-		Subscribers: len(h.subs),
-		InputFPS:    h.fps,
+		Published:       h.published,
+		Dropped:         h.dropped,
+		DroppedInternal: h.droppedInternal,
+		Subscribers:     h.countLocked(false),
+		InputFPS:        h.fps,
 	}
 	if h.hasLatest {
 		s.LastFrameSize = h.latest.Size()

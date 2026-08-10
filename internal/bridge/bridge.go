@@ -465,8 +465,16 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifAny []string) (
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// 札の判定が先です。古い設定の上で組まれた要求は、まずそのことを告げられ
+	// なければなりません。先に衝突を見ると、読み直せば消えるかもしれない衝突を
+	// 理由に断ってしまい、しかも返るのは 412 ではなく設定の誤りになります。
+	// 呼び出し側は「読み直してやり直す」という正しい手が取れず、送っていない
+	// 設定について直し方を考えることになります。
 	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(b.cfg)) {
 		return b.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
+	}
+	if err := b.serialPortConflicts(cfg); err != nil {
+		return b.cfg, nil, err
 	}
 	return b.applyLocked(ctx, cfg)
 }
@@ -886,6 +894,55 @@ func captureUnchanged(previous, next config.Config) bool {
 //
 // 名前は TOML のキーそのものです。翻訳しません。ユーザーが設定ファイルを開いた
 // ときに探す文字列だからです。
+// serialPortConflicts は、この設定が読む側と書く側を同じシリアルポートへ向けて
+// いないかを、**2 つの時点について**確かめます。
+//
+// 2 回要るのは、出力が起動時にしか読まれないからです。「いま動くか」と「次の起動で
+// 動くか」は別の問いで、片方だけを見ると、もう片方が黙って壊れます。
+//
+//   - 動いている出力との衝突。これがあると、この要求はその場で失敗します。ソースは
+//     出力が握っているポートを開けません
+//   - 保存される設定そのものの衝突。これを通すと、設定は受理・保存されたのに、
+//     次の起動で main がプロセスごと止めます。設定画面から保存できた設定で
+//     二度と立ち上がらない、という最悪の形です
+//
+// 動いている方を先に見ます。両方が当てはまるとき、ユーザーが今いる場所について
+// 述べているのはそちらだからです。
+//
+// 2 つ目で見るのは cfg ではなく、**実際に保存される設定**です。両者は同じとは
+// 限りません。この要求が触れなかった葉は設定ファイルの値のまま残る (mergeChanges)
+// ので、環境変数で一時的に無効化している出力や、起動後にファイル側で編集された
+// 出力は、cfg のどこにも現れないまま保存後の設定に現れます。次の起動が読むのは
+// そちらです。
+func (b *Bridge) serialPortConflicts(cfg config.Config) error {
+	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
+		return fmt.Errorf("the serial output running in this process is using that port: %w", err)
+	}
+
+	base, err := b.saveBaseLocked()
+	if err != nil {
+		// 土台が読めなければ、保存後の姿は分かりません。ここで断ると、設定ファイルを
+		// 編集している最中のユーザーが、無関係な変更を 1 つも保存できなくなります。
+		// この読み取りは保存の段でもう一度行われ、そちらが失敗を報告します。
+		return nil
+	}
+	saved := mergeChanges(base, b.cfg, cfg)
+	clash := config.SerialPortConflict(saved.Source, saved.Output.Serial)
+	if clash == nil {
+		return nil
+	}
+	// 既にファイルが衝突を抱えているなら、それはこの要求のせいではありません。
+	// 断ると、シリアルとまったく関係のない設定さえ 1 つも保存できなくなります。
+	// (この状態に至るのは、環境変数がその衝突を覆い隠している場合だけです。
+	// 覆われていなければ、そもそもこのプロセスは起動していません。)
+	if config.SerialPortConflict(base.Source, base.Output.Serial) != nil {
+		b.log.Warn("the settings file already points the source and the serial output at the same port, so the next start will refuse to run until one of them changes",
+			"source_port", base.Source.Serial.Port, "output_port", base.Output.Serial.Port)
+		return nil
+	}
+	return fmt.Errorf("these settings would stop PTCamBridge from starting next time: %w", clash)
+}
+
 // startupOnlyChange は、この要求が起動時にしか読まれない葉だけを動かしたかどうかを
 // 返します。
 //
@@ -904,6 +961,7 @@ func startupOnlyChange(previous, next config.Config) bool {
 	trimmed := next
 	trimmed.Server.Listen = previous.Server.Listen
 	trimmed.Log = previous.Log
+	trimmed.Output = previous.Output
 	trimmed.PaperTracker = previous.PaperTracker
 	trimmed.UI = previous.UI
 	return reflect.DeepEqual(trimmed, previous)
@@ -920,6 +978,10 @@ var restartOnlyLeaves = []string{
 	"server.listen",
 	"log.level",
 	"log.dir",
+	"output.serial.enabled",
+	"output.serial.port",
+	"output.serial.baud",
+	"output.serial.header",
 	"papertracker.install_dir",
 	"papertracker.write_cache",
 	"ui.language",
@@ -939,6 +1001,20 @@ func restartDeferred(startup, next config.Config) []string {
 	}
 	if startup.Log.Dir != next.Log.Dir {
 		deferred = append(deferred, "log.dir")
+	}
+	// シリアル出力は起動時に 1 回だけ組み立てます。動作中に開き直す仕組みが無いので、
+	// ここで名前を返さないと、設定画面は効いていない変更を「反映済み」と言います。
+	if startup.Output.Serial.Enabled != next.Output.Serial.Enabled {
+		deferred = append(deferred, "output.serial.enabled")
+	}
+	if startup.Output.Serial.Port != next.Output.Serial.Port {
+		deferred = append(deferred, "output.serial.port")
+	}
+	if startup.Output.Serial.Baud != next.Output.Serial.Baud {
+		deferred = append(deferred, "output.serial.baud")
+	}
+	if !slices.Equal(startup.Output.Serial.Header, next.Output.Serial.Header) {
+		deferred = append(deferred, "output.serial.header")
 	}
 	if startup.PaperTracker.InstallDir != next.PaperTracker.InstallDir {
 		deferred = append(deferred, "papertracker.install_dir")
@@ -965,6 +1041,9 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 	cfg.Source.Type = sourceType
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := b.serialPortConflicts(cfg); err != nil {
 		return err
 	}
 	// ソース種別は動作中に変えられるものなので、保留になる葉は生まれない。

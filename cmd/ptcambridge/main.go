@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/i18n"
 	"github.com/limit7412/PTCamBridge/internal/logging"
+	"github.com/limit7412/PTCamBridge/internal/output"
 	"github.com/limit7412/PTCamBridge/internal/papertracker"
 	"github.com/limit7412/PTCamBridge/internal/server"
 	"github.com/limit7412/PTCamBridge/internal/source"
@@ -140,6 +142,12 @@ func run() error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	// 起動時は、これから組み立てる出力がそのまま動く出力なので、突き合わせる相手は
+	// この設定自身です。動作中の変更は bridge が起動時の設定と突き合わせます
+	// (config.SerialPortConflict を参照)。
+	if err := config.SerialPortConflict(cfg.Source, cfg.Output.Serial); err != nil {
+		return err
+	}
 
 	log, closeLog, err := setupLogging(cfg, opts.console)
 	if err != nil {
@@ -172,6 +180,23 @@ func run() error {
 	}
 
 	frames := hub.New()
+
+	// シリアル出力は HTTP 配信と並ぶもう 1 つの出口で、有効なときだけ組み立てる。
+	// 設定が誤っていればここで止まる。起動してから毎秒警告を出し続けるより、
+	// 名前を書き間違えたことをその場で言う方がよい。
+	var serialOut *output.Serial
+	if cfg.Output.Serial.Enabled {
+		serialOut, err = output.NewSerial(output.SerialConfig{
+			Port:         cfg.Output.Serial.Port,
+			Baud:         cfg.Output.Serial.Baud,
+			Header:       cfg.OutputSerialHeader(),
+			MaxFrameSize: cfg.Source.MaxFrameSize,
+		}, frames, log)
+		if err != nil {
+			return err
+		}
+	}
+
 	// tracker はトレイが翻訳すべき失敗に名前を付ける。どれがそれに当たるかは
 	// ドライバの領分なので、答えはそちらから来る。
 	tracker := status.New(status.WithErrorKeys(source.ErrorKey))
@@ -208,6 +233,7 @@ func run() error {
 		Controller:       app,
 		EnableAdmin:      admin,
 		FFmpeg:           ffmpegOption(fetcher),
+		SerialOut:        serialOutOption(serialOut),
 		HoldOnSourceLoss: cfg.Server.HoldOnSourceLoss,
 		Version:          Version,
 		Printer:          i18n.NewPrinter(cfg.Language()),
@@ -217,7 +243,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// ストリーム設定は、今の PaperTracker クライアントが解析するものに合わせる
+	// ストリーム設定は、今の PaperTracker クライアントが受け取れる形に合わせる
 	// ために存在するので、その変更は再起動を経ずにサーバまで届かなければならない。
 	app.SetStreamConfigurator(srv)
 
@@ -247,6 +273,19 @@ func run() error {
 		// write_cache と一緒に install_dir も消す。そしてまさにそのとき、
 		// バックアップを戻す必要が残っている。
 		restoreCacheQuietly(log, cfg.PaperTracker.InstallDir)
+	}
+
+	// シリアル出力はソースとは独立に生きる。ソースが落ちていてもポートは開いて
+	// おいてよく、フレームが戻れば書き始める。ctx で終わるので、止め方は他と同じ。
+	var outputs sync.WaitGroup
+	if serialOut != nil {
+		outputs.Add(1)
+		go func() {
+			defer outputs.Done()
+			if err := serialOut.Run(ctx); err != nil {
+				log.Error("the serial output stopped for good", "error", err)
+			}
+		}()
 	}
 
 	if err := app.Start(ctx); err != nil {
@@ -298,6 +337,10 @@ func run() error {
 		log.Warn("the HTTP server did not shut down in time")
 	}
 
+	// 出力が握っているのはシリアルポートで、それは他のアプリケーションも開きたい
+	// かもしれない相手。カメラと同じく、解放し終えるまで待ってから降りる。
+	outputs.Wait()
+
 	// ダウンロード中の終了は転送をキャンセルするが、goroutine には途中まで
 	// 落としたアーカイブを削除する仕事が残っている。それを待たずに返ると、設定
 	// フォルダに 100 メガバイト強が残り、それを片付けるものは何も動いていない。
@@ -330,6 +373,16 @@ func trayFFmpeg(m *ffmpegfetch.Manager) tray.FFmpegFetcher {
 		return nil
 	}
 	return m
+}
+
+// serialOutOption も同じ理由で存在します。存在しない *output.Serial を
+// インターフェースへ入れると、それ自体は非 nil になるので、/stats はシリアル出力を
+// 設定していない人にもその節を見せ、存在しないポインタを通して読もうとします。
+func serialOutOption(s *output.Serial) server.SerialOutput {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // resolveConfigPath は、パスが与えられていなければユーザーごとの場所を使います。

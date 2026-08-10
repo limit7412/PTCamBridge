@@ -2799,6 +2799,10 @@ func TestRestartOnlyLeavesMatchWhatCanBeDeferred(t *testing.T) {
 		"server.listen":            func(c *config.Config) { c.Server.Listen = "127.0.0.1:1" },
 		"log.level":                func(c *config.Config) { c.Log.Level = "debug" },
 		"log.dir":                  func(c *config.Config) { c.Log.Dir = "elsewhere" },
+		"output.serial.enabled":    func(c *config.Config) { c.Output.Serial.Enabled = !c.Output.Serial.Enabled },
+		"output.serial.port":       func(c *config.Config) { c.Output.Serial.Port = "COM7" },
+		"output.serial.baud":       func(c *config.Config) { c.Output.Serial.Baud = 115200 },
+		"output.serial.header":     func(c *config.Config) { c.Output.Serial.Header = []int{0xFF, 0xA0} },
 		"papertracker.install_dir": func(c *config.Config) { c.PaperTracker.InstallDir = "elsewhere" },
 		"papertracker.write_cache": func(c *config.Config) { c.PaperTracker.WriteCache = !c.PaperTracker.WriteCache },
 		"ui.language":              func(c *config.Config) { c.UI.Language = "ja" },
@@ -4509,5 +4513,205 @@ func TestApplyLeavesTheTokenAloneWhenItRollsBack(t *testing.T) {
 	fresh.Transform.Rotate = 270
 	if _, _, err := b.Apply(ctx, fresh, []string{before}); err != nil {
 		t.Errorf("a token read before a rolled-back change is no longer accepted: %v", err)
+	}
+}
+
+// serialOutputConfig は、UVC で動きつつシリアル出力を持つ設定です。ソースを
+// serial へ切り替えたときに何と突き合わせられるかを見るためのものです。
+func serialOutputConfig(t *testing.T, sourcePort, outputPort string, outputOn bool) config.Config {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Source.Type = config.SourceUVC
+	cfg.Source.UVC.Device = "camera"
+	cfg.Source.Serial.Port = sourcePort
+	cfg.Output.Serial.Enabled = outputOn
+	cfg.Output.Serial.Port = outputPort
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the fixture config does not validate: %v", err)
+	}
+	return cfg
+}
+
+// クラッシュの判定は「設定が何と書いてあるか」ではなく「いま何が動いているか」で
+// しなければなりません。output.serial.* は起動時にしか読まれないので、設定画面から
+// 書き換えて再起動を待っている間、両者は食い違います。
+//
+// 出力 COM7 で起動し、設定を COM8 に保存 (保留) してから、ソースを serial の
+// COM7 へ移す。設定どうしは食い違わないので素通りしますが、動いている出力はまだ
+// COM7 を握っているので、ソースは開けません。
+func TestSwitchingToSerialClashesWithTheRunningOutputNotTheSavedOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	b := New(serialOutputConfig(t, "COM7", "COM7", true), path, hub.New(), status.New(), discardLogger())
+
+	// 出力ポートだけを動かす。起動時にしか読まれない葉なので、保留になるだけで
+	// 動いている出力は COM7 のまま。
+	next := b.Snapshot()
+	next.Output.Serial.Port = "COM8"
+	_, deferred, err := b.Apply(context.Background(), next, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !slices.Contains(deferred, "output.serial.port") {
+		t.Fatalf("deferred = %v, want it to name output.serial.port so the change is known to be pending", deferred)
+	}
+
+	err = b.Switch(context.Background(), config.SourceSerial)
+	if err == nil {
+		t.Fatal("Switch to serial on COM7 was accepted while the running output still holds COM7")
+	}
+	if !strings.Contains(err.Error(), "running in this process") {
+		t.Errorf("Switch failed with %v, want it to name the clash with the running output", err)
+	}
+}
+
+// 逆向き。起動時に無効だった出力を有効化しても、それは保留なので、まだ誰も
+// ポートを握っていません。そこで拒否すると、存在しない衝突を理由に切り替えを
+// 断ることになります。
+func TestSwitchingToSerialIgnoresAnOutputThatIsOnlyPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	b := New(serialOutputConfig(t, "COM7", "", false), path, hub.New(), status.New(), discardLogger())
+
+	// ペアの反対側なので、いま動いている出力とも、保存される設定とも衝突しません。
+	next := b.Snapshot()
+	next.Output.Serial.Enabled = true
+	next.Output.Serial.Port = "COM8"
+	if _, _, err := b.Apply(context.Background(), next, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// 切り替えそのものは、この環境に COM8 も COM7 も無いので失敗して構いません。
+	// 確かめたいのは、**衝突を理由に**断られないことです。
+	err := b.Switch(context.Background(), config.SourceSerial)
+	if err != nil && strings.Contains(err.Error(), "same port") {
+		t.Errorf("Switch was refused over a clash that does not exist: %v", err)
+	}
+}
+
+// 動いている出力と衝突しなくても、**保存される設定**が衝突していれば断ります。
+// 通してしまうと、設定は受理・保存されたのに次の起動で main がプロセスごと止め、
+// 設定画面から保存できた設定で二度と立ち上がらなくなります。
+func TestSavingAnOutputThatWouldClashAtTheNextStartIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	cfg := serialOutputConfig(t, "COM7", "", false)
+	cfg.Source.Type = config.SourceSerial
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+
+	// 起動時の出力は無効なので、いま COM7 を握っているものはありません。しかし
+	// この設定を保存すると、次の起動では読む側と書く側が同じ COM7 になります。
+	next := b.Snapshot()
+	next.Output.Serial.Enabled = true
+	next.Output.Serial.Port = "COM7"
+
+	_, _, err := b.Apply(context.Background(), next, nil)
+	if err == nil {
+		t.Fatal("Apply accepted settings that would stop the next start")
+	}
+	if !strings.Contains(err.Error(), "next time") {
+		t.Errorf("Apply failed with %v, want it to say the settings would break the next start", err)
+	}
+
+	// 断ったのだから、保存もされていてはいけません。
+	if got := b.Snapshot().Output.Serial; got.Enabled || got.Port == "COM7" {
+		t.Errorf("the refused settings were kept anyway: %+v", got)
+	}
+}
+
+// 同じデバイスを指す 2 通りの書き方を、別物として見逃してはいけません。Windows の
+// COM7 と \\.\COM7 は同じポートで、go.bug.st/serial はどちらでも開きます。
+func TestTheDeviceNamespacePrefixDoesNotHideAClash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	cfg := serialOutputConfig(t, `\\.\COM7`, "COM7", true)
+	cfg.Source.Type = config.SourceSerial
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+
+	if err := b.Switch(context.Background(), config.SourceSerial); err == nil {
+		t.Fatal(`Switch accepted \\.\COM7 against COM7, want them recognised as the same port`)
+	} else if !strings.Contains(err.Error(), "same port") {
+		t.Errorf("Switch failed with %v, want it to name the port clash", err)
+	}
+}
+
+// 古い札で来た要求は、まずそのことを告げられなければなりません。先に衝突を見ると、
+// 読み直せば消えるかもしれない衝突を理由に断ってしまい、しかも呼び出し側が受け取る
+// のは 412 ではなく設定の誤りになります。「読み直してやり直す」という正しい手が
+// 取れず、送っていない設定について直し方を考えることになります。
+func TestAStaleRevisionIsReportedBeforeAPortClash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	cfg := serialOutputConfig(t, "COM7", "", false)
+	cfg.Source.Type = config.SourceSerial
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+
+	// 衝突する設定を、古い札を条件にして送る。両方が当てはまる。
+	clashing := b.Snapshot()
+	clashing.Output.Serial.Enabled = true
+	clashing.Output.Serial.Port = "COM7"
+
+	_, _, err := b.Apply(context.Background(), clashing, []string{"a-token-from-some-older-read"})
+	if err == nil {
+		t.Fatal("Apply accepted a request built on a revision that is no longer current")
+	}
+	if !errors.Is(err, config.ErrRevisionMismatch) {
+		t.Errorf("Apply failed with %v, want ErrRevisionMismatch so the caller knows to re-read and retry", err)
+	}
+}
+
+// 保存される設定は、この要求が持っている設定と同じとは限りません。触れなかった葉は
+// 設定ファイルの値のまま残るので、環境変数で覆い隠された出力は、要求のどこにも
+// 現れないまま保存後の設定に現れます。次の起動が読むのはそちらです。
+func TestAClashHiddenByAnOverrideIsCaughtInWhatWouldBeSaved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+
+	// ファイルは出力を COM7 で有効にしている。
+	onDisk := serialOutputConfig(t, "COM7", "COM7", true)
+	if err := config.Save(path, onDisk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// 動作中の設定では、環境変数が出力を無効にしている。この設定で起動できるのは
+	// まさにそのため (main の検査は実効設定を見る)。
+	running := onDisk
+	running.Output.Serial.Enabled = false
+	b := New(running, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(onDisk, []string{"output.serial.enabled"})
+
+	// ソースを serial へ。実効設定の出力は無効なので、cfg だけを見れば衝突は無い。
+	// しかし保存後の設定はファイル側の COM7 出力を保つので、次の起動は止まる。
+	err := b.Switch(context.Background(), config.SourceSerial)
+	if err == nil {
+		t.Fatal("Switch was accepted although what would be saved cannot start")
+	}
+	if !strings.Contains(err.Error(), "next time") {
+		t.Errorf("Switch failed with %v, want it to say the saved settings would break the next start", err)
+	}
+}
+
+// 既にファイルが衝突を抱えているなら、それはこの要求のせいではありません。断ると、
+// シリアルとまったく関係のない設定さえ 1 つも保存できなくなります。
+func TestAClashAlreadyInTheFileDoesNotBlockUnrelatedChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+
+	// ファイルは既に衝突している (source serial COM7 + output COM7)。
+	onDisk := serialOutputConfig(t, "COM7", "COM7", true)
+	onDisk.Source.Type = config.SourceSerial
+	if err := config.Save(path, onDisk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	running := onDisk
+	running.Output.Serial.Enabled = false
+	b := New(running, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(onDisk, []string{"output.serial.enabled"})
+
+	// シリアルとは無関係な変更。
+	next := b.Snapshot()
+	next.UI.Language = "ja"
+	if _, _, err := b.Apply(context.Background(), next, nil); err != nil {
+		t.Fatalf("an unrelated change was refused over a clash the request did not create: %v", err)
+	}
+	if got := b.Snapshot().UI.Language; got != "ja" {
+		t.Errorf("language = %q, want the unrelated change applied", got)
 	}
 }

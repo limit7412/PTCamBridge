@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -814,5 +815,209 @@ func TestLanguageWithoutLoadingPrefersTheEnvironment(t *testing.T) {
 	}
 	if got := LanguageWithoutLoading(path, bad); got != i18n.English {
 		t.Errorf("LanguageWithoutLoading = %q, want it to fall through to the file", got)
+	}
+}
+
+// シリアル出力はポート名を推測しません。有効なのに書き込み先が無いのは、
+// 起動してから毎秒失敗し続けるより、その場で言うべき誤りです。
+func TestSettingsRefuseASerialOutputThatHasNowhereToWrite(t *testing.T) {
+	for name, port := range map[string]string{
+		"empty":     "",
+		"blank":     "   ",
+		"auto":      "auto",
+		"auto caps": "AUTO",
+	} {
+		cfg := Default()
+		cfg.Source.UVC.Device = "camera"
+		cfg.Output.Serial.Enabled = true
+		cfg.Output.Serial.Port = port
+		cfg.Normalise()
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate accepted output.serial.port %s (%q), want it refused", name, port)
+		}
+	}
+
+	cfg := Default()
+	cfg.Output.Serial.Enabled = true
+	cfg.Output.Serial.Port = "COM7"
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with a named output port: %v", err)
+	}
+}
+
+// 無効な出力の設定が空でも、それは誤りではありません。使っていない機能のせいで
+// ブリッジが起動しないのは、直し方の分からない失敗になります。
+func TestSettingsLetTheSerialOutputPortBeEmptyWhileItIsOff(t *testing.T) {
+	cfg := Default()
+	cfg.Output.Serial.Enabled = false
+	cfg.Output.Serial.Port = ""
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with the serial output switched off: %v", err)
+	}
+}
+
+// 0 は「既定値でよい」の意味で、読む側と揃えます。負の値は誤りで、黙って
+// 直せば、ユーザーは自分が書いていない速度を読み返すことになります。
+func TestSettingsFillInTheSerialOutputBaudButRefuseANegativeOne(t *testing.T) {
+	cfg := Default()
+	cfg.Output.Serial.Baud = 0
+	cfg.Normalise()
+	if cfg.Output.Serial.Baud != DefaultSerialBaud {
+		t.Errorf("output.serial.baud = %d after Normalise, want the default of %d", cfg.Output.Serial.Baud, DefaultSerialBaud)
+	}
+
+	cfg.Output.Serial.Baud = -1
+	cfg.Normalise()
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted a negative output.serial.baud, want it refused")
+	}
+}
+
+// ヘッダーは、その出力を有効にしていなくても見ます。範囲外のバイトはどう解釈
+// しても誤りですし、有効にした日に初めて知らされるのは遅すぎます。
+func TestSettingsRefuseASerialOutputHeaderThatIsNotBytes(t *testing.T) {
+	cfg := Default()
+	cfg.Output.Serial.Enabled = false
+	cfg.Output.Serial.Header = []int{0xFF, 0x100}
+	cfg.Normalise()
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted output.serial.header with a value above 0xFF, want it refused")
+	}
+}
+
+// 環境変数はファイルに優先し、指定した葉の名前を答えます。差からの推測では、
+// ファイルと同じ値を指定した上書きが見えません。
+func TestTheEnvironmentCanPointTheSerialOutputSomewhereElse(t *testing.T) {
+	cfg := Default()
+	set, err := cfg.ApplyEnv(func(key string) string {
+		switch key {
+		case "PTCAMBRIDGE_OUTPUT_SERIAL_ENABLED":
+			return "true"
+		case "PTCAMBRIDGE_OUTPUT_SERIAL_PORT":
+			return "COM9"
+		case "PTCAMBRIDGE_OUTPUT_SERIAL_BAUD":
+			return "115200"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
+	if !cfg.Output.Serial.Enabled || cfg.Output.Serial.Port != "COM9" || cfg.Output.Serial.Baud != 115200 {
+		t.Errorf("the serial output settings are %+v, want them taken from the environment", cfg.Output.Serial)
+	}
+	for _, want := range []string{"output.serial.enabled", "output.serial.port", "output.serial.baud"} {
+		if !slices.Contains(set, want) {
+			t.Errorf("ApplyEnv = %v, want it to name %s", set, want)
+		}
+	}
+}
+
+// 設定のヘッダーは、ドライバが受け取るバイト列に変わらなければなりません。
+func TestTheSerialOutputHeaderBecomesBytes(t *testing.T) {
+	cfg := Default()
+	if got := cfg.OutputSerialHeader(); !bytes.Equal(got, []byte{0xFF, 0xA0, 0xFF, 0xA1}) {
+		t.Errorf("OutputSerialHeader = % x, want the documented preamble", got)
+	}
+	cfg.Output.Serial.Header = nil
+	if got := cfg.OutputSerialHeader(); got != nil {
+		t.Errorf("OutputSerialHeader = % x with no header set, want nil so core picks the default", got)
+	}
+}
+
+// シリアルポートは排他です。読む側と書く側が同じポートを指していると、起動時に
+// 奪い合って、どちらが勝っても行き止まりになります。
+func TestSerialPortConflictCatchesReadingAndWritingTheSamePort(t *testing.T) {
+	source := func(port string) Source {
+		return Source{Type: SourceSerial, Serial: Serial{Port: port}}
+	}
+	running := func(port string) OutputSerial {
+		return OutputSerial{Enabled: true, Port: port}
+	}
+
+	if err := SerialPortConflict(source("COM7"), running("COM7")); err == nil {
+		t.Error("SerialPortConflict accepted the same port on both sides, want it refused")
+	}
+	// Windows の COM7 と com7 は同じポートです。
+	if err := SerialPortConflict(source("COM7"), running("com7")); err == nil {
+		t.Error("SerialPortConflict treated COM7 and com7 as different ports, want the names compared without case")
+	}
+	// 仮想ペアの反対側を指すのが正しい使い方で、これは通らなければなりません。
+	if err := SerialPortConflict(source("COM7"), running("COM8")); err != nil {
+		t.Errorf("SerialPortConflict on the two ends of a virtual pair: %v", err)
+	}
+}
+
+// 突き合わせる相手がいない場合は、いずれも衝突ではありません。
+func TestSerialPortConflictStaysQuietWhenThereIsNothingToClashWith(t *testing.T) {
+	for name, tc := range map[string]struct {
+		source  Source
+		running OutputSerial
+	}{
+		// UVC で動いている機械に、使っていない source.serial.port が残っているのは
+		// 普通のことです。それを理由に起動を止めると、使っていない機能のせいで
+		// ブリッジが上がらないという、直しどころの分からない失敗になります。
+		"the source is not serial": {
+			source:  Source{Type: SourceUVC, Serial: Serial{Port: "COM7"}},
+			running: OutputSerial{Enabled: true, Port: "COM7"},
+		},
+		// 動いていない出力はポートを握っていません。
+		"the output is switched off": {
+			source:  Source{Type: SourceSerial, Serial: Serial{Port: "COM7"}},
+			running: OutputSerial{Enabled: false, Port: "COM7"},
+		},
+		// "auto" は名前ではないので、突き合わせる相手がありません。ここで弾くと、
+		// 探索させたいだけの設定が理由なく拒否されます。
+		"the source port is auto": {
+			source:  Source{Type: SourceSerial, Serial: Serial{Port: "auto"}},
+			running: OutputSerial{Enabled: true, Port: "COM7"},
+		},
+	} {
+		if err := SerialPortConflict(tc.source, tc.running); err != nil {
+			t.Errorf("SerialPortConflict reported a clash when %s: %v", name, err)
+		}
+	}
+}
+
+// Validate はこの衝突を見ません。設定 1 つでは、出力が実際にどのポートを握って
+// いるかを答えられないからです (SerialPortConflict を参照)。
+func TestValidateLeavesTheRunningPortQuestionAlone(t *testing.T) {
+	cfg := Default()
+	cfg.Source.Type = SourceSerial
+	cfg.Source.Serial.Port = "COM7"
+	cfg.Output.Serial.Enabled = true
+	cfg.Output.Serial.Port = "COM7"
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate refused a config over a clash it cannot judge: %v", err)
+	}
+}
+
+// Windows のシリアルポートは COM7 とも \\.\COM7 とも書けて、どちらも同じデバイス
+// です。go.bug.st/serial は前置きが無ければ自分で足してから開くので、設定には
+// どちらを書いても通ります。文字列のまま比べると同じポートを見逃します。
+func TestSerialPortConflictSeesThroughTheDeviceNamespacePrefix(t *testing.T) {
+	for _, tc := range []struct{ source, output string }{
+		{`\\.\COM7`, "COM7"},
+		{"COM7", `\\.\COM7`},
+		{`\\.\COM7`, `\\.\com7`},
+	} {
+		err := SerialPortConflict(
+			Source{Type: SourceSerial, Serial: Serial{Port: tc.source}},
+			OutputSerial{Enabled: true, Port: tc.output},
+		)
+		if err == nil {
+			t.Errorf("SerialPortConflict(%q, %q) found no clash, want the two spellings recognised as one port", tc.source, tc.output)
+		}
+	}
+
+	// 前置きを剥がしても別のポートは別のポートのままです。
+	if err := SerialPortConflict(
+		Source{Type: SourceSerial, Serial: Serial{Port: `\\.\COM7`}},
+		OutputSerial{Enabled: true, Port: "COM8"},
+	); err != nil {
+		t.Errorf("SerialPortConflict reported a clash between COM7 and COM8: %v", err)
 	}
 }

@@ -15,8 +15,9 @@ const DefaultBoundary = "ptcambridge"
 var ErrInvalidBoundary = errors.New("invalid multipart boundary")
 
 // StreamHeader は、各フレームに付ける追加のパートヘッダーです。PaperTracker
-// クライアントはソースが公開されておらず、パーサーもリリースによって変わって
-// きたため、ヘッダーの構成は固定ではなく設定可能にしています。
+// クライアントが受け取る形は版によって違い得るので、ヘッダーの構成は固定せず
+// 設定可能にしています。合わなかったときに、再ビルドではなく設定で直せるように
+// するためです。
 type StreamHeader struct {
 	Name  string
 	Value string

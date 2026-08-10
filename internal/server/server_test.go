@@ -23,6 +23,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/core"
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
+	"github.com/limit7412/PTCamBridge/internal/output"
 	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
@@ -1628,4 +1629,117 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 			t.Error("the settings were applied even though the condition could not be read")
 		}
 	})
+}
+
+// fakeSerialOut は、シリアル出力の代わりに決まった数字を返します。ここで確かめ
+// たいのは /stats がそれを載せるかどうかで、ポートの開き方ではありません。
+type fakeSerialOut struct{ stats output.Stats }
+
+func (f fakeSerialOut) Stats() output.Stats { return f.stats }
+
+// シリアル出力を設定している人には、それが動いているかどうかを見る場所が要ります。
+// ポートの向こうは別のアプリケーションなので、こちら側から見えるのはここだけです。
+func TestStatsCarriesTheSerialOutputWhenThereIsOne(t *testing.T) {
+	want := output.Stats{Port: "COM7", Open: true, Written: 12, Bytes: 3456, Opens: 2}
+	s, _, _ := newTestServer(t, Options{SerialOut: fakeSerialOut{stats: want}})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/stats")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body Stats
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.SerialOut == nil {
+		t.Fatal("/stats has no serial_out section, want the configured output reported")
+	}
+	if *body.SerialOut != want {
+		t.Errorf("serial_out = %+v, want %+v", *body.SerialOut, want)
+	}
+}
+
+// 設定していない人の /stats に、開いていないポートの節を出してはいけません。
+// 何も設定していないのに何かが止まっているように読めます。
+func TestStatsLeavesOutTheSerialOutputWhenThereIsNone(t *testing.T) {
+	s, _, _ := newTestServer(t, Options{})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/stats")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["serial_out"]; present {
+		t.Errorf("/stats has a serial_out section with no serial output configured: %v", raw["serial_out"])
+	}
+}
+
+// output は後から足した節なので、それを知らないクライアントは名前を挙げません。
+// 挙げなかったことを「ゼロ値にしてくれ」と読むと、無関係な設定を 1 つ保存した
+// だけでシリアル出力が enabled = false になり、次の起動で黙って何も出なくなります。
+func TestConfigPutKeepsTheSerialOutputARequestNeverNamed(t *testing.T) {
+	running := config.Default()
+	running.Output.Serial.Enabled = true
+	running.Output.Serial.Port = "COM7"
+	ctrl := &fakeController{cfg: running}
+
+	s, _, _ := newTestServer(t, Options{Controller: ctrl, EnableAdmin: true})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	put := func(t *testing.T, body string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+
+	// 古いスキーマ。知っているものはすべて含み、output は含まない。
+	old := config.Default()
+	body, _ := json.Marshal(old)
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	delete(fields, "output")
+	withoutOutput, _ := json.Marshal(fields)
+
+	resp := put(t, string(withoutOutput))
+	if resp.StatusCode != http.StatusOK {
+		out, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want the request accepted: %s", resp.StatusCode, out)
+	}
+	if got := ctrl.cfg.Output.Serial; !got.Enabled || got.Port != "COM7" {
+		t.Errorf("the serial output is %+v, want the running COM7 output carried through untouched", got)
+	}
+
+	// 名前を挙げればちゃんと変わる。引き継ぎが本物の編集を隠すことはない。
+	named := config.Default()
+	named.Output.Serial.Enabled = false
+	namedBody, _ := json.Marshal(named)
+
+	resp = put(t, string(namedBody))
+	if resp.StatusCode != http.StatusOK {
+		out, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want the request accepted: %s", resp.StatusCode, out)
+	}
+	if ctrl.cfg.Output.Serial.Enabled {
+		t.Error("the serial output is still on after a request that named it off")
+	}
 }
