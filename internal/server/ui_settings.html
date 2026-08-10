@@ -561,7 +561,15 @@ async function loadCameraModes() {
   modesLoading.add(device);
   try {
     // 個体の照合が先。待つのは最初の一覧が終わるまでで、以降は素通りします。
-    if (devicesListed) await devicesListed;
+    //
+    // **数えられなかった一覧を待っても、照合は済んでいません。** ブリッジは列挙に
+    // 失敗したとき素性を照らし合わせないので (bridge.forgetModesIfCamerasChanged)、
+    // ここで訊くと差し替え前の憶えを受け取り、それを調べ済みとして刻み直します。
+    // 理由は上の camera-error に出ているので、ここは黙って引き下がります。
+    if (devicesListed && !(await devicesListed)) {
+      sayModes("");
+      return;
+    }
     // 待っている間に画面は動きます。別のカメラを打った人、UVC をやめた人の
     // ために、もう要らないカメラを開きに行くことはありません — 開けば使用ランプが
     // 点き、他のアプリと 15 秒取り合います。
@@ -718,10 +726,15 @@ function describeMode(m) {
 }
 
 // cameras は、最後に見たキャプチャの様子。listingDevices は数え直しが走っているか、
-// listAgain はその間に来た合図。
+// listAgain はその間に来た合図。countedAt は最後に数え直しを頼んだ時刻。
 let cameras = null;
 let listingDevices = false;
 let listAgain = false;
+let countedAt = null;
+
+// ADRIFT_RECOUNT_MS は、繋がらないまま漂っている UVC を数え直す間隔です。
+// 列挙は 1 回に最大 15 秒かかるので、これより短くすると ffmpeg が常駐します。
+const ADRIFT_RECOUNT_MS = 30000;
 
 // noticeCameras は、カメラが差し替わったかもしれない合図を拾います。
 //
@@ -734,6 +747,14 @@ let listAgain = false;
 //     いません**。切れたことだけを合図にすると、その一覧で終わってしまいます
 //   - 一時停止から戻った。止めている間の差し替えでは、ドライバは命じられて
 //     止まっているので切れたことになりません (status.SetPaused を参照)
+//
+// **繋がらないまま漂っている間だけは、変化が無くても数え直します。** 切れた時点で
+// 繋がっていなければ reconnects は増えず (status.Tracker.Disconnected を参照)、
+// 新しいカメラが今の解像度やフレームレートを受け付けなければ connected にも
+// なりません。つまり 3 つの合図がどれも出ません。そしてそれは珍しい状態では
+// ありません — **古い候補を見ながら、映らないカメラを差し替える**のがまさに
+// これです。ここだけは間隔を空けて数え直します。一時停止中は数えません。止めた
+// のはユーザーで、再開が合図になるからです。
 //
 // 見るのは**いま動いているソース**です。画面のラジオは、まだ保存していない選択で
 // あり得ます。シリアルが動いている画面で UVC を選んだまま置いておくと、シリアルの
@@ -754,7 +775,9 @@ function noticeCameras(state) {
   const changed = now.reconnects !== before.reconnects
     || (now.connected && !before.connected)
     || (before.paused && !now.paused);
-  if (!changed) return false;
+  const adrift = !now.connected && !now.paused
+    && (countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS);
+  if (!changed && !adrift) return false;
   countCameras();
   return true;
 }
@@ -772,6 +795,9 @@ function noticeCameras(state) {
 // 候補を捨てて訊き直すのは、**数えられたときだけ**です。失敗した一覧では、
 // ブリッジも素性を照らし合わせません。
 async function countCameras() {
+  // 頼まれた時点で刻みます。走っているものに重なったときも同じです — 漂っている
+  // 間の間隔は、終わりを待たずにここから数えます。
+  countedAt = Date.now();
   if (listingDevices) {
     listAgain = true;
     return;

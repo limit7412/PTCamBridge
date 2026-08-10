@@ -783,7 +783,9 @@ const first = loadCameraModes();
 await new Promise((r) => setTimeout(r, 0));
 const beforeList = asked;
 
-finishList();
+// 数えられた一覧として解く。数えられなかった一覧は、待っていた側も
+// 引き下がらなければならない (別のテストで見ている)。
+finishList(true);
 await new Promise((r) => setTimeout(r, 0));
 const afterList = asked;
 
@@ -1349,6 +1351,153 @@ release();
 	}
 	if got.AfterSuccess != "" {
 		t.Errorf("modesFor = %q after the cameras could be counted, want the candidates dropped", got.AfterSuccess)
+	}
+}
+
+// 繋がらないまま漂っている間は、合図が 1 つも出ないままカメラが差し替わります。
+//
+// 切れた時点で繋がっていなければ reconnects は増えず、新しいカメラが今の解像度を
+// 受け付けなければ connected にもなりません。古い候補を見ながら映らないカメラを
+// 差し替えるのがまさにこの状態なので、ここだけは間隔を空けて数え直します。
+func TestSettingsPageKeepsCountingWhileTheCameraNeverComesBack(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const adrift = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: false, paused: false}, over);
+
+// 時計はこちらが進める。実時間を待つテストは、待つ間に何も確かめない。
+let clock = 1000000;
+Date.now = () => clock;
+
+// 漂っている状態を 2 回見せる。1 回目は比べる相手が無いので数えない。
+noticeCameras(adrift());
+await settle();
+const afterFirst = listings;
+noticeCameras(adrift());
+await settle();
+const afterSecond = listings;
+
+// 間隔の内側では数え直さない。列挙は 1 回に最大 15 秒かかるので、2 秒ごとの
+// polling でそのたびに数えると ffmpeg が常駐する。
+clock += 29000;
+noticeCameras(adrift());
+await settle();
+const tooSoon = listings;
+
+// 間隔を越えたら数え直す。
+clock += 2000;
+noticeCameras(adrift());
+await settle();
+const later = listings;
+
+// 一時停止中は数えない。止めたのはユーザーで、再開そのものが合図になる。
+clock += 60000;
+noticeCameras(adrift({paused: true}));
+await settle();
+const whilePaused = listings;
+
+// 繋がったところは合図そのもの (挿さった)。ここでは数える。
+clock += 60000;
+noticeCameras(adrift({connected: true}));
+await settle();
+const onConnect = listings;
+
+// 繋がったままなら、間隔をいくら空けても数えない。差し替えれば必ず切れるので、
+// 3 つの合図がその場面を拾う。
+clock += 60000;
+noticeCameras(adrift({connected: true}));
+await settle();
+const whileConnected = listings;
+
+console.log(JSON.stringify({afterFirst, afterSecond, tooSoon, later, whilePaused, onConnect, whileConnected}));
+release();
+`
+	var got struct {
+		AfterFirst     int `json:"afterFirst"`
+		AfterSecond    int `json:"afterSecond"`
+		TooSoon        int `json:"tooSoon"`
+		Later          int `json:"later"`
+		WhilePaused    int `json:"whilePaused"`
+		OnConnect      int `json:"onConnect"`
+		WhileConnected int `json:"whileConnected"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterFirst != 0 {
+		t.Errorf("the first reading counted the cameras (%d listings); there was nothing to compare it with", got.AfterFirst)
+	}
+	if got.AfterSecond != 1 {
+		t.Errorf("counted %d times while the capture was adrift, want 1 — nothing else will ever signal a swap in this state", got.AfterSecond)
+	}
+	if got.TooSoon != 1 {
+		t.Errorf("counted %d times inside the interval, want 1 — a listing takes up to 15s, so ffmpeg would never leave", got.TooSoon)
+	}
+	if got.Later != 2 {
+		t.Errorf("counted %d times after the interval passed, want 2", got.Later)
+	}
+	if got.WhilePaused != 2 {
+		t.Errorf("counted %d times while paused, want 2 — the user stopped it, and resuming is the signal", got.WhilePaused)
+	}
+	if got.OnConnect != 3 {
+		t.Errorf("counted %d times when it finally connected, want 3 — that is the plugged-in signal", got.OnConnect)
+	}
+	if got.WhileConnected != 3 {
+		t.Errorf("counted %d times while it stayed connected, want 3 — a swap always disconnects, so the three signals cover it", got.WhileConnected)
+	}
+}
+
+// 数えられなかった一覧を待っていたモード問い合わせも、引き下がらなければなりません。
+//
+// 一覧が失敗したときブリッジは素性を照らし合わせないので、そこで訊くと差し替え前の
+// 憶えを受け取り、それを調べ済みとして刻み直します。数え直しの側で止めても、初回の
+// 表示から並行して走っている問い合わせはこの待ちを通ります。
+func TestSettingsPageDoesNotAskForModesBehindAFailedListing(t *testing.T) {
+	harness := modesHarness + `
+const askedModes = globalThis.fetch;
+let askedForModes = 0;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    return { ok: true, json: async () => ({cameras: [], serial_ports: [], camera_error: "uvc: ffmpeg is not installed"}) };
+  }
+  askedForModes++;
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+// 初回の表示。数え直しと、それを待つモード問い合わせが同時に走る。
+nodes["uvc-device"].value = "A";
+countCameras();
+loadCameraModes();
+await settle();
+
+console.log(JSON.stringify({askedForModes, modesFor: modesFor || ""}));
+release();
+`
+	var got struct {
+		AskedForModes int    `json:"askedForModes"`
+		ModesFor      string `json:"modesFor"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AskedForModes != 0 {
+		t.Errorf("asked for modes %d times behind a listing that failed, want 0 — the answer can only be the memory from before the swap", got.AskedForModes)
+	}
+	if got.ModesFor != "" {
+		t.Errorf("modesFor = %q, want none recorded — nothing was actually looked up", got.ModesFor)
 	}
 }
 
