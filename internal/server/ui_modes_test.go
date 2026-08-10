@@ -2794,3 +2794,57 @@ release();
 		t.Errorf("counted %d times on the next identical reading, want 2 — the signal is spent once UVC is actually back", got.Settled)
 	}
 }
+
+// UVC を離れたら、出ている候補欄と説明もその場で下ろします。
+//
+// 内側の配列だけ空にしても、datalist と「見つかったモード」の行は差し替え前のまま
+// 残ります。戻ってきたときにまず走るのは countCameras で、それは最大 15 秒かかります
+// — その間、欄はもう見えていて、古い解像度を選んで保存できてしまいます。
+func TestSettingsPageTakesDownTheCandidatesWhenItLeavesUVC(t *testing.T) {
+	harness := modesHarness + `
+// A のモードを出しておく。
+const first = loadCameraModes();
+release();
+await first;
+const showing = {
+  sizes: listed["camera-sizes"],
+  rates: listed["camera-framerates"],
+  modes: nodes["camera-modes"].textContent,
+};
+
+// 別のソースへ移る。
+sourceType = "mjpeg";
+await loadCameraModes();
+const after = {
+  sizes: listed["camera-sizes"],
+  rates: listed["camera-framerates"],
+  modes: nodes["camera-modes"].textContent,
+};
+
+console.log(JSON.stringify({showing, after}));
+release();
+`
+	type shown struct {
+		Sizes []string `json:"sizes"`
+		Rates []string `json:"rates"`
+		Modes string   `json:"modes"`
+	}
+	var got struct {
+		Showing shown `json:"showing"`
+		After   shown `json:"after"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if want := []string{"640x480"}; !equalStrings(got.Showing.Sizes, want) || got.Showing.Modes == "" {
+		t.Fatalf("before leaving: sizes %v and modes %q, want %v and a description", got.Showing.Sizes, got.Showing.Modes, want)
+	}
+	if len(got.After.Sizes) != 0 || len(got.After.Rates) != 0 {
+		t.Errorf("sizes %v and framerates %v are still offered after leaving UVC, want both taken down — coming back runs a listing first, and that takes up to 15s with the fields already visible", got.After.Sizes, got.After.Rates)
+	}
+	if got.After.Modes != "" {
+		t.Errorf("the modes line still reads %q after leaving UVC, want it cleared", got.After.Modes)
+	}
+}
