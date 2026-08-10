@@ -1205,7 +1205,16 @@ const beforeResume = listings;
 const resumed = noticeCameras(running({reconnects: 2, connected: false, paused: false}));
 await settle();
 
-console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: listings - beforeResume}));
+// 別のソースへ移り、そこで同名のカメラを差し替えて UVC へ戻した。ソースの切替では
+// reconnects は増えず (status.SetSource は数を触らない)、次に見るまでに繋がって
+// いれば connected も動かないので、他の合図はどれも出ない。
+noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false});
+await settle();
+const beforeReturn = listings;
+const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false});
+await settle();
+
+console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: listings - beforeResume - (listings - beforeReturn), returned, afterReturn: listings - beforeReturn}));
 release();
 `
 	var got struct {
@@ -1218,6 +1227,8 @@ release();
 		AfterBack   int  `json:"afterBack"`
 		Resumed     bool `json:"resumed"`
 		AfterResume int  `json:"afterResume"`
+		Returned    bool `json:"returned"`
+		AfterReturn int  `json:"afterReturn"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -1238,6 +1249,9 @@ release();
 	}
 	if !got.Resumed || got.AfterResume != 1 {
 		t.Errorf("counted %d times after resuming, want 1 — a swap while paused never disconnects anything", got.AfterResume)
+	}
+	if !got.Returned || got.AfterReturn != 1 {
+		t.Errorf("counted %d times after coming back to UVC, want 1 — switching sources moves neither the counter nor the connection", got.AfterReturn)
 	}
 }
 

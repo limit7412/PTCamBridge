@@ -747,6 +747,9 @@ const ADRIFT_RECOUNT_MS = 30000;
 //     いません**。切れたことだけを合図にすると、その一覧で終わってしまいます
 //   - 一時停止から戻った。止めている間の差し替えでは、ドライバは命じられて
 //     止まっているので切れたことになりません (status.SetPaused を参照)
+//   - UVC へ入った。別のソースで動かしている間に差し替えて戻した場合、ソースの
+//     切替では数は増えず (status.SetSource は reconnects を触りません)、次に
+//     見るまでに繋がっていれば繋がったことにもなりません
 //
 // **繋がらないまま漂っている間だけは、変化が無くても数え直します。** 切れた時点で
 // 繋がっていなければ reconnects は増えず (status.Tracker.Disconnected を参照)、
@@ -764,15 +767,17 @@ const ADRIFT_RECOUNT_MS = 30000;
 // 最初の 1 回は合図になりません。比べる相手が無いので「変わった」と言えません。
 function noticeCameras(state) {
   const now = {
+    capturing: state.capturing || "",
     reconnects: state.reconnects || 0,
     connected: !!state.connected,
     paused: !!state.paused,
   };
   const before = cameras;
   cameras = now;
-  if (!before || state.capturing !== "uvc") return false;
+  if (!before || now.capturing !== "uvc") return false;
 
-  const changed = now.reconnects !== before.reconnects
+  const changed = before.capturing !== "uvc"
+    || now.reconnects !== before.reconnects
     || (now.connected && !before.connected)
     || (before.paused && !now.paused);
   const adrift = !now.connected && !now.paused
