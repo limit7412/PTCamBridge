@@ -665,9 +665,15 @@ func entityTag(token string) string {
 // ひとつも残らなければ、一致しようのない条件として 412 になります。黙って
 // 「条件なし」に変えてはいけません — 競合を防いだつもりの要求が、防がないまま
 // 通ります。
+// 条件を付けていないのは、**ヘッダーそのものが無いとき**だけです。付いていて中身が
+// 空なのは、札を渡し損ねた要求です。空を「条件なし」に読み替えると、防いだつもりの
+// 上書きがそのまま通るので、読めない値と同じく断る側へ倒します。
 func ifMatch(headers []string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
 	header := strings.TrimSpace(strings.Join(headers, ", "))
-	if header == "" || header == "*" {
+	if header == "*" {
 		return nil
 	}
 	tokens := []string{}

@@ -1471,6 +1471,29 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		}
 	})
 
+	// 条件を付けていないのは、ヘッダーそのものが無いときだけ。付いていて中身が
+	// 空なのは、札を渡し損ねた要求。空を「条件なし」に読み替えると、防いだつもりの
+	// 上書きがそのまま通る。
+	t.Run("an empty condition is not the same as no condition", func(t *testing.T) {
+		ctrl.applied = false
+		body, _ := json.Marshal(ctrl.cfg)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header["If-Match"] = []string{""}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on an If-Match that carried no version at all")
+		}
+	})
+
 	t.Run("* is accepted", func(t *testing.T) {
 		ctrl.applied = false
 		if resp := put(t, "*"); resp.StatusCode != http.StatusOK {

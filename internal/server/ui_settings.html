@@ -388,12 +388,16 @@ el("settings").addEventListener("submit", async (event) => {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
     // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
     // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
-    // 送る土台は取り直した設定。画面に出していない項目 — シリアルのヘッダ定数、
-    // 追加ヘッダー、フレーム上限 — をこちらの古い写しで押し戻さないため。
-    // ただし**条件はそれではなく、画面を描いたときの札**。取り直した札を条件に
-    // すると、画面を開いてから保存を押すまでの間に別のクライアントが変えたものは
-    // 競合にならず、ユーザーが見たことのない値を黙って消せる。
-    const base = await getConfig();
+    //
+    // **本体と条件は、必ず同じ 1 つの読みから組む** (ground)。土台を取り直した
+    // 設定にしながら条件を画面を描いたときの札にすると、設定が A → B → A と戻る
+    // 途中で読んだ B を本体にして、A の札で書けてしまう。ブリッジが A に戻った
+    // 後にそれを受けると条件は成立し、ユーザーが触ってもいない B の値が確認なしで
+    // 復活する。
+    //
+    // 「描いてから動いたか」は、こちらで札を見比べて確かめる。サーバの 412 に
+    // 任せられないのは、まさに A → B → A では札が戻ってしまうから。
+    let ground = await getConfig();
     const overlay = (cfg) => {
       const now = readForm();
       FIELDS.forEach((field, i) => {
@@ -407,31 +411,37 @@ el("settings").addEventListener("submit", async (event) => {
     let mine = rendered;
 
     sent = true;
-    let response = await save(overlay(base.cfg), baselineRevision);
-    // 送り直しも 412 になる。取り直してから確認を出している間に、また誰かが
-    // 書けば同じことが起きる。1 回で終わりにすると、その 412 は普通の失敗として
-    // 扱われ、後の rebase が最新の札とユーザーの古い編集を組み合わせるので、
-    // もう一度保存を押したときに、**新しく入った変更を確認なしで消す**。だから
-    // 通るまで — あるいは諦めるまで — 同じ手順に戻す。
-    for (let tries = 0; response.status === 412 && tries < 4; tries++) {
-      // 描いてから書くまでの間に、別のクライアントが変更を確定させた。
-      const fresh = await getConfig();
-      // 訊くのは、**同じ項目**を触っていたときだけ。触っていない項目の変更は、
-      // こちらが押し戻すものではないので (送るのは触った葉だけ)、黙って取り直して
-      // 送り直せば、相手の変更もこちらの変更も残る。ログの行を直したい人に、
-      // 誰かがカメラを切り替えたことを確認させる理由はない。
-      const clash = clashingLeaves(mine, fresh.cfg, dirty);
-      if (clash.length && !confirm(conflictMessage(clash))) {
-        say(TEXT.conflictKept);
-        rebase(fresh.cfg, dirty, fresh.revision);
-        return;
+    let response = null;
+    // 412 で終わりにしない。取り直してから確認を出している間に、また誰かが書けば
+    // 同じことが起きる。1 回で諦めると、その 412 は普通の失敗として扱われ、後の
+    // rebase が最新の札とユーザーの古い編集を組み合わせるので、もう一度保存を
+    // 押したときに、**新しく入った変更を確認なしで消す**。だから通るまで —
+    // あるいは諦めるまで — 同じ手順に戻す。書き続けているクライアントに付き合い
+    // 続けないよう、周回には上限を置く。
+    for (let tries = 0; tries < 5; tries++) {
+      // 描いた設定と違うものの上に書くなら、それは競合。訊くのは、**同じ項目**を
+      // 触っていたときだけ。触っていない項目の変更は、こちらが押し戻すもので
+      // はないので (送るのは触った葉だけ)、黙って取り直して送り直せば、相手の
+      // 変更もこちらの変更も残る。ログの行を直したい人に、誰かがカメラを
+      // 切り替えたことを確認させる理由はない。
+      if (ground.revision !== baselineRevision) {
+        const clash = clashingLeaves(mine, ground.cfg, dirty);
+        if (clash.length && !confirm(conflictMessage(clash))) {
+          say(TEXT.conflictKept);
+          rebase(ground.cfg, dirty, ground.revision);
+          return;
+        }
+        // ここまでの値は、ユーザーが見て承知したもの。次の周で比べる相手をこれに
+        // 進めておかないと、同じ変更について何度も訊くことになる。**写しを取る** —
+        // 同じオブジェクトを持つと、この直後の overlay が比べる相手までユーザーの
+        // 入力で塗り替え、承知済みの葉が何度でも競合として挙がる。
+        mine = JSON.parse(JSON.stringify(ground.cfg));
       }
-      // ここまでの値は、ユーザーが見て承知したもの。次の周で比べる相手をこれに
-      // 進めておかないと、同じ変更について何度も訊くことになる。
-      mine = fresh.cfg;
-      // 送り直すのは、取り直した設定に同じ変更を重ねたもの。さっきの本体をその
-      // まま投げ直すと、承知したはずの相手の変更を消すことになる。
-      response = await save(overlay(fresh.cfg), fresh.revision);
+      // 送るのは、その読みに同じ変更を重ねたもの。前の本体をそのまま投げ直すと、
+      // 承知したはずの相手の変更を消すことになる。
+      response = await save(overlay(ground.cfg), ground.revision);
+      if (response.status !== 412) break;
+      ground = await getConfig();
     }
     const text = await response.text();
     if (!response.ok) {

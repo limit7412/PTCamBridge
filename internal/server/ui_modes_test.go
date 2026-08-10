@@ -1181,34 +1181,41 @@ func TestSettingsPageAsksBeforeWritingOverSomeoneElsesChange(t *testing.T) {
 	if !strings.Contains(body, "confirm(conflictMessage(") {
 		t.Error("the save flow overwrites someone else's change without asking")
 	}
-	// 送り直すのは、取り直した設定に同じ変更を重ねたもの。さっきの本体をそのまま
-	// 投げ直すと、承知したはずの相手の変更を消すことになる。
-	if !strings.Contains(body, "save(overlay(fresh.cfg), fresh.revision)") {
-		t.Error("the retry does not rebuild the change on top of the settings it just re-read")
+	// 本体と条件は同じ 1 つの読みから組む。土台を取り直した設定にしながら条件を
+	// 画面を描いたときの札にすると、A → B → A と戻る途中で読んだ B を、A の札で
+	// 書けてしまう。ユーザーが触ってもいない B の値が確認なしで復活する。
+	if !strings.Contains(body, "save(overlay(ground.cfg), ground.revision)") {
+		t.Error("the body and the condition come from different reads, so a value the user never saw can be restored under a matching tag")
 	}
-	if !strings.Contains(body, "rebase(fresh.cfg, dirty, fresh.revision)") {
+	if strings.Contains(body, "baselineRevision);") {
+		t.Error("a save is conditioned on the version from render time rather than on the settings it is actually built on")
+	}
+	// 「描いてから動いたか」はこちらで札を見比べる。サーバの 412 には任せられない
+	// — まさに A → B → A では札が戻るので 412 が出ない。
+	if !strings.Contains(body, "ground.revision !== baselineRevision") {
+		t.Error("the page never compares what it drew with what it is about to write on, so a change the user never saw is not a conflict")
+	}
+	if !strings.Contains(body, "rebase(ground.cfg, dirty, ground.revision)") {
 		t.Error("declining the overwrite must leave the page showing the current settings with the user's edits")
 	}
 	// 訊くのは同じ項目を触っていたときだけ。触っていない項目の変更は、こちらが
 	// 押し戻すものではないので、黙って取り直して送り直せば両方の変更が残る。
-	if !strings.Contains(body, "clashingLeaves(mine, fresh.cfg, dirty)") {
+	if !strings.Contains(body, "clashingLeaves(mine, ground.cfg, dirty)") {
 		t.Error("the save flow asks about changes to settings the user never touched")
 	}
-	// 条件は「画面を描いたときの札」。送る直前に取り直したものではない。
-	if !strings.Contains(body, "save(overlay(base.cfg), baselineRevision)") {
-		t.Error("the first save is conditioned on a version read after the page was drawn, so changes the user never saw are not conflicts")
-	}
-	// 送り直しも 412 になる。取り直してから確認を出している間に、また誰かが
-	// 書けば同じことが起きる。1 回で終わりにすると、その 412 は普通の失敗として
-	// 扱われ、後の rebase が最新の札とユーザーの古い編集を組み合わせるので、
-	// もう一度保存を押したときに、新しく入った変更を確認なしで消す。
-	if !strings.Contains(body, "for (let tries = 0; response.status === 412") {
+	// 412 で終わりにしない。取り直してから確認を出している間に、また誰かが書けば
+	// 同じことが起きる。1 回で諦めると、その 412 は普通の失敗として扱われ、後の
+	// rebase が最新の札とユーザーの古い編集を組み合わせるので、もう一度保存を
+	// 押したときに、新しく入った変更を確認なしで消す。
+	if !strings.Contains(body, "if (response.status !== 412) break;") {
 		t.Error("only the first save can be a conflict, so a change that lands during the retry is overwritten without asking")
 	}
-	// 比べる相手は、ユーザーが見て承知したところまで進めなければならない。
-	// 進めないと、既に承知した同じ変更について何度も訊くことになる。
-	if !strings.Contains(body, "mine = fresh.cfg;") {
-		t.Error("the retry compares against what the page drew, so it asks again about changes the user already accepted")
+	// 比べる相手は、ユーザーが見て承知したところまで進めなければならない。進め
+	// ないと、既に承知した同じ変更について何度も訊くことになる。**写しを取る** —
+	// 同じオブジェクトを持つと、直後の overlay が比べる相手までユーザーの入力で
+	// 塗り替え、承知済みの葉が何度でも競合として挙がる。
+	if !strings.Contains(body, "mine = JSON.parse(JSON.stringify(ground.cfg));") {
+		t.Error("the next round compares against an object the overlay is about to rewrite, so settings the user already accepted come up again")
 	}
 }
 
