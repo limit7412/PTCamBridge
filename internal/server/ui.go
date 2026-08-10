@@ -99,6 +99,16 @@ type uiState struct {
 	// Overridden は、起動時の指定が優先されるため、設定ファイルに何を書いても
 	// 変わらない設定の名前です。設定画面がそう伝えるために読みます。
 	Overridden []string `json:"overridden,omitempty"`
+	// Capturing は、いま動いているソースの種別です ("uvc" / "serial" / "mjpeg")。
+	// 何も動いていなければ空。Connected と Paused も同じく、判断のための値です。
+	//
+	// State と Source が表示用なのに対して、こちらは読み手が比べるためのものです。
+	// 表示用の文字列は翻訳されるので、それで判断すると言語ごとに違う動きになります。
+	// 設定画面はこの 3 つで「カメラが差し替わったかもしれない」を見ます
+	// (ui_settings.html の noticeCameras を参照)。
+	Capturing string `json:"capturing,omitempty"`
+	Connected bool   `json:"connected"`
+	Paused    bool   `json:"paused"`
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +277,9 @@ func newUIState(p i18n.Printer, snapshot status.Snapshot, frames hub.Stats, ffmp
 		FrameSize:  formatBytes(frames.LastFrameSize),
 		LastFrame:  p.S(i18n.UINone),
 		HasFrame:   !frames.LastFrameAt.IsZero(),
+		Capturing:  snapshot.Source,
+		Connected:  snapshot.Connected,
+		Paused:     snapshot.Paused,
 	}
 	if out.LastError == "" {
 		out.LastError = p.S(i18n.UINone)
