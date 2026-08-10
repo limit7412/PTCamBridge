@@ -81,3 +81,25 @@ func TestTrackerCountsThePauses(t *testing.T) {
 		t.Errorf("pauses = %d after being told to pause twice, want 3 — nothing moved the second time", got)
 	}
 }
+
+// ソースの切替も数えます。今どれが動いているかだけを載せると、状態を読む側の
+// 2 回の読みの間で別のソースへ移って戻ってきた往復が見えません。
+func TestTrackerCountsTheSourceSwitches(t *testing.T) {
+	tr := New()
+	if got := tr.Snapshot().Switches; got != 0 {
+		t.Fatalf("switches = %d before anything happened, want 0", got)
+	}
+
+	tr.SetSource("uvc")
+	tr.SetSource("serial")
+	tr.SetSource("uvc")
+	if got := tr.Snapshot().Switches; got != 3 {
+		t.Errorf("switches = %d after uvc, serial and back, want 3", got)
+	}
+
+	// 同じソースを立て直しただけなら、何も入れ替わっていません。
+	tr.SetSource("uvc")
+	if got := tr.Snapshot().Switches; got != 3 {
+		t.Errorf("switches = %d after restarting the same source, want 3 — nothing was swapped", got)
+	}
+}

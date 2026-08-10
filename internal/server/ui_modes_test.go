@@ -1217,13 +1217,20 @@ const afterQuick = listings - beforeQuick;
 // 別のソースへ移り、そこで同名のカメラを差し替えて UVC へ戻した。ソースの切替では
 // reconnects は増えず (status.SetSource は数を触らない)、次に見るまでに繋がって
 // いれば connected も動かないので、他の合図はどれも出ない。
-noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 2});
+noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 2, switches: 1});
 await settle();
 const beforeReturn = listings;
-const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 2});
+const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 2, switches: 2});
 await settle();
 
-console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforeQuick - beforeResume, quick, afterQuick, returned, afterReturn: listings - beforeReturn}));
+// 移って戻るまでが、読みと読みの間で終わった。前後の種別はどちらも uvc で、
+// 切替では切れた回数も増えない。数だけが動く。
+const beforeRound = listings;
+const roundTrip = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 2, switches: 4});
+await settle();
+const afterRound = listings - beforeRound;
+
+console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforeQuick - beforeResume, quick, afterQuick, returned, afterReturn: beforeRound - beforeReturn, roundTrip, afterRound}));
 release();
 `
 	var got struct {
@@ -1240,6 +1247,8 @@ release();
 		AfterQuick  int  `json:"afterQuick"`
 		Returned    bool `json:"returned"`
 		AfterReturn int  `json:"afterReturn"`
+		RoundTrip   bool `json:"roundTrip"`
+		AfterRound  int  `json:"afterRound"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -1266,6 +1275,9 @@ release();
 	}
 	if !got.Returned || got.AfterReturn != 1 {
 		t.Errorf("counted %d times after coming back to UVC, want 1 — switching sources moves neither the counter nor the connection", got.AfterReturn)
+	}
+	if !got.RoundTrip || got.AfterRound != 1 {
+		t.Errorf("counted %d times after a trip through another source that started and ended between two readings, want 1 — both readings say uvc", got.AfterRound)
 	}
 }
 
@@ -1681,6 +1693,73 @@ release();
 	}
 }
 
+// 途中で一度でも数えられていれば、憶えはもう古いので捨てます。
+//
+// ブリッジは列挙できたときに素性を照らし合わせます。繰り越しの途中で一度成功して
+// いれば、その時点で差し替えは知られています。最後の一覧が転んだからといって候補を
+// 残すと、差し替え前のものが次の数え直しまで有効なまま居座ります。
+func TestSettingsPageDropsTheCandidatesEvenIfTheLastListingFailed(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let askedForModes = 0;
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    const which = ++listings;
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    // 1 本目は数えられる。繰り越した 2 本目だけが転ぶ。
+    return { ok: true, json: async () => (which === 1
+      ? {cameras: [], serial_ports: []}
+      : {cameras: [], serial_ports: [], camera_error: "uvc: ffmpeg is not installed"}) };
+  }
+  askedForModes++;
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+
+// A は調べ終えているものとする。
+nodes["uvc-device"].value = "A";
+modesFor = "A";
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+
+// 走っている間にもう一度合図。繰り越される。
+noticeCameras(running({reconnects: 3}));
+await settle();
+
+releaseDevices();   // 1 本目 (数えられる)
+await settle();
+releaseDevices();   // 2 本目 (転ぶ)
+await settle();
+
+console.log(JSON.stringify({listings, askedForModes, modesFor: modesFor || ""}));
+release();
+`
+	var got struct {
+		Listings      int    `json:"listings"`
+		AskedForModes int    `json:"askedForModes"`
+		ModesFor      string `json:"modesFor"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Listings != 2 {
+		t.Fatalf("%d listings, want 2 — the signal that arrived mid-run must be carried over", got.Listings)
+	}
+	if got.ModesFor != "" {
+		t.Errorf("modesFor = %q, want it dropped — a listing in this run did succeed, so the bridge already reconciled and this memory is from before the swap", got.ModesFor)
+	}
+	if got.AskedForModes != 0 {
+		t.Errorf("asked for the modes %d times, want 0 — the last listing failed, so the answer would not have been reconciled either", got.AskedForModes)
+	}
+}
+
 // 数えられなかったら、合図を待たずに数え直します。
 //
 // 列挙が一度転ぶと、ブリッジは憶えを捨てず、その一覧を待っているモードの問い合わせも
@@ -1836,6 +1915,17 @@ func TestSettingsPageWatchesTheCaptureForCameraChanges(t *testing.T) {
 	body := settingsFunction(t, "async function pollFFmpeg() {")
 	if !strings.Contains(body, "noticeCameras(state)") {
 		t.Error("the state polling does not notice that the camera may have been swapped")
+	}
+	// 送った順に返るとは限りません (setInterval と取得操作の後から重ねて呼ばれます)。
+	// 古い標本で今の様子を巻き戻すと、増える一方の数が減って見えて、1 回の遷移から
+	// 何度も数え直すことになります — 減ったことも「変わった」だからです。
+	dropped := strings.Index(body, "if (mine <= polled) return;")
+	noticed := strings.Index(body, "noticeCameras(state)")
+	if dropped < 0 || noticed < 0 || dropped > noticed {
+		t.Error("a reading that came back late is handed to the camera watch, where the counters going backwards look like a fresh change")
+	}
+	if !strings.Contains(body, "const mine = ++polls;") {
+		t.Error("the state readings are not numbered, so there is no way to tell a late one from a fresh one")
 	}
 	if strings.Contains(uiSettingsHTML, "devicesListed = loadDevices();\nload();") {
 		t.Error("the first device listing bypasses the one that guards against piling up")

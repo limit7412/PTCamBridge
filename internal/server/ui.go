@@ -114,6 +114,9 @@ type uiState struct {
 	Connected bool   `json:"connected"`
 	Paused    bool   `json:"paused"`
 	Pauses    uint64 `json:"pauses"`
+	// Switches は、稼働中のソースが別の種別に変わった回数です。Capturing だけだと、
+	// 読みと読みの間で別のソースへ移って戻ってきた往復が見えません。
+	Switches uint64 `json:"switches"`
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +289,7 @@ func newUIState(p i18n.Printer, snapshot status.Snapshot, frames hub.Stats, ffmp
 		Connected:  snapshot.Connected,
 		Paused:     snapshot.Paused,
 		Pauses:     snapshot.Pauses,
+		Switches:   snapshot.Switches,
 	}
 	if out.LastError == "" {
 		out.LastError = p.S(i18n.UINone)

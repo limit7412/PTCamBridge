@@ -30,6 +30,10 @@ type Snapshot struct {
 	// 背景のタブでは間隔が分単位まで伸びるので、その間に一時停止して差し替えて
 	// 再開する、というのは十分あり得ます。数なら、何度あっても取りこぼしません。
 	Pauses uint64 `json:"pauses"`
+	// Switches は、稼働中のソースが別の種別に変わった回数です。Source と同じ理由で
+	// 数にしてあります — 今どれが動いているかだけでは、標本と標本の間で別のソースへ
+	// 移って戻ってきた往復が見えません。
+	Switches uint64 `json:"switches"`
 }
 
 // Tracker は、ソースの接続状態の遷移を記録します。ドライバが報告に使う
@@ -46,6 +50,7 @@ type Tracker struct {
 	startedAt      time.Time
 	paused         bool
 	pauses         uint64
+	switches       uint64
 
 	// classify は、画面側が翻訳すべきエラーに対応するメッセージ名を返します。
 	// 注入にしているのは、どの失敗がそれに当たるかを知っているのはドライバ側
@@ -78,6 +83,11 @@ func New(opts ...Option) *Tracker {
 func (t *Tracker) SetSource(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// 数えるのは、別の種別へ移ったときだけです。同じソースを立て直しただけなら
+	// 何も入れ替わっていないので、数も動かしません。
+	if name != t.source {
+		t.switches++
+	}
 	t.source = name
 	t.connected = false
 	t.lastError = ""
@@ -158,5 +168,6 @@ func (t *Tracker) Snapshot() Snapshot {
 		UptimeSeconds:  time.Since(t.startedAt).Seconds(),
 		Paused:         t.paused,
 		Pauses:         t.pauses,
+		Switches:       t.switches,
 	}
 }

@@ -765,6 +765,8 @@ let countedAt = null;
 // 数えないので、前の標本と比べるだけでは足りません (止まった標本を見た時点で
 // 前の値が追いついてしまい、再開が合図にならなくなります)。
 let countedPauses = 0;
+// countedSwitches は、最後に数え直したときに見た「ソースが移った回数」。
+let countedSwitches = 0;
 // countFailed は、最後の数え直しが失敗したかどうか。失敗した一覧は「1 台も無い」
 // とは違うので、成功するまで数え直す理由が残ります。
 let countFailed = false;
@@ -787,9 +789,11 @@ const ADRIFT_RECOUNT_MS = 30000;
 //     ではなく**止められた回数**を見るのは、読みと読みの間で止めて再開まで済ませた
 //     操作を取りこぼさないためです — 背景のタブでは読む間隔が分単位まで伸びるので、
 //     その間に一時停止して差し替えて再開する、というのは十分あり得ます
-//   - UVC へ入った。別のソースで動かしている間に差し替えて戻した場合、ソースの
-//     切替では数は増えず (status.SetSource は reconnects を触りません)、次に
-//     見るまでに繋がっていれば繋がったことにもなりません
+//   - ソースが移った後、UVC で動いている。別のソースで動かしている間に差し替えて
+//     戻した場合、ソースの切替では切れた回数は増えず (status.SetSource は
+//     reconnects を触りません)、次に見るまでに繋がっていれば繋がったことにも
+//     なりません。ここも今の種別ではなく**移った回数**を見ます。移って戻るまでが
+//     読みと読みの間で終わると、前後の種別はどちらも uvc だからです
 //
 // **繋がらないまま漂っている間だけは、変化が無くても数え直します。** 切れた時点で
 // 繋がっていなければ reconnects は増えず (status.Tracker.Disconnected を参照)、
@@ -810,17 +814,21 @@ function noticeCameras(state) {
     capturing: state.capturing || "",
     reconnects: state.reconnects || 0,
     pauses: state.pauses || 0,
+    switches: state.switches || 0,
     connected: !!state.connected,
     paused: !!state.paused,
   };
   const before = cameras;
   cameras = now;
+  // 数で見るものは、見送るときも刻んでおきます。刻まないと、画面を開いた最初の
+  // 1 回や、UVC 以外で動いている間に溜まった分が、次に見たとき合図になります。
   if (!before || now.capturing !== "uvc") {
     countedPauses = now.pauses;
+    countedSwitches = now.switches;
     return false;
   }
 
-  const changed = before.capturing !== "uvc"
+  const changed = now.switches !== countedSwitches
     || now.reconnects !== before.reconnects
     || (now.connected && !before.connected)
     // 止められた回数が、最後に数えたときから動いている。動いていても、止まって
@@ -840,6 +848,7 @@ function noticeCameras(state) {
     && (countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS);
   if (!changed && !adrift) return false;
   countedPauses = now.pauses;
+  countedSwitches = now.switches;
   countCameras();
   return true;
 }
@@ -866,6 +875,7 @@ async function countCameras() {
   }
   listingDevices = true;
   let counted = false;
+  let everCounted = false;
   try {
     do {
       listAgain = false;
@@ -874,22 +884,24 @@ async function countCameras() {
       devicesListed = loadDevices();
       counted = await devicesListed;
       countFailed = !counted;
+      if (counted) everCounted = true;
     } while (listAgain);
   } finally {
     listingDevices = false;
   }
-  // 訊き直すのは、**繰り越しまで終えた後**です。途中の一覧で始めると、繰り越した
-  // 列挙と同じカメラを同時に開きに行くことになります。しかも途中の一覧が差し替え前の
-  // もので、繰り越した側だけが転んだ場合、世代が進まないので、その間に返った
-  // 差し替え前の答えが有効なものとして受理されます。
-  if (counted) {
-    // 数えられた。ここから先、これより前に立った問い合わせの答えは、差し替え前の
-    // ものかもしれません。
+  // 途中で一度でも数えられていれば、ブリッジは素性を照らし合わせ済みです。
+  // 最後の一覧が転んでも、こちらの憶えはもう古い — 捨てておかないと、差し替え前の
+  // 候補と、走っていた古い世代の答えが、次の数え直しまで有効なまま残ります。
+  if (everCounted) {
     countedTimes++;
     // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
     modesFor = null;
-    loadCameraModes();
   }
+  // 訊き直すのは、**最後の一覧が数えられたときだけ**、しかも**繰り越しまで終えた
+  // 後**です。途中の一覧で始めると、繰り越した列挙と同じカメラを同時に開きに行く
+  // ことになります。最後が転んでいれば、訊いても照合の済んでいない答えが返るだけ
+  // なので、次の数え直しに任せます (countFailed が立っているので 30 秒後に来ます)。
+  if (counted) loadCameraModes();
 }
 
 el("uvc-device").addEventListener("change", loadCameraModes);
@@ -907,12 +919,23 @@ el("uvc-framerate").addEventListener("input", refreshModeChoices);
 // サイズ、ライセンス。取得できる状態のときだけ届く。
 let ffmpegPrompt = "";
 
+// polls は送った順、polled は取り込んだ中でいちばん新しい順番。pollFFmpeg は
+// setInterval と取得操作の後から重ねて呼ばれるので、送った順に返るとは限りません。
+let polls = 0;
+let polled = 0;
+
 async function pollFFmpeg() {
+  const mine = ++polls;
   try {
     const response = await fetch("/ui/state", { cache: "no-store" });
     if (!response.ok) return;
     const state = await response.json();
-    // 切れた・繋がった・一時停止から戻ったなら、カメラが差し替わったかもしれません。
+    // 古い標本で今の様子を巻き戻してはいけません。増える一方の数が減って見えるので、
+    // 1 回の遷移から何度も数え直すことになります (減ったことも「変わった」です)。
+    if (mine <= polled) return;
+    polled = mine;
+    // 切れた・繋がった・止めて動き出した・ソースが移ったなら、カメラが差し替わった
+    // かもしれません。
     noticeCameras(state);
     el("ffmpeg-actions").hidden = !state.has_ffmpeg;
     el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
