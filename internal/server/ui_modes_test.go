@@ -3144,3 +3144,33 @@ release();
 		t.Errorf("the modes line reads %q, want it cleared", got.Modes)
 	}
 }
+
+// 応答がフォームを UVC へ戻す経路でも、訊く前に数え直さなければなりません。
+//
+// ラジオの change は代入では起きないので、そこに置いた数え直しは fill を通りません。
+// 別のクライアントやトレイが UVC に変えていれば、無関係な設定を保存しただけで応答が
+// この欄をそちらへ書き換えます。離れている間に差し替えられていても、こちらの一覧には
+// まだ同じ名前が残っているので、訊くだけではブリッジの差し替え前の憶えを候補に
+// 戻せます。
+//
+// fill は切り出す範囲の外なので、ここはスクリプトの形で押さえます。
+func TestSettingsPageCountsTheCamerasWhenTheAnswerPutsItBackOnUVC(t *testing.T) {
+	body := settingsFunction(t, "function fill(cfg, revision) {")
+
+	if !strings.Contains(body, "countCameras()") {
+		t.Fatal("fill only asks for the modes; coming back to UVC through a save can hand back the bridge's pre-swap memory")
+	}
+	if !strings.Contains(body, `before !== "uvc"`) {
+		t.Error("fill counts the cameras even when the form was already on UVC; every save would pay for a listing")
+	}
+	if !strings.Contains(body, `before !== ""`) {
+		t.Error("fill counts the cameras on the first draw too; the initialisation already started one, so this one is carried over")
+	}
+
+	// 控えるのは書き換える**前**でなければ、常に UVC を見ることになります。
+	kept := strings.Index(body, "const before =")
+	wrote := strings.Index(body, "field.write(")
+	if kept < 0 || wrote < 0 || kept > wrote {
+		t.Error("fill reads the source it is moving away from after writing the form, so it can never see a move")
+	}
+}

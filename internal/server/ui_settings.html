@@ -252,6 +252,13 @@ function showSource(type) {
 }
 
 function fill(cfg, revision) {
+  // 書き換える前のソースを控えます。**この経路でも UVC へ戻ることがあります** —
+  // 別のクライアントやトレイが UVC に変えていれば、応答がこの欄をそちらへ書き
+  // 換えます。ラジオの change は代入では起きないので、そこに置いた数え直しは
+  // 走りません。
+  const chosen = document.querySelector('input[name="source-type"]:checked');
+  const before = chosen ? chosen.value : "";
+
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
@@ -261,6 +268,19 @@ function fill(cfg, revision) {
   // 初回の読み込みだけでなく、保存のたびに通るこの経路でも要る — 別のクライアント
   // やトレイがカメラを変えていれば、応答がこの欄をそちらへ書き換えるので、欄と
   // 候補が別のカメラを指すことになる。名前が変わっていなければ何もしない。
+  //
+  // **他のソースから UVC へ移ったのなら、訊く前に数え直します。** 離れている間に
+  // 差し替えられていても、こちらの一覧にはまだ同じ名前が残っているので、訊くだけ
+  // ではブリッジの差し替え前の憶えをそのまま候補に戻せます (ラジオの change と
+  // 同じ理由。そちらのコメントを参照)。数え直しは訊き直しまで面倒を見ます。
+  //
+  // 移ったときだけです。画面を開いた 1 回目 (before は空) は初期化の数え直しが
+  // 走っているので、ここで頼むと 2 本目が繰り越されます。UVC のまま保存した
+  // ときも同じで、そこは状態の読みが拾います (ソースが動き出した回数)。
+  if (before !== "" && before !== "uvc" && chosenSource() === "uvc") {
+    countCameras();
+    return;
+  }
   loadCameraModes();
 }
 
