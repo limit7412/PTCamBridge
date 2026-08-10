@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -814,5 +815,114 @@ func TestLanguageWithoutLoadingPrefersTheEnvironment(t *testing.T) {
 	}
 	if got := LanguageWithoutLoading(path, bad); got != i18n.English {
 		t.Errorf("LanguageWithoutLoading = %q, want it to fall through to the file", got)
+	}
+}
+
+// シリアル出力はポート名を推測しません。有効なのに書き込み先が無いのは、
+// 起動してから毎秒失敗し続けるより、その場で言うべき誤りです。
+func TestSettingsRefuseASerialOutputThatHasNowhereToWrite(t *testing.T) {
+	for name, port := range map[string]string{
+		"empty":     "",
+		"blank":     "   ",
+		"auto":      "auto",
+		"auto caps": "AUTO",
+	} {
+		cfg := Default()
+		cfg.Source.UVC.Device = "camera"
+		cfg.Output.Serial.Enabled = true
+		cfg.Output.Serial.Port = port
+		cfg.Normalise()
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate accepted output.serial.port %s (%q), want it refused", name, port)
+		}
+	}
+
+	cfg := Default()
+	cfg.Output.Serial.Enabled = true
+	cfg.Output.Serial.Port = "COM7"
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with a named output port: %v", err)
+	}
+}
+
+// 無効な出力の設定が空でも、それは誤りではありません。使っていない機能のせいで
+// ブリッジが起動しないのは、直し方の分からない失敗になります。
+func TestSettingsLetTheSerialOutputPortBeEmptyWhileItIsOff(t *testing.T) {
+	cfg := Default()
+	cfg.Output.Serial.Enabled = false
+	cfg.Output.Serial.Port = ""
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with the serial output switched off: %v", err)
+	}
+}
+
+// 0 は「既定値でよい」の意味で、読む側と揃えます。負の値は誤りで、黙って
+// 直せば、ユーザーは自分が書いていない速度を読み返すことになります。
+func TestSettingsFillInTheSerialOutputBaudButRefuseANegativeOne(t *testing.T) {
+	cfg := Default()
+	cfg.Output.Serial.Baud = 0
+	cfg.Normalise()
+	if cfg.Output.Serial.Baud != DefaultSerialBaud {
+		t.Errorf("output.serial.baud = %d after Normalise, want the default of %d", cfg.Output.Serial.Baud, DefaultSerialBaud)
+	}
+
+	cfg.Output.Serial.Baud = -1
+	cfg.Normalise()
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted a negative output.serial.baud, want it refused")
+	}
+}
+
+// ヘッダーは、その出力を有効にしていなくても見ます。範囲外のバイトはどう解釈
+// しても誤りですし、有効にした日に初めて知らされるのは遅すぎます。
+func TestSettingsRefuseASerialOutputHeaderThatIsNotBytes(t *testing.T) {
+	cfg := Default()
+	cfg.Output.Serial.Enabled = false
+	cfg.Output.Serial.Header = []int{0xFF, 0x100}
+	cfg.Normalise()
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted output.serial.header with a value above 0xFF, want it refused")
+	}
+}
+
+// 環境変数はファイルに優先し、指定した葉の名前を答えます。差からの推測では、
+// ファイルと同じ値を指定した上書きが見えません。
+func TestTheEnvironmentCanPointTheSerialOutputSomewhereElse(t *testing.T) {
+	cfg := Default()
+	set, err := cfg.ApplyEnv(func(key string) string {
+		switch key {
+		case "PTCAMBRIDGE_OUTPUT_SERIAL_ENABLED":
+			return "true"
+		case "PTCAMBRIDGE_OUTPUT_SERIAL_PORT":
+			return "COM9"
+		case "PTCAMBRIDGE_OUTPUT_SERIAL_BAUD":
+			return "115200"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
+	if !cfg.Output.Serial.Enabled || cfg.Output.Serial.Port != "COM9" || cfg.Output.Serial.Baud != 115200 {
+		t.Errorf("the serial output settings are %+v, want them taken from the environment", cfg.Output.Serial)
+	}
+	for _, want := range []string{"output.serial.enabled", "output.serial.port", "output.serial.baud"} {
+		if !slices.Contains(set, want) {
+			t.Errorf("ApplyEnv = %v, want it to name %s", set, want)
+		}
+	}
+}
+
+// 設定のヘッダーは、ドライバが受け取るバイト列に変わらなければなりません。
+func TestTheSerialOutputHeaderBecomesBytes(t *testing.T) {
+	cfg := Default()
+	if got := cfg.OutputSerialHeader(); !bytes.Equal(got, []byte{0xFF, 0xA0, 0xFF, 0xA1}) {
+		t.Errorf("OutputSerialHeader = % x, want the documented preamble", got)
+	}
+	cfg.Output.Serial.Header = nil
+	if got := cfg.OutputSerialHeader(); got != nil {
+		t.Errorf("OutputSerialHeader = % x with no header set, want nil so core picks the default", got)
 	}
 }

@@ -904,6 +904,7 @@ func startupOnlyChange(previous, next config.Config) bool {
 	trimmed := next
 	trimmed.Server.Listen = previous.Server.Listen
 	trimmed.Log = previous.Log
+	trimmed.Output = previous.Output
 	trimmed.PaperTracker = previous.PaperTracker
 	trimmed.UI = previous.UI
 	return reflect.DeepEqual(trimmed, previous)
@@ -920,6 +921,10 @@ var restartOnlyLeaves = []string{
 	"server.listen",
 	"log.level",
 	"log.dir",
+	"output.serial.enabled",
+	"output.serial.port",
+	"output.serial.baud",
+	"output.serial.header",
 	"papertracker.install_dir",
 	"papertracker.write_cache",
 	"ui.language",
@@ -939,6 +944,20 @@ func restartDeferred(startup, next config.Config) []string {
 	}
 	if startup.Log.Dir != next.Log.Dir {
 		deferred = append(deferred, "log.dir")
+	}
+	// シリアル出力は起動時に 1 回だけ組み立てます。動作中に開き直す仕組みが無いので、
+	// ここで名前を返さないと、設定画面は効いていない変更を「反映済み」と言います。
+	if startup.Output.Serial.Enabled != next.Output.Serial.Enabled {
+		deferred = append(deferred, "output.serial.enabled")
+	}
+	if startup.Output.Serial.Port != next.Output.Serial.Port {
+		deferred = append(deferred, "output.serial.port")
+	}
+	if startup.Output.Serial.Baud != next.Output.Serial.Baud {
+		deferred = append(deferred, "output.serial.baud")
+	}
+	if !slices.Equal(startup.Output.Serial.Header, next.Output.Serial.Header) {
+		deferred = append(deferred, "output.serial.header")
 	}
 	if startup.PaperTracker.InstallDir != next.PaperTracker.InstallDir {
 		deferred = append(deferred, "papertracker.install_dir")

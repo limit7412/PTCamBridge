@@ -57,6 +57,7 @@ const (
 type Config struct {
 	Server       Server       `toml:"server" json:"server"`
 	Source       Source       `toml:"source" json:"source"`
+	Output       Output       `toml:"output" json:"output"`
 	Transform    Transform    `toml:"transform" json:"transform"`
 	UI           UI           `toml:"ui" json:"ui"`
 	PaperTracker PaperTracker `toml:"papertracker" json:"papertracker"`
@@ -112,6 +113,24 @@ type MJPEG struct {
 	URL string `toml:"url" json:"url"`
 }
 
+// Output は、HTTP ストリーム以外の配信先の設定です。既定ではどれも無効で、
+// フレームが出ていく先は今までどおり MJPEG-over-HTTP だけになります。
+type Output struct {
+	Serial OutputSerial `toml:"serial" json:"serial"`
+}
+
+// OutputSerial は、同じフレームを ETVR のパケットとしてシリアルポートへ書き出す
+// 設定です。有線トラッカーしか受け付けないクライアントのための出口です。
+type OutputSerial struct {
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// Port は "COM7" のような書き込み先のポート名です。[source.serial] と違って
+	// "auto" は受け付けません。理由は internal/output を参照してください。
+	Port string `toml:"port" json:"port"`
+	Baud int    `toml:"baud" json:"baud"`
+	// Header はパケットの前置きです。読む側と同じ理由で上書きできます。
+	Header []int `toml:"header" json:"header"`
+}
+
 // Transform は、任意の幾何変換と再エンコードの設定です。すべて 0 なら入力バイトを
 // そのまま流します。
 type Transform struct {
@@ -163,6 +182,13 @@ func Default() Config {
 				Header: []int{0xFF, 0xA0, 0xFF, 0xA1},
 			},
 		},
+		// 書き込み先のポート名は空です。既定を持てません — このアプリケーションが
+		// 作れるポートは 1 つも無く、どの COM 番号が空いているかも、そこに何が
+		// 繋がっているかも分からないからです。有効化する人が名前を書きます。
+		Output: Output{Serial: OutputSerial{
+			Baud:   DefaultSerialBaud,
+			Header: []int{0xFF, 0xA0, 0xFF, 0xA1},
+		}},
 		UI:  UI{Language: string(i18n.Auto)},
 		Log: Log{Level: "info"},
 	}
@@ -439,6 +465,9 @@ func (c *Config) ApplyEnv(get envLookup) ([]string, error) {
 	mark("source.serial.port", setString(get, "PTCAMBRIDGE_SERIAL_PORT", &c.Source.Serial.Port))
 	mark("source.serial.baud", fail(setInt(get, "PTCAMBRIDGE_SERIAL_BAUD", &c.Source.Serial.Baud)))
 	mark("source.mjpeg.url", setString(get, "PTCAMBRIDGE_MJPEG_URL", &c.Source.MJPEG.URL))
+	mark("output.serial.enabled", fail(setBool(get, "PTCAMBRIDGE_OUTPUT_SERIAL_ENABLED", &c.Output.Serial.Enabled)))
+	mark("output.serial.port", setString(get, "PTCAMBRIDGE_OUTPUT_SERIAL_PORT", &c.Output.Serial.Port))
+	mark("output.serial.baud", fail(setInt(get, "PTCAMBRIDGE_OUTPUT_SERIAL_BAUD", &c.Output.Serial.Baud)))
 	mark("papertracker.install_dir", setString(get, EnvInstallDir, &c.PaperTracker.InstallDir))
 	mark("papertracker.write_cache", fail(setBool(get, "PTCAMBRIDGE_WRITE_CACHE", &c.PaperTracker.WriteCache)))
 	mark("ui.language", setString(get, EnvLanguage, &c.UI.Language))
@@ -513,6 +542,13 @@ func (c *Config) Normalise() {
 	// フレームを 1 枚も出さないポート」だけになる。
 	if c.Source.Serial.Baud == 0 {
 		c.Source.Serial.Baud = DefaultSerialBaud
+	}
+	// 書き出す側も同じ既定値と同じ理屈です。ただしポート名は埋めません。
+	// 何を書いても推測になり、推測したポートへ映像を流し込むのは、当てが外れた
+	// ときに取り返しがつきません。
+	c.Output.Serial.Port = strings.TrimSpace(c.Output.Serial.Port)
+	if c.Output.Serial.Baud == 0 {
+		c.Output.Serial.Baud = DefaultSerialBaud
 	}
 }
 
@@ -605,6 +641,30 @@ func (c Config) Validate() error {
 			return fmt.Errorf("source.serial.header[%d] = %d is not a byte value", i, b)
 		}
 	}
+	if c.Output.Serial.Enabled {
+		// ここだけは、有効なときにしか見ません。無効な出力の設定が誤っていても
+		// 起動を止める理由になりませんし、止めれば「使っていない機能のせいで
+		// ブリッジが上がらない」という、直し方の分からない失敗になります。
+		switch {
+		case c.Output.Serial.Port == "":
+			return errors.New("output.serial.enabled is on but output.serial.port is empty; name the serial port to write to, for example COM7")
+		case strings.EqualFold(c.Output.Serial.Port, "auto"):
+			// 読む側の "auto" は当たりが外れても黙って聞いているだけですが、
+			// 書く側で外すと、他人の機器へ毎秒何メガバイトも流し込むことになります。
+			return errors.New(`output.serial.port cannot be "auto"; name the port explicitly, because writing a video stream into a port that turns out to belong to another device cannot be taken back`)
+		}
+	}
+	// 有効かどうかに関わらず見ます。範囲外のバイトはどう解釈しても誤りで、
+	// 有効にした日に初めて知らされるより、書いた日に言われた方がましです。
+	for i, b := range c.Output.Serial.Header {
+		if b < 0 || b > 0xFF {
+			return fmt.Errorf("output.serial.header[%d] = %d is not a byte value", i, b)
+		}
+	}
+	if c.Output.Serial.Baud <= 0 {
+		return fmt.Errorf("output.serial.baud must be positive, got %d; use 0 for the default of %d",
+			c.Output.Serial.Baud, DefaultSerialBaud)
+	}
 	for _, field := range []struct {
 		name  string
 		value int
@@ -612,6 +672,7 @@ func (c Config) Validate() error {
 		{"source.max_frame_size", c.Source.MaxFrameSize},
 		{"source.uvc.framerate", c.Source.UVC.Framerate},
 		{"source.serial.baud", c.Source.Serial.Baud},
+		{"output.serial.baud", c.Output.Serial.Baud},
 	} {
 		if err := fitsInJSON(field.name, field.value); err != nil {
 			return err
@@ -651,11 +712,20 @@ func (c Config) CoreTransform() core.Transform {
 // SerialHeader は、設定された前置きをバイト列に変換します。未設定なら nil を
 // 返し、core の既定値が使われます。
 func (c Config) SerialHeader() []byte {
-	if len(c.Source.Serial.Header) == 0 {
+	return headerBytes(c.Source.Serial.Header)
+}
+
+// OutputSerialHeader は、書き出す側の前置きについて同じことをします。
+func (c Config) OutputSerialHeader() []byte {
+	return headerBytes(c.Output.Serial.Header)
+}
+
+func headerBytes(header []int) []byte {
+	if len(header) == 0 {
 		return nil
 	}
-	out := make([]byte, len(c.Source.Serial.Header))
-	for i, b := range c.Source.Serial.Header {
+	out := make([]byte, len(header))
+	for i, b := range header {
 		out[i] = byte(b)
 	}
 	return out

@@ -26,6 +26,7 @@ import (
 	"github.com/limit7412/PTCamBridge/internal/ffmpegfetch"
 	"github.com/limit7412/PTCamBridge/internal/hub"
 	"github.com/limit7412/PTCamBridge/internal/i18n"
+	"github.com/limit7412/PTCamBridge/internal/output"
 	"github.com/limit7412/PTCamBridge/internal/source"
 	"github.com/limit7412/PTCamBridge/internal/status"
 )
@@ -112,6 +113,15 @@ type FFmpegFetcher interface {
 	Start() error
 }
 
+// SerialOutput は、シリアル出力の様子を /stats に載せるためのものです。
+//
+// インターフェースにしているのは FFmpegFetcher と同じ理由です。出力を設定して
+// いないインストールでは nil が渡り、/stats にはその節が現れません。空の節を
+// 出すと、設定していない人にも「開いていないポート」があるように見えます。
+type SerialOutput interface {
+	Stats() output.Stats
+}
+
 // Options は Server を設定します。
 type Options struct {
 	Hub    *hub.Hub
@@ -128,6 +138,8 @@ type Options struct {
 	// FFmpeg は /api/v1/ffmpeg を有効にします。nil ならエンドポイントは無くなり、
 	// 公式ビルドの無いプラットフォームはそうなります。
 	FFmpeg FFmpegFetcher
+	// SerialOut は、シリアル出力の様子を /stats に加えます。nil なら出しません。
+	SerialOut SerialOutput
 	// HoldOnSourceLoss は、カメラの再接続中に応答を閉じず、ストリームの
 	// クライアントを繋いだままにします。これは初期値で、SetStreamOptions が
 	// 差し替えます。
@@ -428,14 +440,21 @@ type Stats struct {
 	Version string          `json:"version"`
 	Frames  hub.Stats       `json:"frames"`
 	Source  status.Snapshot `json:"source"`
+	// SerialOut は、シリアル出力を設定している場合だけ現れます。
+	SerialOut *output.Stats `json:"serial_out,omitempty"`
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, r, http.StatusOK, Stats{
+	stats := Stats{
 		Version: s.opts.Version,
 		Frames:  s.opts.Hub.Stats(),
 		Source:  s.opts.Status.Snapshot(),
-	})
+	}
+	if s.opts.SerialOut != nil {
+		out := s.opts.SerialOut.Stats()
+		stats.SerialOut = &out
+	}
+	writeJSON(w, r, http.StatusOK, stats)
 }
 
 // guardAdmin は、Web ページがブラウザに送らせた可能性のある管理 API リクエストを

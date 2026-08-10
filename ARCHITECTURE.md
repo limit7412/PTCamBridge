@@ -28,7 +28,7 @@ API ───┘        │
 
 `core` は JPEG の検証、ワイヤプロトコルの解析、multipart のエンコード、画像変換を持ちます。このパッケージはソケット・シリアルポート・子プロセス・ファイルシステムのいずれにも触れません。**この制約があるから、カメラを 1 台も繋がずにプロトコル処理をテストできます。** ETVR のパケット形式も、Content-Length を省くファームウェアも、EXIF のサムネイルに紛れた偽の EOI も、すべてバイト列を渡すだけで確かめられます。
 
-外殻は、実際に世界と話す部分です。`source` がカメラから読み、`server` がクライアントへ書き、`config` がファイルを読み書きし、`tray` が画面を出します。これらは `core` を使いますが、`core` はこれらを知りません。
+外殻は、実際に世界と話す部分です。`source` がカメラから読み、`server` と `output` がクライアントへ書き、`config` がファイルを読み書きし、`tray` が画面を出します。これらは `core` を使いますが、`core` はこれらを知りません。
 
 ## パッケージ
 
@@ -40,6 +40,7 @@ API ───┘        │
 | **`source`** | カメラから読むドライバ群。ffmpeg の子プロセス越しの UVC、シリアル越しの有線ボード、既存の MJPEG ストリームの中継。**再試行で直る失敗からはどれも自力で復帰します**（抜けたカメラ、落ちた上流）。直らない失敗 — 恒久的な 4xx、設定で指定した ffmpeg が存在しない — は `FatalError` を返して止まります |
 | **`hub`** | 1 生産者・多消費者のフレーム配信。**最新フレーム優先**で、遅いクライアントがソースの読み取りループを止めることはありません |
 | **`server`** | ストリーム・状態・管理の HTTP エンドポイントと、診断画面・設定画面 |
+| **`output`** | HTTP 以外の出口。いまあるのは、同じフレームを ETVR のパケットとしてシリアルポートへ書くもの 1 つだけです。`source` のシリアルドライバのちょうど鏡像で、有線トラッカーしか受け付けないクライアントのために存在します。既定では動きません |
 | **`bridge`** | 上記を繋ぎ、その生存期間を所有します。トレイと管理 API が、ドライバの作り方を知らないまま実行時にソースを変更できるのはこのためです |
 
 ### 支える側
@@ -63,7 +64,8 @@ API ───┘        │
 |---|---|---|
 | `cmd/ptcambridge` | すべて | — |
 | `bridge` | `config`, `core`, `hub`, `server`, `source`, `status` | — |
-| `server` | `config`, `core`, `ffmpegfetch`, `hub`, `i18n`, `source`, `status` | — |
+| `server` | `config`, `core`, `ffmpegfetch`, `hub`, `i18n`, `output`, `source`, `status` | — |
+| `output` | `core` | `go.bug.st/serial` |
 | `tray` | `autostart`, `config`, `ffmpegfetch`, `hub`, `i18n`, `status` (`autostart` は Windows のみ) | `fyne.io/systray` (Windows のみ) |
 | `source` | `core`, `ffmpegfetch`, `i18n` | `go.bug.st/serial`, `go.bug.st/serial/enumerator` |
 | `config` | `core`, `i18n` | `github.com/BurntSushi/toml` |
