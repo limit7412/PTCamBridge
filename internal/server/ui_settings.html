@@ -252,6 +252,13 @@ function showSource(type) {
 }
 
 function fill(cfg, revision) {
+  // 書き換える前のソースを控えます。**この経路でも UVC へ戻ることがあります** —
+  // 別のクライアントやトレイが UVC に変えていれば、応答がこの欄をそちらへ書き
+  // 換えます。ラジオの change は代入では起きないので、そこに置いた数え直しは
+  // 走りません。
+  const chosen = document.querySelector('input[name="source-type"]:checked');
+  const before = chosen ? chosen.value : "";
+
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
@@ -261,6 +268,19 @@ function fill(cfg, revision) {
   // 初回の読み込みだけでなく、保存のたびに通るこの経路でも要る — 別のクライアント
   // やトレイがカメラを変えていれば、応答がこの欄をそちらへ書き換えるので、欄と
   // 候補が別のカメラを指すことになる。名前が変わっていなければ何もしない。
+  //
+  // **他のソースから UVC へ移ったのなら、訊く前に数え直します。** 離れている間に
+  // 差し替えられていても、こちらの一覧にはまだ同じ名前が残っているので、訊くだけ
+  // ではブリッジの差し替え前の憶えをそのまま候補に戻せます (ラジオの change と
+  // 同じ理由。そちらのコメントを参照)。数え直しは訊き直しまで面倒を見ます。
+  //
+  // 移ったときだけです。画面を開いた 1 回目 (before は空) は初期化の数え直しが
+  // 走っているので、ここで頼むと 2 本目が繰り越されます。UVC のまま保存した
+  // ときも同じで、そこは状態の読みが拾います (ソースが動き出した回数)。
+  if (before !== "" && before !== "uvc" && chosenSource() === "uvc") {
+    countCameras();
+    return;
+  }
   loadCameraModes();
 }
 
@@ -500,11 +520,21 @@ el("settings").addEventListener("submit", async (event) => {
 for (const radio of document.querySelectorAll('input[name="source-type"]')) {
   radio.addEventListener("change", () => {
     showSource(radio.value);
-    // どのソースを選んでも呼ぶ。UVC を選んだ瞬間は、そのカメラを調べてよくなる
-    // 瞬間 — ここで呼ばなければ、切り替えた人はカメラ名の欄に触るまで候補を
-    // 見られない。UVC をやめた瞬間は、隠れた欄の拒否を解く瞬間 — 解かなければ、
-    // 見えない欄のせいで保存そのものが始まらない。どちらの判断も
-    // loadCameraModes の中にある。
+    // UVC へ戻る瞬間は、顔ぶれを数え直す瞬間でもある。離れている間の差し替えは
+    // 合図にならない (合図はいま動いているソースで絞る)。訊くだけでは足りない —
+    // 新しいカメラがまだ挿さっていなかったり他のアプリに掴まれていたりすると、
+    // ブリッジは調べに失敗して**憶えで答える** (bridge.CameraModes の recallModes)。
+    // その憶えは差し替え前のものなので、持っていない組み合わせを選ばせてしまう。
+    // 数え直せば、そこで素性を照らし合わせて憶えのほうが捨てられる。
+    //
+    // 数え直しは訊き直しまで面倒を見る (countCameras) ので、ここでは呼ばない。
+    if (radio.value === "uvc") {
+      countCameras();
+      return;
+    }
+    // UVC をやめた瞬間は、隠れた欄の拒否を解く瞬間 — 解かなければ、見えない欄の
+    // せいで保存そのものが始まらない。走っている問い合わせを無効にするのも
+    // ここから。どちらの判断も loadCameraModes の中にある。
     loadCameraModes();
   });
 }
@@ -550,6 +580,9 @@ function cameraChoices(cameras) {
 
 // デバイス名は入力欄の候補にする。選ぶだけで済むが、繋がっていないカメラの名前を
 // 先に書いておくこともできる。列挙が高価なので読み込み時に 1 度だけ。
+// 数えられたかどうかを返す。カメラの列挙が失敗したときの一覧は「1 台も無い」とは
+// 違う。ブリッジもそのときは素性を照らし合わせないので (bridge.Devices を参照)、
+// 数え直したつもりで候補を捨てて訊き直しても、返るのは同じ古い憶えになる。
 async function loadDevices() {
   // 列挙の失敗は、候補が空になることと区別して出す。ffmpeg が無いから列挙できない
   // のか、カメラが繋がっていないのか。候補欄が空という 1 つの見た目が 2 つの意味を
@@ -566,13 +599,30 @@ async function loadDevices() {
       if (!response.ok) throw new Error(response.status);
       return await response.json();
     })();
+    // 数えた一覧が持っている名前をすべて控えます。差し替えの後に訊いてよいかは
+    // 「その名前がいま数えた一覧に居るか」で決めます — 居ないカメラを訊くと、
+    // ブリッジは開けずに憶えで答え、それは差し替え前のものです (CameraModes)。
+    //
+    // 控えるのは**候補ではなく一覧そのもの**です。候補はフレンドリ名が重複した
+    // ときしか "@device_pnp_..." を並べませんが、設定にはどちらでも書けます
+    // (bridge.forgetModesIfCamerasChanged は両方を鍵にします)。大小文字も
+    // 揃えます — ブリッジもキャプチャも EqualFold で受けるので、表記だけが違う
+    // 設定を「居ない」と見なすと、そのカメラだけ候補が戻らなくなります。
+    listedNames = new Set();
+    for (const camera of devices.cameras || []) {
+      if (camera.name) listedNames.add(String(camera.name).toLowerCase());
+      if (camera.alternative) listedNames.add(String(camera.alternative).toLowerCase());
+    }
     options("camera-names", cameraChoices(devices.cameras || []));
     options("port-names", (devices.serial_ports || []).map((p) => p.name));
     failure("camera-error", devices.camera_error);
     failure("serial-error", devices.serial_error);
+    return !devices.camera_error;
   } catch (err) {
+    listedNames = null;
     failure("camera-error", String(err));
     failure("serial-error", String(err));
+    return false;
   }
 }
 
@@ -602,9 +652,18 @@ async function loadDevices() {
 // を参照)。同じ判断を 2 つの言語で持つより、訊き直すほうが安い — 訊く先の
 // ブリッジは既に憶えていて、掴んでいるカメラならカメラを開かずに答える。
 let modesFor = null;
+// listedNames は、最後に数えられた一覧が持っていた名前 (フレンドリ名と
+// "@device_pnp_..." の両方) を小文字で。数えられていなければ null。
+let listedNames = null;
+// listedHere は、その名前が最後に数えた一覧に居るか。一度も数えられていなければ
+// 誰も否定できないので、居ることにします。
+const listedHere = (device) => !listedNames || listedNames.has(device.toLowerCase());
 // devicesListed は、最初のデバイス一覧が終わるまでの約束。最初のモード問い合わせは
 // これを待ちます。初期化を参照。
 let devicesListed = null;
+// cameraGeneration は、カメラについて知っていることの世代。走っている問い合わせが、
+// 数え直しをまたいだかどうかを見分けるために使います。
+let cameraGeneration = 0;
 const modesLoading = new Set();
 let cameraModes = [];
 
@@ -621,6 +680,28 @@ async function loadCameraModes() {
   // 画面を開いただけで、使ってもいないカメラを開いて他のアプリと取り合うことに
   // なる。ソースを UVC に変えた時点で改めて訊く。
   if (chosenSource() !== "uvc") {
+    // 知っていることは持ち越しません。**離れている間に差し替えられるかもしれない**
+    // からです。持ち越すと、戻ったときに名前が同じなので下の `device === modesFor`
+    // が成立し、差し替え前の候補をそのまま使わせてしまいます — 新しいカメラが
+    // 持っていない組み合わせを選んで保存でき、UVC の起動がそこで転びます。
+    //
+    // **走っている問い合わせも同じです。** 世代を進めて無効にしないと、戻ったときに
+    // 名前もソースも世代も揃ってしまい、差し替え前の答えが採り込まれます (戻った
+    // 時点の訊き直しは modesLoading に阻まれるので、それが最後の答えになります)。
+    // 捨てた側は、印を下ろした後に訊き直します。
+    //
+    // ここでは数え直しません。カメラを調べ直すのは**戻ってきたとき**で、それは
+    // ソースを選ぶところが引き受けます (UVC を選んだら countCameras)。
+    cameraGeneration++;
+    modesFor = null;
+    cameraModes = [];
+    // **候補欄と説明も、ここで下ろします。** 内側の配列だけ空にしても、datalist と
+    // 「見つかったモード」の行は差し替え前のまま残ります。戻ってきたときに走るのは
+    // まず countCameras で、それは最大 15 秒かかります — その間、欄はもう見えていて、
+    // 古い解像度を選んで保存できてしまいます。それはこの PR が塞ごうとしている穴
+    // そのものです。
+    refreshModeChoices();
+    sayModes("");
     // 隠れた入力欄もフォームの検証を受けます。UVC の欄に拒否を残したまま
     // 別のソースへ移ると、見えない欄のせいで保存そのものが始まりません。
     refuse("uvc-size", false, "");
@@ -656,13 +737,51 @@ async function loadCameraModes() {
   if (modesLoading.has(device)) return;
 
   modesLoading.add(device);
+  // この問い合わせが立った時点の世代。答えが返る頃にこれが古くなっていたら、
+  // 数え直しをまたいだということです。
+  const generation = cameraGeneration;
   try {
     // 個体の照合が先。待つのは最初の一覧が終わるまでで、以降は素通りします。
-    if (devicesListed) await devicesListed;
+    //
+    // **数えられなかった一覧を待っても、照合は済んでいません。** ブリッジは列挙に
+    // 失敗したとき素性を照らし合わせないので (bridge.forgetModesIfCamerasChanged)、
+    // ここで訊くと差し替え前の憶えを受け取り、それを調べ済みとして刻み直します。
+    // 理由は上の camera-error に出ているので、ここは黙って引き下がります。
+    //
+    // 待つのは**最後の一覧**です。繰り越しがあると devicesListed は途中で入れ替わる
+    // ので、掴んだ 1 本を待つだけでは、まだ次の列挙が走っている最中に訊きに行き、
+    // 同じカメラを開く ffmpeg が並びます。しかも途中の一覧が差し替え前のもので
+    // 繰り越した側だけが転んだ場合、世代が進まないので、その答えが有効なものとして
+    // 受理されます。
+    let listed = devicesListed;
+    let ready = true;
+    while (listed) {
+      ready = await listed;
+      if (listed === devicesListed && !listingDevices) break;
+      listed = devicesListed;
+    }
+    if (!ready) {
+      sayModes("");
+      return;
+    }
     // 待っている間に画面は動きます。別のカメラを打った人、UVC をやめた人の
     // ために、もう要らないカメラを開きに行くことはありません — 開けば使用ランプが
     // 点き、他のアプリと 15 秒取り合います。
-    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device) return;
+    // 世代もここで見ます。待っている間に数え直しが終わっていれば、この問い合わせは
+    // 既に古い — 送っても答えは下で捨てられ、finally から訊き直すことになるので、
+    // 15 秒の列挙を 2 回直列に走らせるだけです。送る前にやめます。
+    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device || generation !== cameraGeneration) return;
+    // 数えた一覧に居ないカメラは訊きません。ブリッジは開けなかったカメラに憶えで
+    // 答えるので (bridge.CameraModes の recallModes)、差し替えで名前が消えたカメラを
+    // 訊くと、差し替え**前**の解像度が普通の答えとして返ります。
+    //
+    // 判定は**この関数の中**に置きます。数え直しをまたいだ問い合わせは、下の
+    // finally から自分で訊き直します — 呼び出し側だけで見ていると、その経路が
+    // 素通りして、捨てたはずの候補を憶えから復元します。
+    if (!listedHere(device)) {
+      sayModes("");
+      return;
+    }
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
     const found = await response.json();
@@ -670,7 +789,11 @@ async function loadCameraModes() {
     // 候補を書き換えると、今いる名前とは無関係なモードを勧めることになる。
     // ソースも見る — UVC をやめた後に採り込むと、隠れた欄に拒否が戻り、
     // 別のソースの設定が保存できなくなる。
-    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim()) return;
+    //
+    // 世代も見る。名前は差し替えても変わらないので、**数え直しをまたいだ答えは
+    // 名前が合っていても差し替え前のもの**。採り込むと、それを調べ済みとして
+    // 刻み直すことになる。捨てた分は下で訊き直します。
+    if (chosenSource() !== "uvc" || found.device !== el("uvc-device").value.trim() || generation !== cameraGeneration) return;
 
     cameraModes = found.modes || [];
     if (found.error) {
@@ -684,11 +807,15 @@ async function loadCameraModes() {
     // 成功の側と同じ判定。古い要求が転んだからといって、今のカメラについて
     // 得たものを捨ててはいけない。捨てると、入力欄は B のまま A の失敗が出て、
     // B の候補は次に入力の合図が来るまで戻らない。
-    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim()) return;
+    if (chosenSource() !== "uvc" || device !== el("uvc-device").value.trim() || generation !== cameraGeneration) return;
     cameraModes = [];
     sayModes(TEXT.modesUnknown + " " + String(err));
   } finally {
     modesLoading.delete(device);
+    // 数え直しをまたいでいたら、その最中に来た訊き直しは「もう調べている」と
+    // 見なされて帰っています。捨てただけで終わると、次に様子が動くまで候補が
+    // 戻りません。印を下ろしたここで、改めて訊きに行きます。
+    if (generation !== cameraGeneration) loadCameraModes();
   }
   refreshModeChoices();
 }
@@ -814,6 +941,247 @@ function describeMode(m) {
   return out;
 }
 
+// cameras は、最後に見たキャプチャの様子。listingDevices は数え直しが走っているか、
+// listAgain はその間に来た合図。countedAt は最後に数え直しを頼んだ時刻。
+let cameras = null;
+let listingDevices = false;
+let listAgain = false;
+let countedAt = null;
+// countedPauses は、最後に数え直したときに見た「止められた回数」。止まっている間は
+// 数えないので、前の標本と比べるだけでは足りません (止まった標本を見た時点で
+// 前の値が追いついてしまい、再開が合図にならなくなります)。
+let countedPauses = 0;
+// countedStarts は、最後に数え直したときに見た「ソースが動き出した回数」。
+let countedStarts = 0;
+// countFailed は、最後の数え直しが失敗したかどうか。失敗した一覧は「1 台も無い」
+// とは違うので、成功するまで数え直す理由が残ります。
+let countFailed = false;
+
+// ADRIFT_RECOUNT_MS は、合図を待たずに数え直すときの間隔です。列挙は 1 回に
+// 最大 15 秒かかるので、これより短くすると ffmpeg が常駐します。
+const ADRIFT_RECOUNT_MS = 30000;
+
+// dueForRecount は、前に頼んでから間隔が空いたかどうか。
+const dueForRecount = () => countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS;
+
+// noticeCameras は、カメラが差し替わったかもしれない合図を拾います。
+//
+// 名前は合図になりません。同じフレンドリ名の別機種に差し替えられても変わらない
+// からです。代わりに見るのは**キャプチャの様子**で、合図は 3 つあります。
+//
+//   - 切れた (reconnects が動く)。差し替えれば、そのカメラを掴んでいたドライバは
+//     必ず一度切れます
+//   - 繋がった。抜いてから挿すまでの間に数え直すと、そこには**まだ新しいカメラが
+//     いません**。切れたことだけを合図にすると、その一覧で終わってしまいます
+//   - 止められた後、動き出した。止めている間の差し替えでは、ドライバは命じられて
+//     止まっているので切れたことになりません (status.SetPaused を参照)。今の状態
+//     ではなく**止められた回数**を見るのは、読みと読みの間で止めて再開まで済ませた
+//     操作を取りこぼさないためです — 背景のタブでは読む間隔が分単位まで伸びるので、
+//     その間に一時停止して差し替えて再開する、というのは十分あり得ます
+//   - ソースが (再) 起動された後、UVC で動いている。別のソースで動かしている間に
+//     差し替えて戻した場合も、設定を保存してドライバが立て直された短い間に差し替え
+//     られた場合も、切れた回数は増えず (停止はキャンセルによる終了なので
+//     status.Tracker.Disconnected を通りません)、次に見るまでに繋がっていれば
+//     繋がったことにもなりません。ここも今の種別ではなく**動き出した回数**を
+//     見ます。立て直しが読みと読みの間で終わると、前後の種別はどちらも uvc
+//     だからです。**同じ種別のままの立て直しも数えます** — 保存にはカメラ名の
+//     変更も含まれ得るので、そこは数え直してよい場面です
+//
+// **繋がらないまま漂っている間だけは、変化が無くても数え直します。** 切れた時点で
+// 繋がっていなければ reconnects は増えず (status.Tracker.Disconnected を参照)、
+// 新しいカメラが今の解像度やフレームレートを受け付けなければ connected にも
+// なりません。つまり 3 つの合図がどれも出ません。そしてそれは珍しい状態では
+// ありません — **古い候補を見ながら、映らないカメラを差し替える**のがまさに
+// これです。ここだけは間隔を空けて数え直します。一時停止中は数えません。止めた
+// のはユーザーで、再開が合図になるからです。
+//
+// 見るのは**いま動いているソース**です。画面のラジオは、まだ保存していない選択で
+// あり得ます。シリアルが動いている画面で UVC を選んだまま置いておくと、シリアルの
+// 再接続のたびにカメラの列挙が始まります — ここで避けようとしている、ffmpeg の
+// 繰り返し起動そのものです。
+//
+// 最初の 1 回は合図になりません。比べる相手が無いので「変わった」と言えません。
+function noticeCameras(state) {
+  const now = {
+    capturing: state.capturing || "",
+    reconnects: state.reconnects || 0,
+    pauses: state.pauses || 0,
+    starts: state.starts || 0,
+    connected: !!state.connected,
+    paused: !!state.paused,
+  };
+  const before = cameras;
+  cameras = now;
+  // 数で見るものは、見送るときも刻んでおきます。刻まないと、画面を開いた最初の
+  // 1 回や、UVC 以外で動いている間に溜まった分が、次に見たとき合図になります。
+  if (!before || now.capturing !== "uvc") {
+    // 止められた分を使い切るのは、**別のソースが実際に動いているとき**だけです。
+    // **一時停止するとソースは空になる**ので (bridge.stopLocked)、止まっている標本は
+    // ここを通ります。ここで使い切ると、動き出したことが合図にならなくなります —
+    // 動き出した回数はソースが立ち上がるまで動かないので、止まっている間の
+    // 差し替えに対しては代わりになる合図がありません。
+    //
+    // 止まっている印だけでは足りません。**再開の途中には、種別が空のまま paused
+    // だけが下りた標本があります** — bridge.SetPaused は status.SetPaused(false) を
+    // 済ませてから startLocked を呼び、その中の cancelListing は走っている列挙が
+    // 終わるまで待つので、その窓は列挙 1 回分 (最大 15 秒) まで広がります。2 秒ごとの
+    // 読みはそこに十分入ります。その標本で使い切ると、UVC が動き出した標本には
+    // 合図が残りません — 止めている間に差し替えた新しい個体が今のモードで繋がら
+    // なければ、切れた・挿さった・移ったのどれも動かないので、数え直しは 30 秒後の
+    // 漂いまで来ません。
+    if (!now.paused && now.capturing !== "") countedPauses = now.pauses;
+    countedStarts = now.starts;
+    // 最初の標本が、最初の列挙より**後に**繋がったものかもしれません。その列挙は
+    // まだカメラが挿さっていない一覧を見ている可能性があり、そこでは憶えが
+    // 捨てられません (bridge.forgetModesIfCamerasChanged は、消えたカメラの憶えを
+    // 残します)。以後は繋がったままで数も動かないので、誰も気づきません。
+    //
+    // 順番が決められないので数え直します。**走っている列挙も当てになりません** —
+    // Bridge.Devices はカメラを数え終えてからシリアルポートを数えるので、カメラの
+    // 部分が古い個体や不在を見た後で、差し替えと接続が済んでいることがあります。
+    // 走っていれば countCameras が繰り越すので、重ねることはありません。
+    //
+    // 列挙が一度も無いなら、古くなりようがないので何もしません。
+    if (!before && now.capturing === "uvc" && now.connected && devicesListed) {
+      countCameras();
+      return true;
+    }
+    // 数えられていないままなら、UVC で動いていなくても間隔を空けて数え直します。
+    // **カメラを調べるために一時停止する**のはこの画面が案内している手順ですが、
+    // 止めると種別は空になるので (bridge.stopLocked)、動いているソースだけを見て
+    // いると、そこで転んだ列挙から二度と立ち直れません — 失敗した約束は待っている
+    // モードの問い合わせも止めるので、候補は読み直すまで空のままです。
+    //
+    // フォームが UVC を出している間だけです。他のソースを見ている人に、カメラの
+    // 列挙を繰り返す理由はありません。
+    if (countFailed && chosenSource() === "uvc" && dueForRecount()) {
+      countCameras();
+      return true;
+    }
+    return false;
+  }
+
+  const changed = now.starts !== countedStarts
+    || now.reconnects !== before.reconnects
+    || (now.connected && !before.connected)
+    // 止められた回数が、最後に数えたときから動いている。動いていても、止まって
+    // いる間は数えません — 差し替えは再開の前でも後でも起こり得るので、動き出して
+    // から数えれば 1 回で足ります。
+    || (!now.paused && now.pauses !== countedPauses);
+  // 数え直す理由が残っている状態。合図を待っていても来ません。
+  //
+  //   - 繋がらないまま漂っている。切れた時点で繋がっていなければ reconnects は
+  //     増えず、新しいカメラが今の解像度を受け付けなければ connected にもならない
+  //   - 前回数えられなかった。列挙が一度転ぶと、憶えは捨てられず、その一覧を
+  //     待っているモードの問い合わせも引き下がるので、候補が空のまま残る
+  //
+  // 一時停止中は数えません。止めたのはユーザーで、再開が合図になります。
+  const unsettled = !now.paused && (!now.connected || countFailed);
+  const adrift = unsettled && dueForRecount();
+  if (!changed && !adrift) return false;
+  // 止まっている間は、止められた分を使い切りません。止まったまま数え直す機会
+  // (ソースの切替など) があっても、**差し替えはその後に起こり得ます**。使い切ると、
+  // 動き出したことが合図にならなくなります。
+  if (!now.paused) countedPauses = now.pauses;
+  countedStarts = now.starts;
+  countCameras();
+  return true;
+}
+
+// countCameras は、カメラの顔ぶれを数え直します。
+//
+// 数え直すこと自体に意味があります。ブリッジが入れ替わりを知るのは顔ぶれを数えた
+// ときだけで、そこで素性の変わったカメラの憶えを捨てます
+// (bridge.forgetModesIfCamerasChanged)。画面を開いたままだと、その機会が来ません。
+//
+// 走っているものがあれば、重ねずに繰り越します。列挙は 1 回に最大 15 秒かかるので、
+// 重ねると ffmpeg が積み上がります。かといって捨てると、その間に起きた差し替えを
+// 永久に見落とします — 数え直しの最中に切れることこそ、まさに起きることです。
+//
+// 候補を捨てて訊き直すのは、**数えられたときだけ**です。失敗した一覧では、
+// ブリッジも素性を照らし合わせません。
+async function countCameras() {
+  // 頼まれた時点で刻みます。走っているものに重なったときも同じです — 漂っている
+  // 間の間隔は、終わりを待たずにここから数えます。
+  countedAt = Date.now();
+  if (listingDevices) {
+    listAgain = true;
+    return;
+  }
+  listingDevices = true;
+  // **始めた時点で、出ているものを下ろします。** 合図は「差し替えがあったかも
+  // しれない」と言っており、列挙は最大 15 秒かかります。その間ずっと差し替え前の
+  // 解像度を選べたままにすると、今のカメラが持っていない組み合わせを保存できて
+  // しまいます — この画面が別のカメラを調べ始めるときに候補を捨てるのと同じ理由です。
+  //
+  // 世代もここで進めます。進めないと、**合図より前に立った問い合わせ**の答えが、
+  // 列挙の最中に届いたときに今の世代のものとして受理されます。捨てた側は印を
+  // 下ろした後に訊き直し、その訊き直しは下の列挙を待ちます。
+  //
+  // modesFor はここでは触りません。数えられたときだけ (下のループ) 下ろします —
+  // 転んだ列挙の後に訊き直しても、ブリッジは素性を照らし合わせていないので、
+  // 返るのは同じ古い憶えです。
+  //
+  // 下ろすのは**候補欄だけ**で、refreshModeChoices は通しません。あちらは候補と
+  // 一緒に拒否も引き直しますが、その判定は「このカメラのモードを知っているとき
+  // だけ言う」ので、モードを空にした直後に通すと、**立っていた拒否が解けます** —
+  // 前のカメラが持っていなかった値が、列挙の 15 秒のあいだ保存できるようになり、
+  // それは拒否がいちばん効いていてほしい瞬間です。拒否はそのまま残し、答えが
+  // 返ってから引き直します。
+  cameraGeneration++;
+  cameraModes = [];
+  options("camera-sizes", []);
+  options("camera-framerates", []);
+  sayModes(TEXT.modesLooking);
+  let counted = false;
+  try {
+    do {
+      listAgain = false;
+      // 初回もここを通します。別に始めると、初回の 15 秒の最中に来た合図が
+      // 2 本目を始めてしまいます。
+      devicesListed = loadDevices();
+      counted = await devicesListed;
+      countFailed = !counted;
+      if (counted) {
+        // **数えられた瞬間に**進めます。ここでブリッジは素性を照らし合わせている
+        // ので、これより前に立った問い合わせの答えは、もう差し替え前のものです。
+        // ループを抜けるまで待つと、繰り越しが走っている間に届いた答えが、今の
+        // 世代のものとして受理されます。
+        cameraGeneration++;
+        // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
+        modesFor = null;
+      }
+    } while (listAgain);
+  } finally {
+    listingDevices = false;
+  }
+  // 訊き直すのは、**最後の一覧が数えられたときだけ**、しかも**繰り越しまで終えた
+  // 後**です。途中の一覧で始めると、繰り越した列挙と同じカメラを同時に開きに行く
+  // ことになります。
+  // 訊くのは、選んでいるカメラが**いま数えた一覧に居るとき**だけです。居ないなら、
+  // ブリッジはそれを開けず、憶えで答えます — その憶えは差し替え前のものなので、
+  // 持っていない組み合わせを選ばせてしまいます。名前を手で打った人は候補が出なく
+  // なりますが、確かめられないものを確かめたことにするよりは良い形です。
+  const chosen = el("uvc-device").value.trim();
+  if (counted && (!chosen || listedHere(chosen))) {
+    loadCameraModes();
+  } else {
+    // 訊きに行かない。候補は始めた時点で下ろしてあります。訊き直すのは次の
+    // 数え直しに任せます — 転んだ列挙の後に訊いても照合の済んでいない答えが
+    // 返るだけで、countFailed が立っているので 30 秒後に来ます。
+    //
+    // **ここでは拒否を引き直します。** 始めた時点では残しました (まだ調べて
+    // いる最中で、前の判断がいちばん確かなものだったからです) が、ここまで来た
+    // ということは「このカメラのモードは分からない」と確定したということです。
+    // 分からないものについて「持っていない」とは言えませんし、残したままだと
+    // そのカメラが一覧に戻るまでフォーム全体が保存できません — カスタムエラーの
+    // 残っているフォームは submit そのものが起きないので、巻き添えになるのは
+    // UVC の欄だけではありません。
+    refreshModeChoices();
+    sayModes("");
+  }
+}
+
 el("uvc-device").addEventListener("change", loadCameraModes);
 el("uvc-device").addEventListener("blur", loadCameraModes);
 // 解像度が変わればフレームレートの候補も変わる。組み合わせで持っているものだから。
@@ -829,11 +1197,24 @@ el("uvc-framerate").addEventListener("input", refreshModeChoices);
 // サイズ、ライセンス。取得できる状態のときだけ届く。
 let ffmpegPrompt = "";
 
+// polls は送った順、polled は取り込んだ中でいちばん新しい順番。pollFFmpeg は
+// setInterval と取得操作の後から重ねて呼ばれるので、送った順に返るとは限りません。
+let polls = 0;
+let polled = 0;
+
 async function pollFFmpeg() {
+  const mine = ++polls;
   try {
     const response = await fetch("/ui/state", { cache: "no-store" });
     if (!response.ok) return;
     const state = await response.json();
+    // 古い標本で今の様子を巻き戻してはいけません。増える一方の数が減って見えるので、
+    // 1 回の遷移から何度も数え直すことになります (減ったことも「変わった」です)。
+    if (mine <= polled) return;
+    polled = mine;
+    // 切れた・繋がった・止めて動き出した・ソースが (再) 起動されたなら、カメラが
+    // 差し替わったかもしれません。
+    noticeCameras(state);
     el("ffmpeg-actions").hidden = !state.has_ffmpeg;
     el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
     // 起動時の指定が優先される設定。ファイルに何を書いても次の起動でも変わらない
@@ -889,7 +1270,7 @@ el("get-ffmpeg").addEventListener("click", async () => {
 // 待たせるのは最初のモード問い合わせだけです。ブリッジがカメラの入れ替わりを
 // 知るのは一覧を数えたときなので (bridge.forgetModesIfCamerasChanged)、先に
 // モードを訊くと、入れ替わったカメラの古い答えを受け取り、成功として覚えます。
-devicesListed = loadDevices();
+countCameras();
 load();
 pollFFmpeg();
 setInterval(pollFFmpeg, 2000);

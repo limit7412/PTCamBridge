@@ -99,6 +99,24 @@ type uiState struct {
 	// Overridden は、起動時の指定が優先されるため、設定ファイルに何を書いても
 	// 変わらない設定の名前です。設定画面がそう伝えるために読みます。
 	Overridden []string `json:"overridden,omitempty"`
+	// Capturing は、いま動いているソースの種別です ("uvc" / "serial" / "mjpeg")。
+	// 何も動いていなければ空。Connected と Paused も同じく、判断のための値です。
+	//
+	// State と Source が表示用なのに対して、こちらは読み手が比べるためのものです。
+	// 表示用の文字列は翻訳されるので、それで判断すると言語ごとに違う動きになります。
+	// 設定画面はこれらで「カメラが差し替わったかもしれない」を見ます
+	// (ui_settings.html の noticeCameras を参照)。
+	//
+	// Pauses は一時停止された回数です。Paused だけだと、読みと読みの間で止めて
+	// 再開まで済ませた操作が見えません — 背景のタブでは読む間隔が分単位まで
+	// 伸びるので、その間に一時停止して差し替えて再開する、というのは十分あり得ます。
+	Capturing string `json:"capturing,omitempty"`
+	Connected bool   `json:"connected"`
+	Paused    bool   `json:"paused"`
+	Pauses    uint64 `json:"pauses"`
+	// Starts は、ソースが (再) 起動された回数です。Capturing だけだと、読みと読みの
+	// 間で終わってしまった立て直しや、別のソースへ移って戻ってきた往復が見えません。
+	Starts uint64 `json:"starts"`
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +285,11 @@ func newUIState(p i18n.Printer, snapshot status.Snapshot, frames hub.Stats, ffmp
 		FrameSize:  formatBytes(frames.LastFrameSize),
 		LastFrame:  p.S(i18n.UINone),
 		HasFrame:   !frames.LastFrameAt.IsZero(),
+		Capturing:  snapshot.Source,
+		Connected:  snapshot.Connected,
+		Paused:     snapshot.Paused,
+		Pauses:     snapshot.Pauses,
+		Starts:     snapshot.Starts,
 	}
 	if out.LastError == "" {
 		out.LastError = p.S(i18n.UINone)

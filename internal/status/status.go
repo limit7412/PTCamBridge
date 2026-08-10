@@ -25,6 +25,17 @@ type Snapshot struct {
 	StartedAt      time.Time `json:"started_at"`
 	UptimeSeconds  float64   `json:"uptime_seconds"`
 	Paused         bool      `json:"paused"`
+	// Pauses は、一時停止された回数です。今の状態 (Paused) だけでは、標本と標本の
+	// 間で止めて再開まで済ませた操作が見えません。読む側が 2 秒ごとに見ていても、
+	// 背景のタブでは間隔が分単位まで伸びるので、その間に一時停止して差し替えて
+	// 再開する、というのは十分あり得ます。数なら、何度あっても取りこぼしません。
+	Pauses uint64 `json:"pauses"`
+	// Starts は、ソースが (再) 起動された回数です。Source と同じ理由で数にして
+	// あります — 今どれが動いているかだけでは、標本と標本の間で終わってしまった
+	// 立て直しが見えません。**別の種別へ移った往復も、同じ種別のままの立て直しも
+	// 数えます** — 設定を保存すればドライバは立て直され、その短い間にカメラを
+	// 差し替えて新しい個体が繋がると、他のどの数も動かないからです。
+	Starts uint64 `json:"starts"`
 }
 
 // Tracker は、ソースの接続状態の遷移を記録します。ドライバが報告に使う
@@ -40,6 +51,8 @@ type Tracker struct {
 	connectedSince time.Time
 	startedAt      time.Time
 	paused         bool
+	pauses         uint64
+	starts         uint64
 
 	// classify は、画面側が翻訳すべきエラーに対応するメッセージ名を返します。
 	// 注入にしているのは、どの失敗がそれに当たるかを知っているのはドライバ側
@@ -72,6 +85,21 @@ func New(opts ...Option) *Tracker {
 func (t *Tracker) SetSource(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// 数えるのは、**止まっていたものが動き出した**ときです。比べる相手は今の種別で、
+	// 止めると空文字を通る (bridge.stopLocked) ので、ドライバの立て直しはここを
+	// 1 回動かします。
+	//
+	// 種別が変わったときだけを数えるのでは足りません。設定を保存すればドライバは
+	// 同じ種別のまま立て直されますが、その短い間にカメラを差し替えて、次に読まれる
+	// までに新しい個体が繋がると、切れた回数も繋がっているかどうかも動きません
+	// (停止はキャンセルによる終了なので Disconnected を通りません)。それを取り
+	// こぼすと、設定画面は差し替えに気づけません。
+	//
+	// 立て直しのたびに設定画面が 1 回カメラを数え直すことになりますが、保存には
+	// カメラ名の変更も含まれ得るので、そこは数え直してよい場面です。
+	if name != "" && name != t.source {
+		t.starts++
+	}
 	t.source = name
 	t.connected = false
 	t.lastError = ""
@@ -118,6 +146,11 @@ func (t *Tracker) Disconnected(source string, err error) {
 func (t *Tracker) SetPaused(paused bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// 数えるのは、止まっていなかったものを止めたときだけです。同じことを二度
+	// 命じても状態は動いていないので、数も動かしません。
+	if paused && !t.paused {
+		t.pauses++
+	}
 	t.paused = paused
 	if paused {
 		t.connected = false
@@ -146,5 +179,7 @@ func (t *Tracker) Snapshot() Snapshot {
 		StartedAt:      t.startedAt,
 		UptimeSeconds:  time.Since(t.startedAt).Seconds(),
 		Paused:         t.paused,
+		Pauses:         t.pauses,
+		Starts:         t.starts,
 	}
 }
