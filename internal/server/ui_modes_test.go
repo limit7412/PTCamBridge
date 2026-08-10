@@ -1249,7 +1249,21 @@ const roundTrip = noticeCameras({capturing: "uvc", reconnects: 2, connected: tru
 await settle();
 const afterRound = listings - beforeRound;
 
-console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforePausedSwitch - beforeResume, pausedSwitch, afterPausedSwitch, woke, afterWoke, quick, afterQuick, returned, afterReturn: beforeRound - beforeReturn, roundTrip, afterRound}));
+// 一時停止するとソースは空になる (bridge.stopLocked)。その標本は「UVC ではない」
+// ので見送るが、そこで止められた分を使い切ってはいけない。立て直しでは移った回数も
+// 動かないので、代わりになる合図が無い。
+const beforeStopped = listings;
+noticeCameras({capturing: "", reconnects: 2, connected: false, paused: true, pauses: 5, switches: 5});
+await settle();
+const whileStopped = listings - beforeStopped;
+
+// 動き出した。止めている間に差し替えられていて、新しいカメラが今のモードを
+// 受け付けなければ繋がらない。
+const wokeFromStop = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 5, switches: 5}));
+await settle();
+const afterWokeFromStop = listings - beforeStopped - whileStopped;
+
+console.log(JSON.stringify({first, afterFirst, same, dropped, afterDrop, back, afterBack, resumed, afterResume: beforePausedSwitch - beforeResume, pausedSwitch, afterPausedSwitch, woke, afterWoke, quick, afterQuick, returned, afterReturn: beforeRound - beforeReturn, roundTrip, afterRound, whileStopped, wokeFromStop, afterWokeFromStop}));
 release();
 `
 	var got struct {
@@ -1272,6 +1286,9 @@ release();
 		AfterReturn       int  `json:"afterReturn"`
 		RoundTrip         bool `json:"roundTrip"`
 		AfterRound        int  `json:"afterRound"`
+		WhileStopped      int  `json:"whileStopped"`
+		WokeFromStop      bool `json:"wokeFromStop"`
+		AfterWokeFromStop int  `json:"afterWokeFromStop"`
 	}
 	out := runSettingsScript(t, harness)
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
@@ -1307,6 +1324,12 @@ release();
 	}
 	if !got.RoundTrip || got.AfterRound != 1 {
 		t.Errorf("counted %d times after a trip through another source that started and ended between two readings, want 1 — both readings say uvc", got.AfterRound)
+	}
+	if got.WhileStopped != 0 {
+		t.Errorf("counted %d times on a reading taken while the source was stopped, want 0", got.WhileStopped)
+	}
+	if !got.WokeFromStop || got.AfterWokeFromStop != 1 {
+		t.Errorf("counted %d times after it woke from a stop, want 1 — pausing empties the source, and passing that reading over must not spend the pause", got.AfterWokeFromStop)
 	}
 }
 

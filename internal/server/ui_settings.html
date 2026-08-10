@@ -925,7 +925,11 @@ function noticeCameras(state) {
   // 数で見るものは、見送るときも刻んでおきます。刻まないと、画面を開いた最初の
   // 1 回や、UVC 以外で動いている間に溜まった分が、次に見たとき合図になります。
   if (!before || now.capturing !== "uvc") {
-    countedPauses = now.pauses;
+    // 止まっている間は、止められた分を使い切りません。**一時停止するとソースは
+    // 空になる**ので (bridge.stopLocked)、止まっている標本はここを通ります。ここで
+    // 使い切ると、動き出したことが合図にならなくなります — 立て直しでは移った回数も
+    // 動かないので (status.SetSource)、代わりになる合図もありません。
+    if (!now.paused) countedPauses = now.pauses;
     countedSwitches = now.switches;
     // 最初の標本が、最初の列挙より**後に**繋がったものかもしれません。その列挙は
     // まだカメラが挿さっていない一覧を見ている可能性があり、そこでは憶えが
