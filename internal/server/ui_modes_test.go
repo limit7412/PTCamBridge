@@ -2030,6 +2030,72 @@ release();
 	}
 }
 
+// 別のソースへ移って戻ったら、カメラは調べ直します。
+//
+// 離れている間に差し替えられるかもしれません。憶えを持ち越すと、戻ったときに名前が
+// 同じなので「調べ済み」と見なされ、差し替え前の候補をそのまま使わせてしまいます。
+// UVC で動いていないならカメラは掴まれていないので、訊けば本当のモードが返ります。
+func TestSettingsPageForgetsTheCameraWhileAnotherSourceIsChosen(t *testing.T) {
+	harness := modesHarness + `
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+// A を調べ終える。
+nodes["uvc-device"].value = "A";
+loadCameraModes();
+await settle();
+release();
+await settle();
+const afterFirst = {asked, modesFor: modesFor || ""};
+
+// 別のソースへ移る。ここでは訊かない。
+sourceType = "serial";
+await loadCameraModes();
+await settle();
+const afterLeaving = {asked, modesFor: modesFor || ""};
+
+// UVC へ戻る。同じカメラ名だが、離れている間に差し替えられたかもしれない。
+sourceType = "uvc";
+loadCameraModes();
+await settle();
+release();
+await settle();
+
+console.log(JSON.stringify({afterFirst, afterLeaving, askedAfterReturn: asked, modesForAfterReturn: modesFor || ""}));
+`
+	var got struct {
+		AfterFirst struct {
+			Asked    int    `json:"asked"`
+			ModesFor string `json:"modesFor"`
+		} `json:"afterFirst"`
+		AfterLeaving struct {
+			Asked    int    `json:"asked"`
+			ModesFor string `json:"modesFor"`
+		} `json:"afterLeaving"`
+		AskedAfterReturn    int    `json:"askedAfterReturn"`
+		ModesForAfterReturn string `json:"modesForAfterReturn"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterFirst.Asked != 1 || got.AfterFirst.ModesFor != "A" {
+		t.Fatalf("asked %d times and recorded %q on the way in, want 1 and %q", got.AfterFirst.Asked, got.AfterFirst.ModesFor, "A")
+	}
+	if got.AfterLeaving.Asked != 1 {
+		t.Errorf("asked %d times while another source was chosen, want 1 — the camera must be left alone", got.AfterLeaving.Asked)
+	}
+	if got.AfterLeaving.ModesFor != "" {
+		t.Errorf("modesFor = %q after leaving UVC, want it dropped — the camera can be swapped while the page is looking elsewhere", got.AfterLeaving.ModesFor)
+	}
+	if got.AskedAfterReturn != 2 {
+		t.Errorf("asked %d times in total after coming back to UVC, want 2 — the name is the same, so keeping the mark hands back the candidates from before the swap", got.AskedAfterReturn)
+	}
+	if got.ModesForAfterReturn != "A" {
+		t.Errorf("modesFor = %q after coming back, want the camera recorded again", got.ModesForAfterReturn)
+	}
+}
+
 // 数えられなかったら、合図を待たずに数え直します。
 //
 // 列挙が一度転ぶと、ブリッジは憶えを捨てず、その一覧を待っているモードの問い合わせも
