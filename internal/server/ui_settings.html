@@ -837,25 +837,30 @@ async function countCameras() {
     return;
   }
   listingDevices = true;
+  let counted = false;
   try {
     do {
       listAgain = false;
       // 初回もここを通します。別に始めると、初回の 15 秒の最中に来た合図が
       // 2 本目を始めてしまいます。
       devicesListed = loadDevices();
-      const counted = await devicesListed;
+      counted = await devicesListed;
       countFailed = !counted;
-      if (counted) {
-        // 数えられた。ここから先、これより前に立った問い合わせの答えは、
-        // 差し替え前のものかもしれません。
-        countedTimes++;
-        // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
-        modesFor = null;
-        loadCameraModes();
-      }
     } while (listAgain);
   } finally {
     listingDevices = false;
+  }
+  // 訊き直すのは、**繰り越しまで終えた後**です。途中の一覧で始めると、繰り越した
+  // 列挙と同じカメラを同時に開きに行くことになります。しかも途中の一覧が差し替え前の
+  // もので、繰り越した側だけが転んだ場合、世代が進まないので、その間に返った
+  // 差し替え前の答えが有効なものとして受理されます。
+  if (counted) {
+    // 数えられた。ここから先、これより前に立った問い合わせの答えは、差し替え前の
+    // ものかもしれません。
+    countedTimes++;
+    // 名前は変わらないので、modesFor を下ろさなければ訊き直しません。
+    modesFor = null;
+    loadCameraModes();
   }
 }
 

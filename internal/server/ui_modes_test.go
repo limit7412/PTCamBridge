@@ -1515,6 +1515,81 @@ release();
 	}
 }
 
+// 訊き直すのは、繰り越しまで終えた後です。
+//
+// 途中の一覧で始めると、繰り越した列挙と同じカメラを同時に開きに行くことになります。
+// しかも途中の一覧が差し替え前のもので、繰り越した側だけが転んだ場合、世代が進まない
+// ので、その間に返った差し替え前の答えが有効なものとして受理されます。
+func TestSettingsPageWaitsForTheLastListingBeforeAskingAgain(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let askedForModes = 0;
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+  }
+  askedForModes++;
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+nodes["uvc-device"].value = "A";
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+const started = {listings, askedForModes};
+
+// 走っている間にもう一度合図。繰り越される。
+noticeCameras(running({reconnects: 3}));
+await settle();
+
+// 1 本目が終わる。ここで訊きに行ってはいけない — 2 本目がこれから走る。
+releaseDevices();
+await settle();
+const between = {listings, askedForModes};
+
+// 2 本目が終わる。ここで初めて訊く。
+releaseDevices();
+await settle();
+const after = {listings, askedForModes};
+
+console.log(JSON.stringify({started, between, after}));
+release();
+`
+	type step struct {
+		Listings      int `json:"listings"`
+		AskedForModes int `json:"askedForModes"`
+	}
+	var got struct {
+		Started step `json:"started"`
+		Between step `json:"between"`
+		After   step `json:"after"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Started.Listings != 1 || got.Started.AskedForModes != 0 {
+		t.Fatalf("after the signal: %d listings and %d mode lookups, want 1 and 0", got.Started.Listings, got.Started.AskedForModes)
+	}
+	if got.Between.Listings != 2 {
+		t.Errorf("the carried-over listing did not start (%d listings, want 2)", got.Between.Listings)
+	}
+	if got.Between.AskedForModes != 0 {
+		t.Errorf("asked for the modes %d times while the carried-over listing was still running, want 0 — both would open the same camera, and a listing that fails afterwards leaves that answer standing", got.Between.AskedForModes)
+	}
+	if got.After.AskedForModes != 1 {
+		t.Errorf("asked for the modes %d times after the last listing, want 1", got.After.AskedForModes)
+	}
+}
+
 // 数えられなかったら、合図を待たずに数え直します。
 //
 // 列挙が一度転ぶと、ブリッジは憶えを捨てず、その一覧を待っているモードの問い合わせも
