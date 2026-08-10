@@ -1198,6 +1198,18 @@ func TestSettingsPageAsksBeforeWritingOverSomeoneElsesChange(t *testing.T) {
 	if !strings.Contains(body, "save(overlay(base.cfg), baselineRevision)") {
 		t.Error("the first save is conditioned on a version read after the page was drawn, so changes the user never saw are not conflicts")
 	}
+	// 送り直しも 412 になる。取り直してから確認を出している間に、また誰かが
+	// 書けば同じことが起きる。1 回で終わりにすると、その 412 は普通の失敗として
+	// 扱われ、後の rebase が最新の札とユーザーの古い編集を組み合わせるので、
+	// もう一度保存を押したときに、新しく入った変更を確認なしで消す。
+	if !strings.Contains(body, "for (let tries = 0; response.status === 412") {
+		t.Error("only the first save can be a conflict, so a change that lands during the retry is overwritten without asking")
+	}
+	// 比べる相手は、ユーザーが見て承知したところまで進めなければならない。
+	// 進めないと、既に承知した同じ変更について何度も訊くことになる。
+	if !strings.Contains(body, "mine = fresh.cfg;") {
+		t.Error("the retry compares against what the page drew, so it asks again about changes the user already accepted")
+	}
 }
 
 // 何が変わったかを言うときに比べる相手は、こちらが土台にした設定です。重ねた後の

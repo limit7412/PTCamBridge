@@ -1406,6 +1406,58 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		}
 	})
 
+	// 並べ方も 1 つとは限らない。同じ名前のヘッダーを何行かに分けて送るのも、
+	// 1 行にカンマで並べるのと同じ意味 (RFC 9110)。行を 1 本しか読まないと、
+	// 2 行目に書かれた今の札に気づかず断ることになる。
+	t.Run("versions spread over several lines are all read", func(t *testing.T) {
+		ctrl.applied = false
+		body, _ := json.Marshal(ctrl.cfg)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Add("If-Match", `"long-gone"`)
+		req.Header.Add("If-Match", `"`+current+`"`)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that spread its versions over several header lines was refused")
+		}
+	})
+
+	// 弱い札は候補にしない。If-Match は強い比較を求める (RFC 9110)。弱い札が
+	// 言っているのは「見た目は同じ」であって「同じもの」ではないので、中身が
+	// 揃っていても、上書きしてよいかの判断には使えない。
+	t.Run("a weak version is not a candidate", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `W/"`+current+`"`)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on a weak validator, which If-Match must not match")
+		}
+	})
+
+	// 弱い札を落としても、条件が無かったことにはしない。落として素通しにすると、
+	// 競合を防いだつもりの要求が、防がないまま通る。
+	t.Run("a weak version does not open the way for a strong one", func(t *testing.T) {
+		ctrl.applied = false
+		if resp := put(t, `W/"long-gone", "`+current+`"`); resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that offered the current version alongside a weak one was refused")
+		}
+	})
+
 	t.Run("no condition is still accepted", func(t *testing.T) {
 		ctrl.applied, ctrl.askedRevision = false, []string{"stale"}
 		if resp := put(t, ""); resp.StatusCode != http.StatusOK {

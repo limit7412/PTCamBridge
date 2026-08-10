@@ -404,11 +404,16 @@ el("settings").addEventListener("submit", async (event) => {
       });
       return cfg;
     };
-    const mine = rendered;
+    let mine = rendered;
 
     sent = true;
     let response = await save(overlay(base.cfg), baselineRevision);
-    if (response.status === 412) {
+    // 送り直しも 412 になる。取り直してから確認を出している間に、また誰かが
+    // 書けば同じことが起きる。1 回で終わりにすると、その 412 は普通の失敗として
+    // 扱われ、後の rebase が最新の札とユーザーの古い編集を組み合わせるので、
+    // もう一度保存を押したときに、**新しく入った変更を確認なしで消す**。だから
+    // 通るまで — あるいは諦めるまで — 同じ手順に戻す。
+    for (let tries = 0; response.status === 412 && tries < 4; tries++) {
       // 描いてから書くまでの間に、別のクライアントが変更を確定させた。
       const fresh = await getConfig();
       // 訊くのは、**同じ項目**を触っていたときだけ。触っていない項目の変更は、
@@ -421,6 +426,9 @@ el("settings").addEventListener("submit", async (event) => {
         rebase(fresh.cfg, dirty, fresh.revision);
         return;
       }
+      // ここまでの値は、ユーザーが見て承知したもの。次の周で比べる相手をこれに
+      // 進めておかないと、同じ変更について何度も訊くことになる。
+      mine = fresh.cfg;
       // 送り直すのは、取り直した設定に同じ変更を重ねたもの。さっきの本体をその
       // まま投げ直すと、承知したはずの相手の変更を消すことになる。
       response = await save(overlay(fresh.cfg), fresh.revision);

@@ -550,7 +550,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg, ifMatch(r.Header.Get("If-Match")))
+		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg, ifMatch(r.Header.Values("If-Match")))
 		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
@@ -652,17 +652,30 @@ func entityTag(token string) string {
 // すれば通る、というのが If-Match の意味なので、こちらで 1 つに絞ると、使えたはず
 // の候補があるのに断ることになります。
 //
-// 読めない値は落としますが、条件そのものは残ります。落とした結果ひとつも残ら
-// なければ、一致しようのない条件として 412 になります。黙って「条件なし」に
-// 変えてはいけません — 競合を防いだつもりの要求が、防がないまま通ります。
-func ifMatch(header string) []string {
-	header = strings.TrimSpace(header)
+// 並べ方も 1 つとは限りません。同じ名前のヘッダーを何行かに分けて送るのも、
+// 1 行にカンマで並べるのと同じ意味です (RFC 9110)。行を 1 本しか読まないと、
+// 2 行目に書かれた今の札に気づかず断ることになります。
+//
+// 弱い札 (W/"...") は候補にしません。If-Match は強い比較を求めるので、弱い札は
+// たとえ中身が同じでも一致しません。中身が同じなら通してよさそうに見えますが、
+// 弱い札が言っているのは「見た目は同じ」であって「同じもの」ではないので、
+// 上書きしてよいかの判断には使えません。
+//
+// 読めない値・使えない値は落としますが、条件そのものは残ります。落とした結果
+// ひとつも残らなければ、一致しようのない条件として 412 になります。黙って
+// 「条件なし」に変えてはいけません — 競合を防いだつもりの要求が、防がないまま
+// 通ります。
+func ifMatch(headers []string) []string {
+	header := strings.TrimSpace(strings.Join(headers, ", "))
 	if header == "" || header == "*" {
 		return nil
 	}
 	tokens := []string{}
 	for _, tag := range strings.Split(header, ",") {
-		tag = strings.TrimPrefix(strings.TrimSpace(tag), "W/")
+		tag = strings.TrimSpace(tag)
+		if strings.HasPrefix(tag, "W/") {
+			continue
+		}
 		if unquoted, err := strconv.Unquote(tag); err == nil {
 			tokens = append(tokens, unquoted)
 		}
