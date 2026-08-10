@@ -43,6 +43,17 @@ func (b *Bridge) listingWaitersForTest() int {
 	return waiting
 }
 
+// scanWaitersForTest は、次の列挙を予約して待っている呼び出しの数を返す。
+// 通常はロックの下にしか無い。
+func (b *Bridge) scanWaitersForTest() int {
+	b.modesMu.Lock()
+	defer b.modesMu.Unlock()
+	if b.queued == nil {
+		return 0
+	}
+	return b.queued.waiting
+}
+
 // openingCameraForTest は、ブリッジがそのカメラを開いている最中の状態に置く。
 // 通常は launchLocked が設定し、返るときに下ろす。
 func (b *Bridge) openingCameraForTest(device string) {
