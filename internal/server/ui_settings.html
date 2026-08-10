@@ -579,7 +579,10 @@ async function loadCameraModes() {
     // 待っている間に画面は動きます。別のカメラを打った人、UVC をやめた人の
     // ために、もう要らないカメラを開きに行くことはありません — 開けば使用ランプが
     // 点き、他のアプリと 15 秒取り合います。
-    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device) return;
+    // 世代もここで見ます。待っている間に数え直しが終わっていれば、この問い合わせは
+    // 既に古い — 送っても答えは下で捨てられ、finally から訊き直すことになるので、
+    // 15 秒の列挙を 2 回直列に走らせるだけです。送る前にやめます。
+    if (chosenSource() !== "uvc" || el("uvc-device").value.trim() !== device || generation !== countedTimes) return;
     const response = await fetch("/api/v1/camera-modes?device=" + encodeURIComponent(device), { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
     const found = await response.json();
@@ -745,6 +748,9 @@ let cameras = null;
 let listingDevices = false;
 let listAgain = false;
 let countedAt = null;
+// countFailed は、最後の数え直しが失敗したかどうか。失敗した一覧は「1 台も無い」
+// とは違うので、成功するまで数え直す理由が残ります。
+let countFailed = false;
 
 // ADRIFT_RECOUNT_MS は、繋がらないまま漂っている UVC を数え直す間隔です。
 // 列挙は 1 回に最大 15 秒かかるので、これより短くすると ffmpeg が常駐します。
@@ -794,7 +800,16 @@ function noticeCameras(state) {
     || now.reconnects !== before.reconnects
     || (now.connected && !before.connected)
     || (before.paused && !now.paused);
-  const adrift = !now.connected && !now.paused
+  // 数え直す理由が残っている状態。合図を待っていても来ません。
+  //
+  //   - 繋がらないまま漂っている。切れた時点で繋がっていなければ reconnects は
+  //     増えず、新しいカメラが今の解像度を受け付けなければ connected にもならない
+  //   - 前回数えられなかった。列挙が一度転ぶと、憶えは捨てられず、その一覧を
+  //     待っているモードの問い合わせも引き下がるので、候補が空のまま残る
+  //
+  // 一時停止中は数えません。止めたのはユーザーで、再開が合図になります。
+  const unsettled = !now.paused && (!now.connected || countFailed);
+  const adrift = unsettled
     && (countedAt === null || Date.now() - countedAt >= ADRIFT_RECOUNT_MS);
   if (!changed && !adrift) return false;
   countCameras();
@@ -828,7 +843,9 @@ async function countCameras() {
       // 初回もここを通します。別に始めると、初回の 15 秒の最中に来た合図が
       // 2 本目を始めてしまいます。
       devicesListed = loadDevices();
-      if (await devicesListed) {
+      const counted = await devicesListed;
+      countFailed = !counted;
+      if (counted) {
         // 数えられた。ここから先、これより前に立った問い合わせの答えは、
         // 差し替え前のものかもしれません。
         countedTimes++;

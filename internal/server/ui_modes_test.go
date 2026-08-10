@@ -1515,6 +1515,83 @@ release();
 	}
 }
 
+// 数えられなかったら、合図を待たずに数え直します。
+//
+// 列挙が一度転ぶと、ブリッジは憶えを捨てず、その一覧を待っているモードの問い合わせも
+// 引き下がります。繋がったまま様子が動かなければ次の合図は来ないので、古い候補が
+// 読み直すまで残ります。
+func TestSettingsPageCountsAgainAfterAListingItCouldNotFinish(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let failing = true;
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    return { ok: true, json: async () => (failing
+      ? {cameras: [], serial_ports: [], camera_error: "uvc: ffmpeg is not installed"}
+      : {cameras: [], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+let clock = 1000000;
+Date.now = () => clock;
+
+// 繋がったまま差し替えを検知して数え直したが、列挙が転んだ。
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+const afterFailure = listings;
+
+// 様子は動かない。繋がったままなので、他の合図は来ない。
+clock += 29000;
+noticeCameras(running({reconnects: 2}));
+await settle();
+const tooSoon = listings;
+
+// 間隔を越えたら、合図が無くても数え直す。
+clock += 2000;
+failing = false;
+noticeCameras(running({reconnects: 2}));
+await settle();
+const retried = listings;
+
+// 数えられたので、もう理由は残っていない。
+clock += 60000;
+noticeCameras(running({reconnects: 2}));
+await settle();
+
+console.log(JSON.stringify({afterFailure, tooSoon, retried, settled: listings}));
+release();
+`
+	var got struct {
+		AfterFailure int `json:"afterFailure"`
+		TooSoon      int `json:"tooSoon"`
+		Retried      int `json:"retried"`
+		Settled      int `json:"settled"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.AfterFailure != 1 {
+		t.Fatalf("counted %d times after the signal, want 1", got.AfterFailure)
+	}
+	if got.TooSoon != 1 {
+		t.Errorf("counted %d times inside the interval, want 1 — a listing takes up to 15s", got.TooSoon)
+	}
+	if got.Retried != 2 {
+		t.Errorf("counted %d times after the interval passed, want 2 — nothing else will signal while it stays connected, so the failure has to be the reason", got.Retried)
+	}
+	if got.Settled != 2 {
+		t.Errorf("counted %d times after it finally succeeded, want 2 — there is no reason left", got.Settled)
+	}
+}
+
 // 数え直しをまたいだ答えは、名前が合っていても差し替え前のものです。
 //
 // 問い合わせが返るのを待っている間に差し替えを検知して数え直すと、そこから出る
@@ -1573,6 +1650,14 @@ console.log(JSON.stringify({askedFirst, staleKept, askedAgain, modesFor: modesFo
 	}
 	if got.AskedAgain != 2 {
 		t.Errorf("asked %d times in total after dropping the stale answer, want 2 — dropping without asking again leaves the candidates empty until the capture moves", got.AskedAgain)
+	}
+	// 待った先で世代が古くなっていたら、送る前にやめる。送っても答えは捨てられ、
+	// 訊き直すことになるので、15 秒の列挙を 2 回直列に走らせるだけ。
+	body := settingsFunction(t, "async function loadCameraModes() {")
+	sending := strings.Index(body, `fetch("/api/v1/camera-modes`)
+	checked := strings.LastIndex(body[:max(sending, 0)], "generation !== countedTimes")
+	if sending < 0 || checked < 0 {
+		t.Error("nothing checks, before sending, whether the cameras were counted again while this lookup waited — the request is sent only to have its answer thrown away")
 	}
 	if got.ModesFor != "A" {
 		t.Errorf("modesFor = %q after the fresh answer came back, want the camera recorded", got.ModesFor)
