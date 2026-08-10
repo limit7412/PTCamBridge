@@ -4655,3 +4655,63 @@ func TestAStaleRevisionIsReportedBeforeAPortClash(t *testing.T) {
 		t.Errorf("Apply failed with %v, want ErrRevisionMismatch so the caller knows to re-read and retry", err)
 	}
 }
+
+// 保存される設定は、この要求が持っている設定と同じとは限りません。触れなかった葉は
+// 設定ファイルの値のまま残るので、環境変数で覆い隠された出力は、要求のどこにも
+// 現れないまま保存後の設定に現れます。次の起動が読むのはそちらです。
+func TestAClashHiddenByAnOverrideIsCaughtInWhatWouldBeSaved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+
+	// ファイルは出力を COM7 で有効にしている。
+	onDisk := serialOutputConfig(t, "COM7", "COM7", true)
+	if err := config.Save(path, onDisk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// 動作中の設定では、環境変数が出力を無効にしている。この設定で起動できるのは
+	// まさにそのため (main の検査は実効設定を見る)。
+	running := onDisk
+	running.Output.Serial.Enabled = false
+	b := New(running, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(onDisk, []string{"output.serial.enabled"})
+
+	// ソースを serial へ。実効設定の出力は無効なので、cfg だけを見れば衝突は無い。
+	// しかし保存後の設定はファイル側の COM7 出力を保つので、次の起動は止まる。
+	err := b.Switch(context.Background(), config.SourceSerial)
+	if err == nil {
+		t.Fatal("Switch was accepted although what would be saved cannot start")
+	}
+	if !strings.Contains(err.Error(), "next time") {
+		t.Errorf("Switch failed with %v, want it to say the saved settings would break the next start", err)
+	}
+}
+
+// 既にファイルが衝突を抱えているなら、それはこの要求のせいではありません。断ると、
+// シリアルとまったく関係のない設定さえ 1 つも保存できなくなります。
+func TestAClashAlreadyInTheFileDoesNotBlockUnrelatedChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ptcambridge.toml")
+
+	// ファイルは既に衝突している (source serial COM7 + output COM7)。
+	onDisk := serialOutputConfig(t, "COM7", "COM7", true)
+	onDisk.Source.Type = config.SourceSerial
+	if err := config.Save(path, onDisk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	running := onDisk
+	running.Output.Serial.Enabled = false
+	b := New(running, path, hub.New(), status.New(), discardLogger())
+	b.SetPersistBase(onDisk, []string{"output.serial.enabled"})
+
+	// シリアルとは無関係な変更。
+	next := b.Snapshot()
+	next.UI.Language = "ja"
+	if _, _, err := b.Apply(context.Background(), next, nil); err != nil {
+		t.Fatalf("an unrelated change was refused over a clash the request did not create: %v", err)
+	}
+	if got := b.Snapshot().UI.Language; got != "ja" {
+		t.Errorf("language = %q, want the unrelated change applied", got)
+	}
+}

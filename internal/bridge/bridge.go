@@ -908,14 +908,39 @@ func captureUnchanged(previous, next config.Config) bool {
 //
 // 動いている方を先に見ます。両方が当てはまるとき、ユーザーが今いる場所について
 // 述べているのはそちらだからです。
+//
+// 2 つ目で見るのは cfg ではなく、**実際に保存される設定**です。両者は同じとは
+// 限りません。この要求が触れなかった葉は設定ファイルの値のまま残る (mergeChanges)
+// ので、環境変数で一時的に無効化している出力や、起動後にファイル側で編集された
+// 出力は、cfg のどこにも現れないまま保存後の設定に現れます。次の起動が読むのは
+// そちらです。
 func (b *Bridge) serialPortConflicts(cfg config.Config) error {
 	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
 		return fmt.Errorf("the serial output running in this process is using that port: %w", err)
 	}
-	if err := config.SerialPortConflict(cfg.Source, cfg.Output.Serial); err != nil {
-		return fmt.Errorf("these settings would stop PTCamBridge from starting next time: %w", err)
+
+	base, err := b.saveBaseLocked()
+	if err != nil {
+		// 土台が読めなければ、保存後の姿は分かりません。ここで断ると、設定ファイルを
+		// 編集している最中のユーザーが、無関係な変更を 1 つも保存できなくなります。
+		// この読み取りは保存の段でもう一度行われ、そちらが失敗を報告します。
+		return nil
 	}
-	return nil
+	saved := mergeChanges(base, b.cfg, cfg)
+	clash := config.SerialPortConflict(saved.Source, saved.Output.Serial)
+	if clash == nil {
+		return nil
+	}
+	// 既にファイルが衝突を抱えているなら、それはこの要求のせいではありません。
+	// 断ると、シリアルとまったく関係のない設定さえ 1 つも保存できなくなります。
+	// (この状態に至るのは、環境変数がその衝突を覆い隠している場合だけです。
+	// 覆われていなければ、そもそもこのプロセスは起動していません。)
+	if config.SerialPortConflict(base.Source, base.Output.Serial) != nil {
+		b.log.Warn("the settings file already points the source and the serial output at the same port, so the next start will refuse to run until one of them changes",
+			"source_port", base.Source.Serial.Port, "output_port", base.Output.Serial.Port)
+		return nil
+	}
+	return fmt.Errorf("these settings would stop PTCamBridge from starting next time: %w", clash)
 }
 
 // startupOnlyChange は、この要求が起動時にしか読まれない葉だけを動かしたかどうかを

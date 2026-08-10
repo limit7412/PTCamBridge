@@ -24,12 +24,19 @@ const fpsGapReset = 2 * time.Second
 
 // Stats は hub の活動のスナップショットで、/stats エンドポイントが返します。
 type Stats struct {
-	Published     uint64    `json:"published"`
-	Dropped       uint64    `json:"dropped"`
-	Subscribers   int       `json:"subscribers"`
-	InputFPS      float64   `json:"input_fps"`
-	LastFrameSize int       `json:"last_frame_size"`
-	LastFrameAt   time.Time `json:"last_frame_at"`
+	Published uint64 `json:"published"`
+	// Dropped は、ストリームクライアントが受け取れなかったフレーム数です。
+	// ブリッジ自身の出口の取りこぼしは DroppedInternal に分けてあります。理由は
+	// subscriber を参照してください。
+	Dropped uint64 `json:"dropped"`
+	// DroppedInternal は、ブリッジ自身の出口 (SubscribeInternal) が受け取れなかった
+	// フレーム数です。シリアル出力が繋がっていない間や、書き込みが詰まっている間に
+	// 増えます。HTTP 配信は何も失っていないので、そちらの数と混ぜてはいけません。
+	DroppedInternal uint64    `json:"dropped_internal"`
+	Subscribers     int       `json:"subscribers"`
+	InputFPS        float64   `json:"input_fps"`
+	LastFrameSize   int       `json:"last_frame_size"`
+	LastFrameAt     time.Time `json:"last_frame_at"`
 }
 
 // subscriber は、1 人の購読者への枠と、それが誰であるかです。
@@ -56,8 +63,13 @@ type Hub struct {
 
 	published uint64
 	dropped   uint64
-	fps       float64
-	lastAt    time.Time
+	// droppedInternal は、ブリッジ自身の出口が取りこぼした分です。分けて数えるのは、
+	// 混ぜると「HTTP のクライアントは 1 つも繋がっていないのに破棄が増え続ける」と
+	// いう、原因の分からない見え方になるからです。シリアル出力の相手が居ないだけで
+	// 起きます。
+	droppedInternal uint64
+	fps             float64
+	lastAt          time.Time
 }
 
 // New は空の hub を返します。
@@ -108,15 +120,24 @@ func (h *Hub) Publish(f core.Frame) {
 		// 落とすことになる。
 		select {
 		case <-ch:
-			h.dropped++
+			h.noteDropLocked(sub.internal)
 		default:
 		}
 		select {
 		case ch <- f:
 		default:
-			h.dropped++
+			h.noteDropLocked(sub.internal)
 		}
 	}
+}
+
+// noteDropLocked は、取りこぼしを相手に応じた側へ数えます。mu は保持済みです。
+func (h *Hub) noteDropLocked(internal bool) {
+	if internal {
+		h.droppedInternal++
+		return
+	}
+	h.dropped++
 }
 
 // Subscribe は、フレームのチャネルと、購読を解除してそれを閉じる関数を返します。
@@ -198,10 +219,11 @@ func (h *Hub) Stats() Stats {
 	defer h.mu.Unlock()
 
 	s := Stats{
-		Published:   h.published,
-		Dropped:     h.dropped,
-		Subscribers: h.countLocked(false),
-		InputFPS:    h.fps,
+		Published:       h.published,
+		Dropped:         h.dropped,
+		DroppedInternal: h.droppedInternal,
+		Subscribers:     h.countLocked(false),
+		InputFPS:        h.fps,
 	}
 	if h.hasLatest {
 		s.LastFrameSize = h.latest.Size()
