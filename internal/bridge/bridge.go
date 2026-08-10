@@ -465,6 +465,12 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifAny []string) (
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// 突き合わせる相手は起動時の出力です。output.serial.* は起動時にしか読まれない
+	// ので、設定が述べる出力ポートと、実際に握られているポートは食い違い得ます。
+	// 詳しくは config.SerialPortConflict を参照してください。
+	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
+		return b.cfg, nil, err
+	}
 	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(b.cfg)) {
 		return b.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
 	}
@@ -984,6 +990,9 @@ func (b *Bridge) Switch(ctx context.Context, sourceType string) error {
 	cfg.Source.Type = sourceType
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := config.SerialPortConflict(cfg.Source, b.startup.Output.Serial); err != nil {
 		return err
 	}
 	// ソース種別は動作中に変えられるものなので、保留になる葉は生まれない。

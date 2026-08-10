@@ -563,8 +563,12 @@ PTCamBridge ──▶ COM7 ═══ COM8 ──▶ PaperTracker
 順調に流れている書き込みを毎回「詰まった」と判断して、大きなフレームが 1 枚も
 届かなくなります。
 
-**`[output.serial]` は起動時にしか読まれません。** 設定画面や API から変更しても保存は
-されますが、効くのは次の起動からです。応答の `pending_restart` にその名前が入ります。
+**変更は設定ファイルか API からです。** 設定画面 (`/ui/settings`) にはまだ
+`[output.serial]` の項目がありません ([#47](https://github.com/limit7412/PTCamBridge/issues/47))。
+設定ファイルを直接編集するか、`PUT /api/v1/config` を使ってください。
+
+**起動時にしか読まれません。** API から変更しても保存はされますが、効くのは次の
+起動からです。応答の `pending_restart` にその名前が入ります。
 
 #### 動いているかを見る
 

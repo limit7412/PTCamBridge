@@ -653,25 +653,6 @@ func (c Config) Validate() error {
 			// 書く側で外すと、他人の機器へ毎秒何メガバイトも流し込むことになります。
 			return errors.New(`output.serial.port cannot be "auto"; name the port explicitly, because writing a video stream into a port that turns out to belong to another device cannot be taken back`)
 		}
-		// 読む側と書く側が同じポートを指していると、どちらも開けません。シリアル
-		// ポートは排他なので、起動時に 2 つが奪い合い、勝った方だけが残ります。
-		// しかもどちらが勝っても行き止まりです。出力が先に取れば、フレームを作る
-		// はずの入力が永久に再試行し、出力は書くものが無いままポートを抱えます。
-		// 入力が先に取れば、出力が永久に再試行します。
-		//
-		// 見るのは source.type が serial のときだけです。UVC で動いている機械の
-		// 設定に、使っていない source.serial.port が残っているのは普通のことで、
-		// それを理由に起動を止めるのは、使っていない機能のせいでブリッジが上がら
-		// ないという直しどころの分からない失敗になります。切り替えは Switch も
-		// ここを通るので、serial へ移ろうとした瞬間に理由付きで断られます。
-		//
-		// 大文字小文字は無視します。Windows の COM7 と com7 は同じポートです。
-		if c.Source.Type == SourceSerial &&
-			!strings.EqualFold(c.Source.Serial.Port, "auto") &&
-			strings.EqualFold(c.Source.Serial.Port, c.Output.Serial.Port) {
-			return fmt.Errorf("source.serial.port and output.serial.port are both %q; a serial port cannot be read and written by the same program, so give the output the other end of a virtual pair",
-				c.Output.Serial.Port)
-		}
 	}
 	// 有効かどうかに関わらず見ます。範囲外のバイトはどう解釈しても誤りで、
 	// 有効にした日に初めて知らされるより、書いた日に言われた方がましです。
@@ -715,6 +696,44 @@ func (c Config) Validate() error {
 		return errors.New("papertracker.write_cache is on but papertracker.install_dir is empty")
 	}
 	return nil
+}
+
+// SerialPortConflict は、これから動かそうとしているソースが、**いま動いている**
+// シリアル出力と同じポートを開こうとしていないかを答えます。
+//
+// Validate の一部ではなく別の関数なのは、これが設定 1 つでは答えられない問いだから
+// です。output.serial.* は起動時にしか読まれないので、設定画面から書き換えて再起動を
+// 待っている間、設定が述べる出力ポートと、実際に握られているポートは違います。
+// 手元の設定だけで突き合わせると、その隙間で両方向に間違えます。
+//
+//   - 出力 COM7 で起動 → 設定を COM8 に保存 (保留) → ソースを serial の COM7 へ。
+//     設定どうしは食い違わないので通りますが、動いている出力はまだ COM7 を握って
+//     いるので、ソースは開けません
+//   - 出力を無効にして起動 → COM7 で有効化 (保留) → ソースを serial の COM7 へ。
+//     まだ誰も COM7 を握っていないのに、拒否されます
+//
+// そこで、比べる相手を呼び出し側に選ばせます。起動時は今まさに組み立てる設定を、
+// 動作中は起動時の設定 (= 実際に動いている出力) を渡します。
+//
+// 見るのは source.type が serial のときだけです。UVC で動いている機械の設定に、
+// 使っていない source.serial.port が残っているのは普通のことで、それを理由に起動を
+// 止めるのは、使っていない機能のせいでブリッジが上がらないという直しどころの
+// 分からない失敗になります。
+//
+// "auto" は突き合わせません。名前ではないので比べる相手がありません (探索が出力の
+// ポートを掴み得る点は別の問題で、issue #46 で追っています)。
+//
+// 大文字小文字は無視します。Windows の COM7 と com7 は同じポートです。
+func SerialPortConflict(source Source, running OutputSerial) error {
+	if !running.Enabled || source.Type != SourceSerial {
+		return nil
+	}
+	port := strings.TrimSpace(source.Serial.Port)
+	if strings.EqualFold(port, "auto") || !strings.EqualFold(port, strings.TrimSpace(running.Port)) {
+		return nil
+	}
+	return fmt.Errorf("source.serial.port and the running output.serial.port are both %q; a serial port cannot be read and written by the same program, so give the output the other end of a virtual pair",
+		running.Port)
 }
 
 // CoreTransform は、設定を core が適用する変換に変換します。

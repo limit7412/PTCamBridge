@@ -4515,3 +4515,74 @@ func TestApplyLeavesTheTokenAloneWhenItRollsBack(t *testing.T) {
 		t.Errorf("a token read before a rolled-back change is no longer accepted: %v", err)
 	}
 }
+
+// serialOutputConfig は、UVC で動きつつシリアル出力を持つ設定です。ソースを
+// serial へ切り替えたときに何と突き合わせられるかを見るためのものです。
+func serialOutputConfig(t *testing.T, sourcePort, outputPort string, outputOn bool) config.Config {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Source.Type = config.SourceUVC
+	cfg.Source.UVC.Device = "camera"
+	cfg.Source.Serial.Port = sourcePort
+	cfg.Output.Serial.Enabled = outputOn
+	cfg.Output.Serial.Port = outputPort
+	cfg.Normalise()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the fixture config does not validate: %v", err)
+	}
+	return cfg
+}
+
+// クラッシュの判定は「設定が何と書いてあるか」ではなく「いま何が動いているか」で
+// しなければなりません。output.serial.* は起動時にしか読まれないので、設定画面から
+// 書き換えて再起動を待っている間、両者は食い違います。
+//
+// 出力 COM7 で起動し、設定を COM8 に保存 (保留) してから、ソースを serial の
+// COM7 へ移す。設定どうしは食い違わないので素通りしますが、動いている出力はまだ
+// COM7 を握っているので、ソースは開けません。
+func TestSwitchingToSerialClashesWithTheRunningOutputNotTheSavedOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	b := New(serialOutputConfig(t, "COM7", "COM7", true), path, hub.New(), status.New(), discardLogger())
+
+	// 出力ポートだけを動かす。起動時にしか読まれない葉なので、保留になるだけで
+	// 動いている出力は COM7 のまま。
+	next := b.Snapshot()
+	next.Output.Serial.Port = "COM8"
+	_, deferred, err := b.Apply(context.Background(), next, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !slices.Contains(deferred, "output.serial.port") {
+		t.Fatalf("deferred = %v, want it to name output.serial.port so the change is known to be pending", deferred)
+	}
+
+	err = b.Switch(context.Background(), config.SourceSerial)
+	if err == nil {
+		t.Fatal("Switch to serial on COM7 was accepted while the running output still holds COM7")
+	}
+	if !strings.Contains(err.Error(), "running output.serial.port") {
+		t.Errorf("Switch failed with %v, want it to name the clash with the running output", err)
+	}
+}
+
+// 逆向き。起動時に無効だった出力を有効化しても、それは保留なので、まだ誰も
+// ポートを握っていません。そこで拒否すると、存在しない衝突を理由に切り替えを
+// 断ることになります。
+func TestSwitchingToSerialIgnoresAnOutputThatIsOnlyPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	b := New(serialOutputConfig(t, "COM7", "", false), path, hub.New(), status.New(), discardLogger())
+
+	next := b.Snapshot()
+	next.Output.Serial.Enabled = true
+	next.Output.Serial.Port = "COM7"
+	if _, _, err := b.Apply(context.Background(), next, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// 切り替えそのものは、この環境に COM7 が無いので失敗して構いません。確かめたい
+	// のは、**衝突を理由に**断られないことです。
+	err := b.Switch(context.Background(), config.SourceSerial)
+	if err != nil && strings.Contains(err.Error(), "running output.serial.port") {
+		t.Errorf("Switch was refused over a clash with an output that is only pending: %v", err)
+	}
+}

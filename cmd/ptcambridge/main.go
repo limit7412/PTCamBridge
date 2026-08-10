@@ -142,6 +142,12 @@ func run() error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	// 起動時は、これから組み立てる出力がそのまま動く出力なので、突き合わせる相手は
+	// この設定自身です。動作中の変更は bridge が起動時の設定と突き合わせます
+	// (config.SerialPortConflict を参照)。
+	if err := config.SerialPortConflict(cfg.Source, cfg.Output.Serial); err != nil {
+		return err
+	}
 
 	log, closeLog, err := setupLogging(cfg, opts.console)
 	if err != nil {

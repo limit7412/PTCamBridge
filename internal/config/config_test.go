@@ -929,65 +929,68 @@ func TestTheSerialOutputHeaderBecomesBytes(t *testing.T) {
 
 // シリアルポートは排他です。読む側と書く側が同じポートを指していると、起動時に
 // 奪い合って、どちらが勝っても行き止まりになります。
-func TestSettingsRefuseReadingAndWritingTheSameSerialPort(t *testing.T) {
-	base := func() Config {
-		cfg := Default()
-		cfg.Source.Type = SourceSerial
-		cfg.Source.Serial.Port = "COM7"
-		cfg.Output.Serial.Enabled = true
-		cfg.Output.Serial.Port = "COM7"
-		return cfg
+func TestSerialPortConflictCatchesReadingAndWritingTheSamePort(t *testing.T) {
+	source := func(port string) Source {
+		return Source{Type: SourceSerial, Serial: Serial{Port: port}}
+	}
+	running := func(port string) OutputSerial {
+		return OutputSerial{Enabled: true, Port: port}
 	}
 
-	cfg := base()
-	cfg.Normalise()
-	if err := cfg.Validate(); err == nil {
-		t.Error("Validate accepted the same port for source.serial.port and output.serial.port, want it refused")
+	if err := SerialPortConflict(source("COM7"), running("COM7")); err == nil {
+		t.Error("SerialPortConflict accepted the same port on both sides, want it refused")
 	}
-
 	// Windows の COM7 と com7 は同じポートです。
-	cfg = base()
-	cfg.Output.Serial.Port = "com7"
-	cfg.Normalise()
-	if err := cfg.Validate(); err == nil {
-		t.Error("Validate accepted COM7 and com7 as different ports, want the names compared without case")
+	if err := SerialPortConflict(source("COM7"), running("com7")); err == nil {
+		t.Error("SerialPortConflict treated COM7 and com7 as different ports, want the names compared without case")
 	}
-
 	// 仮想ペアの反対側を指すのが正しい使い方で、これは通らなければなりません。
-	cfg = base()
-	cfg.Output.Serial.Port = "COM8"
-	cfg.Normalise()
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("Validate with the two ends of a virtual pair: %v", err)
+	if err := SerialPortConflict(source("COM7"), running("COM8")); err != nil {
+		t.Errorf("SerialPortConflict on the two ends of a virtual pair: %v", err)
 	}
 }
 
-// UVC で動いている機械に、使っていない source.serial.port が残っているのは
-// 普通のことです。それを理由に起動を止めると、使っていない機能のせいでブリッジが
-// 上がらないという、直しどころの分からない失敗になります。
-func TestSettingsIgnoreTheUnusedSerialSourcePortWhenTheSourceIsNotSerial(t *testing.T) {
+// 突き合わせる相手がいない場合は、いずれも衝突ではありません。
+func TestSerialPortConflictStaysQuietWhenThereIsNothingToClashWith(t *testing.T) {
+	for name, tc := range map[string]struct {
+		source  Source
+		running OutputSerial
+	}{
+		// UVC で動いている機械に、使っていない source.serial.port が残っているのは
+		// 普通のことです。それを理由に起動を止めると、使っていない機能のせいで
+		// ブリッジが上がらないという、直しどころの分からない失敗になります。
+		"the source is not serial": {
+			source:  Source{Type: SourceUVC, Serial: Serial{Port: "COM7"}},
+			running: OutputSerial{Enabled: true, Port: "COM7"},
+		},
+		// 動いていない出力はポートを握っていません。
+		"the output is switched off": {
+			source:  Source{Type: SourceSerial, Serial: Serial{Port: "COM7"}},
+			running: OutputSerial{Enabled: false, Port: "COM7"},
+		},
+		// "auto" は名前ではないので、突き合わせる相手がありません。ここで弾くと、
+		// 探索させたいだけの設定が理由なく拒否されます。
+		"the source port is auto": {
+			source:  Source{Type: SourceSerial, Serial: Serial{Port: "auto"}},
+			running: OutputSerial{Enabled: true, Port: "COM7"},
+		},
+	} {
+		if err := SerialPortConflict(tc.source, tc.running); err != nil {
+			t.Errorf("SerialPortConflict reported a clash when %s: %v", name, err)
+		}
+	}
+}
+
+// Validate はこの衝突を見ません。設定 1 つでは、出力が実際にどのポートを握って
+// いるかを答えられないからです (SerialPortConflict を参照)。
+func TestValidateLeavesTheRunningPortQuestionAlone(t *testing.T) {
 	cfg := Default()
-	cfg.Source.Type = SourceUVC
-	cfg.Source.UVC.Device = "camera"
+	cfg.Source.Type = SourceSerial
 	cfg.Source.Serial.Port = "COM7"
 	cfg.Output.Serial.Enabled = true
 	cfg.Output.Serial.Port = "COM7"
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
-		t.Errorf("Validate refused a leftover source.serial.port while the source is UVC: %v", err)
-	}
-}
-
-// "auto" は名前ではないので、突き合わせる相手がありません。ここで弾くと、
-// 探索させたいだけの設定が理由なく拒否されます。
-func TestSettingsDoNotCompareTheAutoSerialPortAgainstTheOutput(t *testing.T) {
-	cfg := Default()
-	cfg.Source.Type = SourceSerial
-	cfg.Source.Serial.Port = "auto"
-	cfg.Output.Serial.Enabled = true
-	cfg.Output.Serial.Port = "COM7"
-	cfg.Normalise()
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("Validate refused an auto source port alongside a named output port: %v", err)
+		t.Errorf("Validate refused a config over a clash it cannot judge: %v", err)
 	}
 }
