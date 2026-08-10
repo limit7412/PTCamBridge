@@ -1940,6 +1940,73 @@ release();
 	}
 }
 
+// 走っている列挙も当てになりません。
+//
+// Bridge.Devices はカメラを数え終えてからシリアルポートを数えるので、カメラの部分が
+// 古い個体や不在を見た後で、差し替えと接続が済んでいることがあります。走っているから
+// といって見送ると、その一覧が戻った後は次の遷移まで誰も気づきません。
+func TestSettingsPageCarriesTheFirstReadingOverAListingStillRunning(t *testing.T) {
+	harness := modesHarness + `
+let listings = 0;
+let devicePending = [];
+const releaseDevices = () => { const waiting = devicePending; devicePending = []; for (const resolve of waiting) resolve(); };
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    listings++;
+    await new Promise((resolve) => { devicePending.push(resolve); });
+    return { ok: true, json: async () => ({cameras: [], serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+
+// 初回の列挙が走り出す。まだ返らない。
+countCameras();
+await settle();
+const started = listings;
+
+// そこへ、既に接続済みの標本が最初に届く。この列挙のカメラの部分より前に
+// 繋がったのか後かは、こちらからは決められない。
+const first = noticeCameras(running());
+await settle();
+const whileRunning = listings;
+
+// 走っているものが終わる。繰り越しがあるので、もう一度数える。
+releaseDevices();
+await settle();
+const afterFirstReturned = listings;
+
+releaseDevices();
+await settle();
+
+console.log(JSON.stringify({started, first, whileRunning, afterFirstReturned, settled: listings}));
+release();
+`
+	var got struct {
+		Started            int  `json:"started"`
+		First              bool `json:"first"`
+		WhileRunning       int  `json:"whileRunning"`
+		AfterFirstReturned int  `json:"afterFirstReturned"`
+		Settled            int  `json:"settled"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Started != 1 || got.WhileRunning != 1 {
+		t.Fatalf("%d listings started and %d while the first was running, want 1 and 1 — the reading must not stack a second listing on top", got.Started, got.WhileRunning)
+	}
+	if !got.First || got.AfterFirstReturned != 2 {
+		t.Errorf("counted %d times once the running listing returned, want 2 — its camera half may predate the reading, so the reading has to be carried over", got.AfterFirstReturned)
+	}
+	if got.Settled != 2 {
+		t.Errorf("counted %d times in total, want 2", got.Settled)
+	}
+}
+
 // 数えられなかったら、合図を待たずに数え直します。
 //
 // 列挙が一度転ぶと、ブリッジは憶えを捨てず、その一覧を待っているモードの問い合わせも

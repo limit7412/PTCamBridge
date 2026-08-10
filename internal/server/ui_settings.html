@@ -932,10 +932,13 @@ function noticeCameras(state) {
     // 捨てられません (bridge.forgetModesIfCamerasChanged は、消えたカメラの憶えを
     // 残します)。以後は繋がったままで数も動かないので、誰も気づきません。
     //
-    // 順番が決められないときだけ数え直します。列挙がまだ走っているなら、こちらの
-    // 標本のほうが先なので待てば済みますし、列挙が一度も無いなら、古くなりようが
-    // ありません。
-    if (!before && now.capturing === "uvc" && now.connected && devicesListed && !listingDevices) {
+    // 順番が決められないので数え直します。**走っている列挙も当てになりません** —
+    // Bridge.Devices はカメラを数え終えてからシリアルポートを数えるので、カメラの
+    // 部分が古い個体や不在を見た後で、差し替えと接続が済んでいることがあります。
+    // 走っていれば countCameras が繰り越すので、重ねることはありません。
+    //
+    // 列挙が一度も無いなら、古くなりようがないので何もしません。
+    if (!before && now.capturing === "uvc" && now.connected && devicesListed) {
       countCameras();
       return true;
     }
