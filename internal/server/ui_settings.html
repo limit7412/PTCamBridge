@@ -216,7 +216,21 @@ const FIELDS = [
 
 // baseline は、この画面がフォームを描いたときの値。ここからの差が「ユーザーが
 // 触ったもの」になる。
+//
+// rendered と baselineRevision は、そのとき描いた設定そのものと、その札。保存の
+// 条件に使うのはこの札で、送る直前に取り直したものではない。取り直した札を条件に
+// すると、画面を開いてから保存を押すまでの間に別のクライアントが変えたものは
+// 競合にならず、ユーザーが見たことのない値を黙って消せる。
 let baseline = null;
+let rendered = null;
+let baselineRevision = "";
+
+// remember は、描いた設定を控えます。JSON を通すのは、後で重ねる操作が土台の
+// オブジェクトをその場で書き換えるためです。
+function remember(cfg, revision) {
+  rendered = JSON.parse(JSON.stringify(cfg));
+  baselineRevision = revision || "";
+}
 
 const at = (cfg, path) => path.reduce((node, key) => (node == null ? node : node[key]), cfg);
 
@@ -237,11 +251,12 @@ function showSource(type) {
   }
 }
 
-function fill(cfg) {
+function fill(cfg, revision) {
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
+  remember(cfg, revision);
   // 代入では change も blur も起きないので、候補はここから取りに行くしかない。
   // 初回の読み込みだけでなく、保存のたびに通るこの経路でも要る — 別のクライアント
   // やトレイがカメラを変えていれば、応答がこの欄をそちらへ書き換えるので、欄と
@@ -265,12 +280,13 @@ function fill(cfg) {
 // いったん cfg を書いてから読み直すのは、fill と同じ変換を通すためです。設定の値を
 // そのまま基準にすると、フォームが返す形 (trim した文字列、数値、真偽値) と食い違って、
 // 触っていない項目が変更として送られます。
-function rebase(cfg, keep) {
+function rebase(cfg, keep, revision) {
   const mine = readForm();
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
+  remember(cfg, revision);
   FIELDS.forEach((field, i) => {
     if (keep.has(i)) field.write(mine[i]);
   });
@@ -307,21 +323,55 @@ function say(message, bad) {
   result.classList.toggle("bad", !!bad);
 }
 
+// getConfig は設定と、その版を返します。
+//
+// 版を一緒に返すのは、別々に読めないからです。設定を読んでから版を読むと、その
+// 隙間に入った変更のせいで、古い設定に新しい版が付きます。その組で条件を付けた
+// 保存は、防ぐはずの上書きをそのまま通します。
 async function getConfig() {
   const response = await fetch("/api/v1/config", { cache: "no-store" });
   if (!response.ok) throw new Error(response.status);
-  return await response.json();
+  return { cfg: await response.json(), revision: response.headers.get("ETag") || "" };
 }
 
 async function load() {
   try {
-    fill(await getConfig());
+    const current = await getConfig();
+    fill(current.cfg, current.revision);
     el("offline").style.display = "none";
     el("save").disabled = false;
   } catch (err) {
     el("offline").style.display = "block";
     el("save").disabled = true;
   }
+}
+
+// save は 1 回の PUT です。版を添えるのは、読んでから書くまでの間に別の
+// クライアントが確定させた変更を、黙って消さないためです。
+const save = (cfg, revision) => fetch("/api/v1/config", {
+  method: "PUT",
+  headers: revision
+    ? { "Content-Type": "application/json", "If-Match": revision }
+    : { "Content-Type": "application/json" },
+  body: JSON.stringify(cfg),
+});
+
+// clashingLeaves は、こちらが触った項目のうち、描いてから別のクライアントに
+// 変えられたものを名前で返します。
+//
+// 比べる相手は**こちらが画面に描いた設定**です。送る土台 (取り直したもの) と
+// 比べると、相手の変更が既にそこに入っているので、何も違わないことになります。
+function clashingLeaves(mine, theirs, dirty) {
+  return FIELDS
+    .filter((field, i) => dirty.has(i))
+    .filter((field) => JSON.stringify(at(mine, field.path)) !== JSON.stringify(at(theirs, field.path)))
+    .map((field) => field.path.join("."));
+}
+
+// conflictMessage は、ユーザーに訊く文面です。
+function conflictMessage(clash) {
+  const what = clash.length ? TEXT.conflict + " " + clash.join(", ") : TEXT.conflictElse;
+  return what + "\n\n" + TEXT.conflictAsk;
 }
 
 el("settings").addEventListener("submit", async (event) => {
@@ -338,21 +388,70 @@ el("settings").addEventListener("submit", async (event) => {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
     // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
     // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
-    const cfg = await getConfig();
-    const now = readForm();
+    //
+    // **本体と条件は、必ず同じ 1 つの読みから組む** (ground)。土台を取り直した
+    // 設定にしながら条件を画面を描いたときの札にすると、設定が A → B → A と戻る
+    // 途中で読んだ B を本体にして、A の札で書けてしまう。ブリッジが A に戻った
+    // 後にそれを受けると条件は成立し、ユーザーが触ってもいない B の値が確認なしで
+    // 復活する。
+    //
+    // 「描いてから動いたか」は、こちらで札を見比べて確かめる。サーバの 412 に
+    // 任せられないのは、まさに A → B → A では札が戻ってしまうから。
+    // 触った葉は**いちばん先に**拾う。競合の判定は「ユーザーが触った項目が、その間に
+    // 変えられていたか」を見るので、拾う前に判定すると、触った項目が 1 つも無いことに
+    // なって、何も訊かずに上書きする — 画面を描いてから最初の読みまでの間に相手が
+    // 同じ葉を変えた場合が、まさにそれ。この機能が防ごうとしているものそのもの。
+    //
+    // 1 回読めば足りる。保存の間フォームは凍っているので、周ごとに読み直しても同じ
+    // 値しか出てこない。
+    const edits = [];
+    const typed = readForm();
     FIELDS.forEach((field, i) => {
-      if (now[i] !== baseline[i]) {
+      if (typed[i] !== baseline[i]) {
         dirty.add(i);
-        put(cfg, field.path, now[i]);
+        edits.push([field.path, typed[i]]);
       }
     });
+    const overlay = (cfg) => {
+      edits.forEach(([path, value]) => put(cfg, path, value));
+      return cfg;
+    };
+    let ground = await getConfig();
+    let mine = rendered;
 
     sent = true;
-    const response = await fetch("/api/v1/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cfg),
-    });
+    let response = null;
+    // 412 で終わりにしない。取り直してから確認を出している間に、また誰かが書けば
+    // 同じことが起きる。1 回で諦めると、その 412 は普通の失敗として扱われ、後の
+    // rebase が最新の札とユーザーの古い編集を組み合わせるので、もう一度保存を
+    // 押したときに、**新しく入った変更を確認なしで消す**。だから通るまで —
+    // あるいは諦めるまで — 同じ手順に戻す。書き続けているクライアントに付き合い
+    // 続けないよう、周回には上限を置く。
+    for (let tries = 0; tries < 5; tries++) {
+      // 描いた設定と違うものの上に書くなら、それは競合。訊くのは、**同じ項目**を
+      // 触っていたときだけ。触っていない項目の変更は、こちらが押し戻すもので
+      // はないので (送るのは触った葉だけ)、黙って取り直して送り直せば、相手の
+      // 変更もこちらの変更も残る。ログの行を直したい人に、誰かがカメラを
+      // 切り替えたことを確認させる理由はない。
+      if (ground.revision !== baselineRevision) {
+        const clash = clashingLeaves(mine, ground.cfg, dirty);
+        if (clash.length && !confirm(conflictMessage(clash))) {
+          say(TEXT.conflictKept);
+          rebase(ground.cfg, dirty, ground.revision);
+          return;
+        }
+        // ここまでの値は、ユーザーが見て承知したもの。次の周で比べる相手をこれに
+        // 進めておかないと、同じ変更について何度も訊くことになる。**写しを取る** —
+        // 同じオブジェクトを持つと、この直後の overlay が比べる相手までユーザーの
+        // 入力で塗り替え、承知済みの葉が何度でも競合として挙がる。
+        mine = JSON.parse(JSON.stringify(ground.cfg));
+      }
+      // 送るのは、その読みに同じ変更を重ねたもの。前の本体をそのまま投げ直すと、
+      // 承知したはずの相手の変更を消すことになる。
+      response = await save(overlay(ground.cfg), ground.revision);
+      if (response.status !== 412) break;
+      ground = await getConfig();
+    }
     const text = await response.text();
     if (!response.ok) {
       // ブリッジの言葉をそのまま出す。どの項目が悪いかを名指ししているのは
@@ -361,17 +460,19 @@ el("settings").addEventListener("submit", async (event) => {
       // 失敗しても値が動作中の設定に入っていることはある。基準を取り直さないと、
       // 元へ戻す操作が変更として見えなくなる。rebase を参照。
       try {
-        rebase(await getConfig(), dirty);
+        const now = await getConfig();
+        rebase(now.cfg, dirty, now.revision);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }
       return;
     }
     const applied = JSON.parse(text);
+    // 応答の札は、いま届いた設定そのもののもの。次の保存はこれを条件にする。
     // 応答は設定そのものに pending_restart が 1 つ増えた形。フォームを描き直すのに
     // 使うだけなので、余分な項目があっても構わない。次に送る土台は、そのときまた
     // 取り直す。
-    fill(applied);
+    fill(applied, response.headers.get("ETag") || "");
     const pending = applied.pending_restart || [];
     say(pending.length ? TEXT.savedPending + " " + pending.join(", ") : TEXT.saved);
   } catch (err) {
@@ -385,7 +486,8 @@ el("settings").addEventListener("submit", async (event) => {
     // 取り直せばユーザーの編集を 1 つ残らずサーバの値で塗り潰すことになる。
     if (sent) {
       try {
-        rebase(await getConfig(), dirty);
+        const now = await getConfig();
+        rebase(now.cfg, dirty, now.revision);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }

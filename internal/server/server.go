@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -76,7 +77,10 @@ type Controller interface {
 	// 受け入れますが、この起動の振る舞いは変わりません。落ち着いた設定と、
 	// それらの名前が返ります。2 つを別々に読むと、その隙間に入った別の要求の
 	// 設定と、こちらの要求について数えた名前が並ぶことになります。
-	Apply(ctx context.Context, cfg config.Config) (config.Config, []string, error)
+	// ifAny は、この変更が土台にしてよい設定の札です (config.Token を参照)。空なら
+	// 条件を付けません。1 つも一致しなければ何もせず config.ErrRevisionMismatch を
+	// 返します。
+	Apply(ctx context.Context, cfg config.Config, ifAny []string) (config.Config, []string, error)
 	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
@@ -516,7 +520,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, r, http.StatusOK, s.opts.Controller.Snapshot())
+		// 札は設定そのものから導くので、この 1 つの写しから両方が出ます。別々に
+		// 読む必要が無いということは、その隙間に入った変更のせいで食い違う心配も
+		// 無いということです。
+		cfg := s.opts.Controller.Snapshot()
+		w.Header().Set("ETag", entityTag(config.Token(cfg)))
+		writeJSON(w, r, http.StatusOK, cfg)
 
 	case http.MethodPut:
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
@@ -535,18 +544,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg := received.Config
-		carryUnmentioned(&cfg, body, s.opts.Controller.Snapshot())
-		cfg.Normalise()
-		if err := cfg.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg)
+		applied, deferred, err := s.applyBody(r.Context(), received.Config, body, ifMatch(r.Header.Values("If-Match")))
 		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
 		}
+		// 応答にも札を載せます。載せなければ、続けて変更する呼び出し側は、自分が
+		// たった今起こした変更のために、もう一度 GET しなければなりません。
+		//
+		// 札は applied から導きます。これはロックの下で決まった設定そのものなので、
+		// 本体と札が同じ瞬間のものであることが形から保証されます。ここで改めて
+		// 現在値を訊くと、その隙間に入った別の変更の札を、こちらの本体に付けて
+		// 返すことになり、それを土台にした次の変更が間の変更を消せてしまいます。
+		w.Header().Set("ETag", entityTag(config.Token(applied)))
 		writeJSON(w, r, http.StatusOK, appliedConfig{
 			Config:         applied,
 			PendingRestart: deferred,
@@ -612,7 +622,94 @@ func applyStatus(err error) int {
 	if errors.Is(err, config.ErrNotSaved) {
 		return http.StatusInternalServerError
 	}
+	if errors.Is(err, config.ErrRevisionMismatch) {
+		return http.StatusPreconditionFailed
+	}
 	return http.StatusBadRequest
+}
+
+// entityTag は、設定の札を ETag にします。
+func entityTag(token string) string {
+	return `"` + token + `"`
+}
+
+// ifMatch は If-Match が並べた札を読みます。条件を付けていなければ空を返します。
+//
+// 付けない呼び出しをそのまま通すのは、ここがループバック上の管理 API だからです。
+// curl やトレイのように 1 回だけ書くクライアントに、条件の付け方を覚えさせる理由は
+// ありません。競合を避けたいのは、読んで書くクライアントだけです。
+//
+// "*" は「今この表現があるなら通す」を意味します (RFC 9110)。設定は常にあるので
+// 常に通ります。
+//
+// 値は 1 つとは限りません。**並べられたものは全部渡します。** どれか 1 つに一致
+// すれば通る、というのが If-Match の意味なので、こちらで 1 つに絞ると、使えたはず
+// の候補があるのに断ることになります。
+//
+// 並べ方も 1 つとは限りません。同じ名前のヘッダーを何行かに分けて送るのも、
+// 1 行にカンマで並べるのと同じ意味です (RFC 9110)。行を 1 本しか読まないと、
+// 2 行目に書かれた今の札に気づかず断ることになります。
+//
+// 弱い札 (W/"...") は候補にしません。If-Match は強い比較を求めるので、弱い札は
+// たとえ中身が同じでも一致しません。中身が同じなら通してよさそうに見えますが、
+// 弱い札が言っているのは「見た目は同じ」であって「同じもの」ではないので、
+// 上書きしてよいかの判断には使えません。
+//
+// 読めない値・使えない値は落としますが、条件そのものは残ります。落とした結果
+// ひとつも残らなければ、一致しようのない条件として 412 になります。黙って
+// 「条件なし」に変えてはいけません — 競合を防いだつもりの要求が、防がないまま
+// 通ります。
+//
+// 条件を付けていないのは、**ヘッダーそのものが無いとき**だけです。付いていて中身が
+// 空なのは、札を渡し損ねた要求です。空を「条件なし」に読み替えると、防いだつもりの
+// 上書きがそのまま通るので、読めない値と同じく断る側へ倒します。
+func ifMatch(headers []string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	header := strings.TrimSpace(strings.Join(headers, ", "))
+	if header == "*" {
+		return nil
+	}
+	tokens := []string{}
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimSpace(tag)
+		if strings.HasPrefix(tag, "W/") {
+			continue
+		}
+		if opaque, ok := opaqueTag(tag); ok {
+			tokens = append(tokens, opaque)
+		}
+	}
+	// 1 つも読めなくても、条件が無かったことにはしません。どの札とも一致しない
+	// ものを 1 つ入れて、断られる側へ倒します。
+	if len(tokens) == 0 {
+		return []string{header}
+	}
+	return tokens
+}
+
+// opaqueTag は、entity-tag の中身を取り出します。取り出せなければ ok が false です。
+//
+// 中身は Go の文字列リテラルではありません。二重引用符で挟まれた**不透明なバイト列
+// そのもの**で、エスケープはありません (RFC 9110 の etagc: %x21 / %x23-7E / obs-text)。
+// strconv.Unquote に通すと "\x61bc" が abc になり、**書き方の違う別の札が、今の札に
+// 化けます** — 強い比較のはずが、2 つの違うものを同じものとして通してしまいます。
+// バッククォートで挟んだものも Go としては読めてしまいますが、entity-tag では
+// ありません。
+func opaqueTag(tag string) (string, bool) {
+	if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+		return "", false
+	}
+	inside := tag[1 : len(tag)-1]
+	for i := 0; i < len(inside); i++ {
+		switch c := inside[i]; {
+		case c == 0x21, c >= 0x23 && c <= 0x7E, c >= 0x80:
+		default:
+			return "", false
+		}
+	}
+	return inside, true
 }
 
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
@@ -725,17 +822,60 @@ func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 //
 // 対象が ui だけなのは、この API に対して何かが書かれ得るようになって以降に追加された
 // 設定がそれだけだからです。今後追加するものも、ここに属します。
-func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) {
+func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) bool {
 	var mentioned struct {
 		UI *json.RawMessage `json:"ui"`
 	}
 	if err := json.Unmarshal(body, &mentioned); err != nil {
 		// デコードできない本体がここに届くことはない。厳格なデコードが先に走っている。
-		return
+		return false
 	}
 	if mentioned.UI == nil {
 		cfg.UI = current.UI
+		return true
 	}
+	return false
+}
+
+// applyBody は、受け取った本体を適用します。
+//
+// 省略された項目をこちらで補うときは、**補った相手そのものの上で適用されなければ
+// なりません**。補うために読むのはロックの外なので、補ってから適用されるまでの間に
+// 設定が動けば、呼び出し側が送ってもいない項目が、別の設定の値で復活します
+// (A → B → A と戻る途中で B から補い、A の上で適用される、など。呼び出し側が
+// A の札を条件に付けていれば、その条件は成立してしまいます)。
+//
+// そこで、補ったときは**補った相手の札そのもの**を条件にします。呼び出し側の条件に
+// 無い札なら、要求を通しません — 2 つの読みが食い違っているので、どちらを信じても
+// 相手の意図から外れます。
+//
+// 動いていたら読み直してやり直します。補うために足した条件は呼び出し側の話ではない
+// ので、その食い違いを 412 として突き返す理由がありません。何度読んでも落ち着か
+// なければ、そこで初めて断ります。
+//
+// 何も補わなかったときは、今までどおり呼び出し側の条件だけで判断します。
+func (s *Server) applyBody(ctx context.Context, received config.Config, body []byte, ifAny []string) (config.Config, []string, error) {
+	const attempts = 4
+	for try := 0; try < attempts; try++ {
+		current := s.opts.Controller.Snapshot()
+		cfg := received
+		carried := carryUnmentioned(&cfg, body, current)
+		cfg.Normalise()
+		if err := cfg.Validate(); err != nil {
+			return config.Config{}, nil, err
+		}
+		if !carried {
+			return s.opts.Controller.Apply(ctx, cfg, ifAny)
+		}
+		token := config.Token(current)
+		if len(ifAny) == 0 || slices.Contains(ifAny, token) {
+			applied, deferred, err := s.opts.Controller.Apply(ctx, cfg, []string{token})
+			if !errors.Is(err, config.ErrRevisionMismatch) {
+				return applied, deferred, err
+			}
+		}
+	}
+	return config.Config{}, nil, fmt.Errorf("%w: it kept changing while the settings left out of the request were filled in", config.ErrRevisionMismatch)
 }
 
 // decodeStrict は、対象が持たないフィールドを含む本体と、最初の JSON 値より後ろに

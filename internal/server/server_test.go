@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,6 +382,16 @@ type fakeController struct {
 	modesErr   error
 	modesFor   string
 	modesCalls int
+	// askedRevision は、最後に要求された条件 (If-Match が並べた札)。
+	askedRevision []string
+	// next は、Apply の後に読まれる設定。別のクライアントの変更が割り込んだ
+	// 状況を作るためのもの。
+	next *config.Config
+	// drifting と drifts は、Snapshot が Apply の見る設定と食い違う状況を作る。
+	// 「ロックの外で読んでから、ロックの下で適用されるまでの間に動いた」を、
+	// 次の drifts 回の読みで再現する。
+	drifting *config.Config
+	drifts   int
 }
 
 func (c *fakeController) CameraModes(_ context.Context, device string) ([]source.Mode, error) {
@@ -389,11 +400,26 @@ func (c *fakeController) CameraModes(_ context.Context, device string) ([]source
 	return c.modes, c.modesErr
 }
 
-func (c *fakeController) Snapshot() config.Config { return c.cfg }
+// Snapshot は、next が置かれている場合、Apply の後だけそちらを返す。「この PUT が
+// ロックを離した直後に、別のクライアントの変更が入った」状況そのもの。
+func (c *fakeController) Snapshot() config.Config {
+	if c.drifts > 0 && c.drifting != nil {
+		c.drifts--
+		return *c.drifting
+	}
+	if c.applied && c.next != nil {
+		return *c.next
+	}
+	return c.cfg
+}
 
 func (c *fakeController) Overridden() []string { return c.overridden }
 
-func (c *fakeController) Apply(_ context.Context, cfg config.Config) (config.Config, []string, error) {
+func (c *fakeController) Apply(_ context.Context, cfg config.Config, ifAny []string) (config.Config, []string, error) {
+	c.askedRevision = ifAny
+	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(c.cfg)) {
+		return c.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
+	}
 	if c.applyErr != nil {
 		return config.Config{}, nil, c.applyErr
 	}
@@ -1278,4 +1304,328 @@ func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
 	if got := ctrl.cfg.UI.Language; got != "en" {
 		t.Errorf("language = %q, want the explicit en", got)
 	}
+}
+
+// 設定は全体で 1 つの値として受け渡されるので、呼び出し側は「読んで、変えたい葉を
+// 重ねて、書く」という往復をする。その 2 つの要求の間に別のクライアントが変更を
+// 確定させても、条件を付けなければ誰にも分からない。後から書いた側が黙って消す。
+func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
+	ctrl := &fakeController{cfg: config.Default()}
+	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	current := config.Token(ctrl.cfg)
+
+	putConfig := func(t *testing.T, cfg config.Config, ifMatch string) *http.Response {
+		t.Helper()
+		body, _ := json.Marshal(cfg)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	put := func(t *testing.T, ifMatch string) *http.Response {
+		t.Helper()
+		return putConfig(t, ctrl.cfg, ifMatch)
+	}
+
+	t.Run("the version comes back with the settings", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/v1/config")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		if got, want := resp.Header.Get("ETag"), `"`+current+`"`; got != want {
+			t.Errorf("ETag = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a stale version is refused", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `"not-the-settings-that-are-here"`)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied even though the caller was working from an older version")
+		}
+	})
+
+	t.Run("the current version is accepted and the response carries the new one", func(t *testing.T) {
+		ctrl.applied = false
+		// 送るのは今と違う設定。応答の札は、その届いた設定のものでなければ
+		// ならない。後から入った別の変更の札を付けて返すと、それを土台にした
+		// 次の変更が、間の変更を消せてしまう。
+		changed := config.Default()
+		changed.Transform.Rotate = 180
+		resp := putConfig(t, changed, `"`+current+`"`)
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("the settings were not applied")
+		}
+		if got, want := resp.Header.Get("ETag"), `"`+config.Token(changed)+`"`; got != want {
+			t.Errorf("ETag = %q, want %q — the tag must belong to the settings in the response body", got, want)
+		}
+		current = config.Token(ctrl.cfg)
+	})
+
+	// 応答の本体と札は、同じ瞬間のものでなければならない。適用が終わってから
+	// 札を訊き直すと、その隙間に入った別の変更の札を、こちらの本体に付けて
+	// 返すことになる。それを土台にした次の変更は条件を通り、間の変更を消す。
+	t.Run("the tag belongs to the body even when another change lands right after", func(t *testing.T) {
+		interleaved := config.Default()
+		interleaved.Transform.FlipV = true
+		ctrl.applied, ctrl.next = false, &interleaved
+		t.Cleanup(func() { ctrl.next = nil })
+
+		mine := config.Default()
+		mine.Transform.Rotate = 90
+		resp := putConfig(t, mine, "")
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out)
+		}
+		if got, want := resp.Header.Get("ETag"), `"`+config.Token(mine)+`"`; got != want {
+			t.Errorf("ETag = %q, want %q — it names the change that landed after this one, so building on it would erase that change", got, want)
+		}
+		current = config.Token(ctrl.cfg)
+	})
+
+	// 並べられた札は、どれか 1 つが一致すれば通る。1 つに絞ると、使えたはずの
+	// 候補があるのに断ることになる。
+	t.Run("any one of several versions is enough", func(t *testing.T) {
+		ctrl.applied = false
+		if resp := put(t, `"long-gone", "`+current+`"`); resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that offered the current version among others was refused")
+		}
+	})
+
+	// 並べ方も 1 つとは限らない。同じ名前のヘッダーを何行かに分けて送るのも、
+	// 1 行にカンマで並べるのと同じ意味 (RFC 9110)。行を 1 本しか読まないと、
+	// 2 行目に書かれた今の札に気づかず断ることになる。
+	t.Run("versions spread over several lines are all read", func(t *testing.T) {
+		ctrl.applied = false
+		body, _ := json.Marshal(ctrl.cfg)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Add("If-Match", `"long-gone"`)
+		req.Header.Add("If-Match", `"`+current+`"`)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that spread its versions over several header lines was refused")
+		}
+	})
+
+	// 弱い札は候補にしない。If-Match は強い比較を求める (RFC 9110)。弱い札が
+	// 言っているのは「見た目は同じ」であって「同じもの」ではないので、中身が
+	// 揃っていても、上書きしてよいかの判断には使えない。
+	t.Run("a weak version is not a candidate", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `W/"`+current+`"`)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on a weak validator, which If-Match must not match")
+		}
+	})
+
+	// 弱い札を落としても、条件が無かったことにはしない。落として素通しにすると、
+	// 競合を防いだつもりの要求が、防がないまま通る。
+	t.Run("a weak version does not open the way for a strong one", func(t *testing.T) {
+		ctrl.applied = false
+		if resp := put(t, `W/"long-gone", "`+current+`"`); resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that offered the current version alongside a weak one was refused")
+		}
+	})
+
+	t.Run("no condition is still accepted", func(t *testing.T) {
+		ctrl.applied, ctrl.askedRevision = false, []string{"stale"}
+		if resp := put(t, ""); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that asked for no condition was refused")
+		}
+		if len(ctrl.askedRevision) != 0 {
+			t.Errorf("asked for %v, want no condition", ctrl.askedRevision)
+		}
+	})
+
+	// 条件を付けていないのは、ヘッダーそのものが無いときだけ。付いていて中身が
+	// 空なのは、札を渡し損ねた要求。空を「条件なし」に読み替えると、防いだつもりの
+	// 上書きがそのまま通る。
+	t.Run("an empty condition is not the same as no condition", func(t *testing.T) {
+		ctrl.applied = false
+		body, _ := json.Marshal(ctrl.cfg)
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header["If-Match"] = []string{""}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on an If-Match that carried no version at all")
+		}
+	})
+
+	t.Run("* is accepted", func(t *testing.T) {
+		ctrl.applied = false
+		if resp := put(t, "*"); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if !ctrl.applied {
+			t.Error("If-Match: * was refused")
+		}
+	})
+
+	// 省略された項目はこちらが現在の設定から補う。だからその設定の上で適用されな
+	// ければ、呼び出し側が送ってもいない項目が、別の設定の値で復活する。
+	t.Run("settings left out of the request are filled in from the settings the change lands on", func(t *testing.T) {
+		ctrl.applied = false
+		// 読みが 1 回だけ食い違う。ui だけが違う設定を返す。
+		drifted := ctrl.cfg
+		drifted.UI.Language = "ja"
+		ctrl.drifting, ctrl.drifts = &drifted, 1
+		t.Cleanup(func() { ctrl.drifting, ctrl.drifts = nil, 0 })
+		was := ctrl.cfg.UI.Language
+
+		// ui を省いた本体。古いスキーマのクライアントがこう送る。
+		full, _ := json.Marshal(ctrl.cfg)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(full, &fields); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(fields, "ui")
+		body, _ := json.Marshal(fields)
+
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if got := ctrl.cfg.UI.Language; got != was {
+			t.Errorf("ui.language = %q, want %q — the request never carried a ui, so it must come from the settings it landed on, not from a reading that had already moved on", got, was)
+		}
+		if len(ctrl.askedRevision) != 1 || ctrl.askedRevision[0] != config.Token(ctrl.cfg) {
+			t.Errorf("asked for %v, want the version of the settings the omitted parts were taken from", ctrl.askedRevision)
+		}
+		current = config.Token(ctrl.cfg)
+	})
+
+	// 落ち着かなければ断る。黙って別の設定の値を復活させるより、断るほうがよい。
+	t.Run("settings that keep moving while the gaps are filled are refused", func(t *testing.T) {
+		ctrl.applied = false
+		drifted := ctrl.cfg
+		drifted.UI.Language = "ja"
+		ctrl.drifting, ctrl.drifts = &drifted, 99
+		t.Cleanup(func() { ctrl.drifting, ctrl.drifts = nil, 0 })
+
+		full, _ := json.Marshal(ctrl.cfg)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(full, &fields); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(fields, "ui")
+		body, _ := json.Marshal(fields)
+
+		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied with a ui taken from a reading that never matched the settings underneath")
+		}
+	})
+
+	// entity-tag の中身は Go の文字列リテラルではなく、不透明なバイト列そのもの。
+	// エスケープを展開すると、書き方の違う別の札が今の札に化ける。
+	t.Run("a version written with escapes is a different version", func(t *testing.T) {
+		ctrl.applied = false
+		// 先頭の 1 文字だけを \xNN で書いた札。Go の文字列としては今の札と同じに
+		// なるが、entity-tag としては別物。
+		escaped := fmt.Sprintf(`"\x%02x%s"`, current[0], current[1:])
+		resp := put(t, escaped)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d for %s, want 412: %s", resp.StatusCode, escaped, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on a tag that only matches once Go's escapes are expanded, which entity-tags do not have")
+		}
+	})
+
+	// 引用符で挟まれていないものは entity-tag ではない。Go の文字列としては
+	// 読めても通してはいけない。
+	t.Run("a version in backquotes is not a version", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, "`"+current+"`")
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied on a Go raw string literal, which is not an entity-tag")
+		}
+	})
+
+	// 読めない条件は落とさない。落として「条件なし」に変えると、競合を防いだ
+	// つもりの要求が、防がないまま通る。どの札とも一致しないものとして断る。
+	t.Run("an unreadable condition still refuses", func(t *testing.T) {
+		ctrl.applied = false
+		resp := put(t, `bare-word-without-quotes`)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("status = %d, want 412", resp.StatusCode)
+		}
+		if ctrl.applied {
+			t.Error("the settings were applied even though the condition could not be read")
+		}
+	})
 }

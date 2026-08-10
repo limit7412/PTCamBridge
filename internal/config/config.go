@@ -8,8 +8,10 @@ package config
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"path/filepath"
@@ -325,6 +327,40 @@ func LanguageWithoutLoading(path string, getenv func(string) string) i18n.Lang {
 // 再起動で失われます。呼び出し側はこれを包んで返すので、「変更が拒否された」場合との
 // 違いが、管理 API とトレイまで届く間に失われません。
 var ErrNotSaved = errors.New("the settings are active but could not be saved")
+
+// ErrRevisionMismatch は、変更が土台にした設定が、もう動作中のものではないことを
+// 表します。
+//
+// 設定は全体で 1 つの値として受け渡されるので、呼び出し側は必ず「読んで、変えたい
+// 葉を重ねて、書く」という往復をします。その 2 つの要求の間に別のクライアントが
+// 変更を確定させると、後から書いた側が黙ってそれを消します。版を添えた要求だけが、
+// その消し方を拒めます。
+var ErrRevisionMismatch = errors.New("the settings changed since they were read")
+
+// Token は、この設定そのものを指す札です。同じ設定なら同じ札、違えば違う札に
+// なります。
+//
+// 数え上げではなく中身から導くのは、**プロセスをまたいでも意味を保つため**です。
+// 起動のたびに 1 から数え直す札は、再起動を挟むと別の設定に同じ札が付きます。
+// それを条件にした変更は、読んだものとは違う設定の上に、通ってよいものとして
+// 載ってしまいます。
+//
+// 中身から導くと、A → B → A と戻った設定は元の札に戻ります。それでよいのは、
+// 札が指すのが「設定の中身」だからです。戻した側の変更は自分で取り消されていて、
+// 読んだ人が上書きしてしまうものは何も残っていません (これは ETag の意味その
+// ものでもあります)。
+func Token(cfg Config) string {
+	h := fnv.New64a()
+	// Config は JSON にできる型だけでできているので、ここは失敗しません。
+	// 失敗したときは空のまま進めます — すべての設定が同じ札になり、条件が
+	// 効かなくなるだけで、誤って通すことはありません (どの札とも一致しない
+	// のではなく、どれとも一致してしまう点には注意が要りますが、その状態には
+	// 到達しません)。
+	if data, err := json.Marshal(cfg); err == nil {
+		_, _ = h.Write(data)
+	}
+	return strconv.FormatUint(h.Sum64(), 36)
+}
 
 // Save は設定ファイルを書きます。必要ならフォルダも作ります。
 //

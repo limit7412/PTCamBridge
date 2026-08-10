@@ -163,6 +163,10 @@ const (
 	UISaved           Key = "ui.saved"
 	UISavedPending    Key = "ui.saved_pending"
 	UISaveFailed      Key = "ui.save_failed"
+	UIConflict        Key = "ui.conflict"
+	UIConflictElse    Key = "ui.conflict.elsewhere"
+	UIConflictAsk     Key = "ui.conflict.ask"
+	UIConflictKept    Key = "ui.conflict.kept"
 	UIGetFFmpeg       Key = "ui.get_ffmpeg"
 
 	UIFFmpegInstalled   Key = "ui.ffmpeg.installed"
@@ -368,7 +372,23 @@ var messages = map[Key]map[Lang]string{
 	UISaved:        {English: "Saved.", Japanese: "保存しました。"},
 	UISavedPending: {English: "Saved. These take effect on the next start:", Japanese: "保存しました。次の設定は次回起動で反映されます:"},
 	UISaveFailed:   {English: "Could not save:", Japanese: "保存できませんでした:"},
-	UIGetFFmpeg:    {English: "Get ffmpeg", Japanese: "ffmpeg を取得"},
+	UIConflict: {
+		English:  "Someone else changed these settings while this page was open:",
+		Japanese: "この画面を開いている間に、他の誰かが次の設定を変更しました:",
+	},
+	UIConflictElse: {
+		English:  "Someone else changed the settings while this page was open.",
+		Japanese: "この画面を開いている間に、他の誰かが設定を変更しました。",
+	},
+	UIConflictAsk: {
+		English:  "Save your changes on top of theirs?",
+		Japanese: "その変更の上に、こちらの変更を保存しますか?",
+	},
+	UIConflictKept: {
+		English:  "Nothing was saved. The settings shown are the current ones, with your edits kept.",
+		Japanese: "保存していません。表示は現在の設定で、こちらの変更はそのまま残しています。",
+	},
+	UIGetFFmpeg: {English: "Get ffmpeg", Japanese: "ffmpeg を取得"},
 
 	UIFFmpegInstalled:   {English: "installed", Japanese: "導入済み"},
 	UIFFmpegMissing:     {English: "not installed; UVC cameras need it", Japanese: "未導入。UVC カメラを使うには必要です"},

@@ -1072,7 +1072,7 @@ console.log(JSON.stringify({said: nodes["camera-modes"].textContent}));
 // 通る経路でもあります — トレイや別のクライアントがカメラを変えていれば、応答が
 // この欄をそちらへ書き換えるので、欄と候補が別のカメラを指したままになります。
 func TestSettingsPageLooksUpTheModesWheneverItRewritesTheForm(t *testing.T) {
-	for _, name := range []string{"function fill(cfg) {", "function rebase(cfg, keep) {"} {
+	for _, name := range []string{"function fill(cfg, revision) {", "function rebase(cfg, keep, revision) {"} {
 		body := settingsFunction(t, name)
 		if !strings.Contains(body, "loadCameraModes()") {
 			t.Errorf("%s does not look up the camera modes; the events the page listens for do not fire when the form fills itself", name)
@@ -1932,5 +1932,98 @@ func TestSettingsPageWatchesTheCaptureForCameraChanges(t *testing.T) {
 	}
 	if !strings.Contains(uiSettingsHTML, "countCameras();\nload();") {
 		t.Error("the page does not count the cameras on load")
+	}
+}
+
+// 保存には、土台にした設定の版を添えなければなりません。
+//
+// 設定は全体で 1 つの値として受け渡されるので、この画面は必ず「読んで、触った葉を
+// 重ねて、書く」という往復をします。その 2 つの要求の間に別のクライアントが変更を
+// 確定させても、条件を付けなければ誰にも分かりません。後から書いたこちらが黙って
+// 消します。
+func TestSettingsPageSendsTheVersionItBuiltTheChangeOn(t *testing.T) {
+	body := settingsFunction(t, "const save = (cfg, revision) => fetch(")
+	if !strings.Contains(body, `"If-Match": revision`) {
+		t.Error("the save request does not carry the version the change was built on")
+	}
+	if !strings.Contains(body, "revision\n    ?") && !strings.Contains(body, "revision ?") {
+		t.Error("the save request must still go through when there is no version to send")
+	}
+}
+
+// 412 は「読んでから書くまでの間に、別のクライアントが確定させた」ということです。
+// 黙って上書きしてはいけません — それがこの条件を付けている理由そのものです。
+// 何が変わったのかを伝えてから、送り直すかどうかを選ばせます。
+func TestSettingsPageAsksBeforeWritingOverSomeoneElsesChange(t *testing.T) {
+	body := settingsFunction(t, `el("settings").addEventListener("submit", async (event) => {`)
+	if !strings.Contains(body, "412") {
+		t.Fatal("the save flow does not notice that the settings moved on")
+	}
+	if !strings.Contains(body, "confirm(conflictMessage(") {
+		t.Error("the save flow overwrites someone else's change without asking")
+	}
+	// 本体と条件は同じ 1 つの読みから組む。土台を取り直した設定にしながら条件を
+	// 画面を描いたときの札にすると、A → B → A と戻る途中で読んだ B を、A の札で
+	// 書けてしまう。ユーザーが触ってもいない B の値が確認なしで復活する。
+	if !strings.Contains(body, "save(overlay(ground.cfg), ground.revision)") {
+		t.Error("the body and the condition come from different reads, so a value the user never saw can be restored under a matching tag")
+	}
+	if strings.Contains(body, "baselineRevision);") {
+		t.Error("a save is conditioned on the version from render time rather than on the settings it is actually built on")
+	}
+	// 「描いてから動いたか」はこちらで札を見比べる。サーバの 412 には任せられない
+	// — まさに A → B → A では札が戻るので 412 が出ない。
+	if !strings.Contains(body, "ground.revision !== baselineRevision") {
+		t.Error("the page never compares what it drew with what it is about to write on, so a change the user never saw is not a conflict")
+	}
+	if !strings.Contains(body, "rebase(ground.cfg, dirty, ground.revision)") {
+		t.Error("declining the overwrite must leave the page showing the current settings with the user's edits")
+	}
+	// 訊くのは同じ項目を触っていたときだけ。触っていない項目の変更は、こちらが
+	// 押し戻すものではないので、黙って取り直して送り直せば両方の変更が残る。
+	if !strings.Contains(body, "clashingLeaves(mine, ground.cfg, dirty)") {
+		t.Error("the save flow asks about changes to settings the user never touched")
+	}
+	// 412 で終わりにしない。取り直してから確認を出している間に、また誰かが書けば
+	// 同じことが起きる。1 回で諦めると、その 412 は普通の失敗として扱われ、後の
+	// rebase が最新の札とユーザーの古い編集を組み合わせるので、もう一度保存を
+	// 押したときに、新しく入った変更を確認なしで消す。
+	if !strings.Contains(body, "if (response.status !== 412) break;") {
+		t.Error("only the first save can be a conflict, so a change that lands during the retry is overwritten without asking")
+	}
+	// 比べる相手は、ユーザーが見て承知したところまで進めなければならない。進め
+	// ないと、既に承知した同じ変更について何度も訊くことになる。**写しを取る** —
+	// 同じオブジェクトを持つと、直後の overlay が比べる相手までユーザーの入力で
+	// 塗り替え、承知済みの葉が何度でも競合として挙がる。
+	if !strings.Contains(body, "mine = JSON.parse(JSON.stringify(ground.cfg));") {
+		t.Error("the next round compares against an object the overlay is about to rewrite, so settings the user already accepted come up again")
+	}
+	// 触った葉は、競合の判定より先に拾わなければならない。判定は「ユーザーが触った
+	// 項目が動いていたか」を見るので、拾う前に判定すると、触った項目が 1 つも無い
+	// ことになって、何も訊かずに上書きする — 画面を描いてから最初の読みまでの間に
+	// 相手が同じ葉を変えた場合が、まさにそれ。
+	touched := strings.Index(body, "dirty.add(i)")
+	building := strings.Index(body, "const overlay = (cfg) =>")
+	if touched < 0 || building < 0 || touched > building {
+		t.Error("the page works out which settings the user touched only while building the body, so the first conflict check sees nothing and overwrites without asking")
+	}
+}
+
+// 何が変わったかを言うときに比べる相手は、こちらが土台にした設定です。重ねた後の
+// ものと比べると、自分の変更まで「相手が変えたもの」として数えます。
+func TestSettingsPageNamesOnlyTheSettingsSomeoneElseChanged(t *testing.T) {
+	body := settingsFunction(t, "function clashingLeaves(mine, theirs, dirty) {")
+	if !strings.Contains(body, "dirty.has(i)") {
+		t.Error("settings the user never touched are counted as conflicts")
+	}
+	if !strings.Contains(body, "field.path.join(\".\")") {
+		t.Error("the changed settings are not named")
+	}
+
+	// 描いた設定の写しを控えていること。JSON を通すのは、重ねる操作が土台の
+	// オブジェクトをその場で書き換えるため。
+	kept := settingsFunction(t, "function remember(cfg, revision) {")
+	if !strings.Contains(kept, "JSON.parse(JSON.stringify(cfg))") {
+		t.Error("the page keeps no copy of what it drew, so it cannot say what someone else changed since")
 	}
 }

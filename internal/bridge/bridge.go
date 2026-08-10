@@ -426,7 +426,14 @@ func (b *Bridge) Snapshot() config.Config {
 // こちらの要求について数えた名前が並ぶことになります。en で起動して、先の要求が ja、
 // 後の要求が en を指定すれば、language=en と pending_restart=["ui.language"] が同時に
 // 返り、保留になっていない変更を保留として伝えます。
-func (b *Bridge) Apply(ctx context.Context, cfg config.Config) (config.Config, []string, error) {
+// ifAny は、この変更が土台にしてよい設定の札です (config.Token を参照)。空なら
+// 条件を付けません。1 つでも今の設定に一致すれば進み、どれも一致しなければ何も
+// せず config.ErrRevisionMismatch を返します。
+//
+// 判定を mu の下でするのは、それが唯一「確かめてから適用する」を 1 つの操作に
+// できる場所だからです。呼び出し側が先に札を読んで比べても、比べ終えてから適用
+// するまでの間に別の変更が入ります。防ぎたいものがちょうどその隙間に入ります。
+func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifAny []string) (config.Config, []string, error) {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, nil, err
@@ -434,6 +441,9 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config) (config.Config, [
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(b.cfg)) {
+		return b.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
+	}
 	return b.applyLocked(ctx, cfg)
 }
 
@@ -542,7 +552,8 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 			}
 			return b.cfg, nil, err
 		}
-		// 検証を通った。ここで初めて外から見える。
+		// 検証を通った。ここで初めて外から見える。版が進むのもここです — 巻き戻る
+		// 変更は、他のクライアントが読んだ設定を古くしません。
 		b.publishView()
 	}
 
