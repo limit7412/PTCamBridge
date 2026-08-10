@@ -216,7 +216,21 @@ const FIELDS = [
 
 // baseline は、この画面がフォームを描いたときの値。ここからの差が「ユーザーが
 // 触ったもの」になる。
+//
+// rendered と baselineRevision は、そのとき描いた設定そのものと、その札。保存の
+// 条件に使うのはこの札で、送る直前に取り直したものではない。取り直した札を条件に
+// すると、画面を開いてから保存を押すまでの間に別のクライアントが変えたものは
+// 競合にならず、ユーザーが見たことのない値を黙って消せる。
 let baseline = null;
+let rendered = null;
+let baselineRevision = "";
+
+// remember は、描いた設定を控えます。JSON を通すのは、後で重ねる操作が土台の
+// オブジェクトをその場で書き換えるためです。
+function remember(cfg, revision) {
+  rendered = JSON.parse(JSON.stringify(cfg));
+  baselineRevision = revision || "";
+}
 
 const at = (cfg, path) => path.reduce((node, key) => (node == null ? node : node[key]), cfg);
 
@@ -237,11 +251,12 @@ function showSource(type) {
   }
 }
 
-function fill(cfg) {
+function fill(cfg, revision) {
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
+  remember(cfg, revision);
   // 代入では change も blur も起きないので、候補はここから取りに行くしかない。
   // 初回の読み込みだけでなく、保存のたびに通るこの経路でも要る — 別のクライアント
   // やトレイがカメラを変えていれば、応答がこの欄をそちらへ書き換えるので、欄と
@@ -265,12 +280,13 @@ function fill(cfg) {
 // いったん cfg を書いてから読み直すのは、fill と同じ変換を通すためです。設定の値を
 // そのまま基準にすると、フォームが返す形 (trim した文字列、数値、真偽値) と食い違って、
 // 触っていない項目が変更として送られます。
-function rebase(cfg, keep) {
+function rebase(cfg, keep, revision) {
   const mine = readForm();
   for (const field of FIELDS) {
     field.write(at(cfg, field.path));
   }
   baseline = readForm();
+  remember(cfg, revision);
   FIELDS.forEach((field, i) => {
     if (keep.has(i)) field.write(mine[i]);
   });
@@ -320,7 +336,8 @@ async function getConfig() {
 
 async function load() {
   try {
-    fill((await getConfig()).cfg);
+    const current = await getConfig();
+    fill(current.cfg, current.revision);
     el("offline").style.display = "none";
     el("save").disabled = false;
   } catch (err) {
@@ -339,16 +356,21 @@ const save = (cfg, revision) => fetch("/api/v1/config", {
   body: JSON.stringify(cfg),
 });
 
-// conflictMessage は、こちらが土台にした設定と、いまの設定の違いを名前で並べます。
+// clashingLeaves は、こちらが触った項目のうち、描いてから別のクライアントに
+// 変えられたものを名前で返します。
 //
-// 画面に無い項目 (追加ヘッダーなど) も版を進めるので、名前が 1 つも挙がらない
-// ことはあります。そのときも「何かが変わった」ことは言います — 黙って上書きするか
-// どうかを訊いている場面で、変わっていないかのように見せるわけにはいきません。
-function conflictMessage(mine, theirs) {
-  const changed = FIELDS
+// 比べる相手は**こちらが画面に描いた設定**です。送る土台 (取り直したもの) と
+// 比べると、相手の変更が既にそこに入っているので、何も違わないことになります。
+function clashingLeaves(mine, theirs, dirty) {
+  return FIELDS
+    .filter((field, i) => dirty.has(i))
     .filter((field) => JSON.stringify(at(mine, field.path)) !== JSON.stringify(at(theirs, field.path)))
     .map((field) => field.path.join("."));
-  const what = changed.length ? TEXT.conflict + " " + changed.join(", ") : TEXT.conflictElse;
+}
+
+// conflictMessage は、ユーザーに訊く文面です。
+function conflictMessage(clash) {
+  const what = clash.length ? TEXT.conflict + " " + clash.join(", ") : TEXT.conflictElse;
   return what + "\n\n" + TEXT.conflictAsk;
 }
 
@@ -366,10 +388,12 @@ el("settings").addEventListener("submit", async (event) => {
     // 送る土台は、いま取り直した設定。画面を描いたときの写しではない。こちらが
     // 見ていない間に変わったものを、古い値で押し戻さないため。画面に出していない
     // 項目 — シリアルのヘッダ定数、追加ヘッダー、フレーム上限 — もこれで運ばれる。
-    let base = await getConfig();
-    // 重ねる前の写し。競合したときに「他の誰かが何を変えたか」を言うには、こちらが
-    // 土台にした設定が要ります。重ねた後の cfg と比べると、自分の変更まで数えます。
-    let theirs = JSON.parse(JSON.stringify(base.cfg));
+    // 送る土台は取り直した設定。画面に出していない項目 — シリアルのヘッダ定数、
+    // 追加ヘッダー、フレーム上限 — をこちらの古い写しで押し戻さないため。
+    // ただし**条件はそれではなく、画面を描いたときの札**。取り直した札を条件に
+    // すると、画面を開いてから保存を押すまでの間に別のクライアントが変えたものは
+    // 競合にならず、ユーザーが見たことのない値を黙って消せる。
+    const base = await getConfig();
     const overlay = (cfg) => {
       const now = readForm();
       FIELDS.forEach((field, i) => {
@@ -380,23 +404,25 @@ el("settings").addEventListener("submit", async (event) => {
       });
       return cfg;
     };
-    const cfg = overlay(base.cfg);
+    const mine = rendered;
 
     sent = true;
-    let response = await save(cfg, base.revision);
+    let response = await save(overlay(base.cfg), baselineRevision);
     if (response.status === 412) {
-      // 読んでから書くまでの間に、別のクライアントが変更を確定させた。黙って
-      // 上書きはしない — それがこの条件を付けている理由そのもの。
+      // 描いてから書くまでの間に、別のクライアントが変更を確定させた。
       const fresh = await getConfig();
-      if (!confirm(conflictMessage(theirs, fresh.cfg))) {
+      // 訊くのは、**同じ項目**を触っていたときだけ。触っていない項目の変更は、
+      // こちらが押し戻すものではないので (送るのは触った葉だけ)、黙って取り直して
+      // 送り直せば、相手の変更もこちらの変更も残る。ログの行を直したい人に、
+      // 誰かがカメラを切り替えたことを確認させる理由はない。
+      const clash = clashingLeaves(mine, fresh.cfg, dirty);
+      if (clash.length && !confirm(conflictMessage(clash))) {
         say(TEXT.conflictKept);
-        rebase(fresh.cfg, dirty);
+        rebase(fresh.cfg, dirty, fresh.revision);
         return;
       }
       // 送り直すのは、取り直した設定に同じ変更を重ねたもの。さっきの本体をその
       // まま投げ直すと、承知したはずの相手の変更を消すことになる。
-      base = fresh;
-      theirs = JSON.parse(JSON.stringify(fresh.cfg));
       response = await save(overlay(fresh.cfg), fresh.revision);
     }
     const text = await response.text();
@@ -407,17 +433,19 @@ el("settings").addEventListener("submit", async (event) => {
       // 失敗しても値が動作中の設定に入っていることはある。基準を取り直さないと、
       // 元へ戻す操作が変更として見えなくなる。rebase を参照。
       try {
-        rebase((await getConfig()).cfg, dirty);
+        const now = await getConfig();
+        rebase(now.cfg, dirty, now.revision);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }
       return;
     }
     const applied = JSON.parse(text);
+    // 応答の札は、いま届いた設定そのもののもの。次の保存はこれを条件にする。
     // 応答は設定そのものに pending_restart が 1 つ増えた形。フォームを描き直すのに
     // 使うだけなので、余分な項目があっても構わない。次に送る土台は、そのときまた
     // 取り直す。
-    fill(applied);
+    fill(applied, response.headers.get("ETag") || "");
     const pending = applied.pending_restart || [];
     say(pending.length ? TEXT.savedPending + " " + pending.join(", ") : TEXT.saved);
   } catch (err) {
@@ -431,7 +459,8 @@ el("settings").addEventListener("submit", async (event) => {
     // 取り直せばユーザーの編集を 1 つ残らずサーバの値で塗り潰すことになる。
     if (sent) {
       try {
-        rebase((await getConfig()).cfg, dirty);
+        const now = await getConfig();
+        rebase(now.cfg, dirty, now.revision);
       } catch (err) {
         // 取り直せないだけ。画面の値はそのまま。
       }

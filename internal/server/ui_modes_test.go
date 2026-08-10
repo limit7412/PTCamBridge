@@ -1069,7 +1069,7 @@ console.log(JSON.stringify({said: nodes["camera-modes"].textContent}));
 // 通る経路でもあります — トレイや別のクライアントがカメラを変えていれば、応答が
 // この欄をそちらへ書き換えるので、欄と候補が別のカメラを指したままになります。
 func TestSettingsPageLooksUpTheModesWheneverItRewritesTheForm(t *testing.T) {
-	for _, name := range []string{"function fill(cfg) {", "function rebase(cfg, keep) {"} {
+	for _, name := range []string{"function fill(cfg, revision) {", "function rebase(cfg, keep, revision) {"} {
 		body := settingsFunction(t, name)
 		if !strings.Contains(body, "loadCameraModes()") {
 			t.Errorf("%s does not look up the camera modes; the events the page listens for do not fire when the form fills itself", name)
@@ -1186,26 +1186,35 @@ func TestSettingsPageAsksBeforeWritingOverSomeoneElsesChange(t *testing.T) {
 	if !strings.Contains(body, "save(overlay(fresh.cfg), fresh.revision)") {
 		t.Error("the retry does not rebuild the change on top of the settings it just re-read")
 	}
-	if !strings.Contains(body, "rebase(fresh.cfg, dirty)") {
+	if !strings.Contains(body, "rebase(fresh.cfg, dirty, fresh.revision)") {
 		t.Error("declining the overwrite must leave the page showing the current settings with the user's edits")
+	}
+	// 訊くのは同じ項目を触っていたときだけ。触っていない項目の変更は、こちらが
+	// 押し戻すものではないので、黙って取り直して送り直せば両方の変更が残る。
+	if !strings.Contains(body, "clashingLeaves(mine, fresh.cfg, dirty)") {
+		t.Error("the save flow asks about changes to settings the user never touched")
+	}
+	// 条件は「画面を描いたときの札」。送る直前に取り直したものではない。
+	if !strings.Contains(body, "save(overlay(base.cfg), baselineRevision)") {
+		t.Error("the first save is conditioned on a version read after the page was drawn, so changes the user never saw are not conflicts")
 	}
 }
 
 // 何が変わったかを言うときに比べる相手は、こちらが土台にした設定です。重ねた後の
 // ものと比べると、自分の変更まで「相手が変えたもの」として数えます。
 func TestSettingsPageNamesOnlyTheSettingsSomeoneElseChanged(t *testing.T) {
-	body := settingsFunction(t, "function conflictMessage(mine, theirs) {")
-	if !strings.Contains(body, "TEXT.conflictElse") {
-		t.Error("a change to a setting this page does not show would be reported as no change at all")
+	body := settingsFunction(t, "function clashingLeaves(mine, theirs, dirty) {")
+	if !strings.Contains(body, "dirty.has(i)") {
+		t.Error("settings the user never touched are counted as conflicts")
 	}
 	if !strings.Contains(body, "field.path.join(\".\")") {
 		t.Error("the changed settings are not named")
 	}
 
-	// 重ねる前の写しを取っていること。JSON を通すのは、重ねる操作が土台の
+	// 描いた設定の写しを控えていること。JSON を通すのは、重ねる操作が土台の
 	// オブジェクトをその場で書き換えるため。
-	save := settingsFunction(t, `el("settings").addEventListener("submit", async (event) => {`)
-	if !strings.Contains(save, "JSON.parse(JSON.stringify(base.cfg))") {
-		t.Error("the page keeps no copy of what it built the change on, so it cannot say what someone else changed")
+	kept := settingsFunction(t, "function remember(cfg, revision) {")
+	if !strings.Contains(kept, "JSON.parse(JSON.stringify(cfg))") {
+		t.Error("the page keeps no copy of what it drew, so it cannot say what someone else changed since")
 	}
 }

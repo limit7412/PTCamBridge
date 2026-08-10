@@ -127,11 +127,6 @@ type Bridge struct {
 	listingWG      sync.WaitGroup
 	lookupsStopped bool
 
-	// revision は、動作中の設定が何度差し替わったかです。mu の下で数えます。
-	// 条件付きの Apply がこれを見ます (ErrRevisionMismatch を参照)。動いたときだけ
-	// 進めるので、同じ設定を送り直しても他のクライアントの版は無効になりません。
-	revision uint64
-
 	// lifetime は、このアプリケーションが動いている間だけ生きているコンテキスト
 	// です (Start が受け取るもの)。列挙はこれの下で走ります — 要求 1 本より長く、
 	// プロセスより短く。listModesOnce を参照。
@@ -222,12 +217,8 @@ type modeLookup struct {
 
 // view は、呼び出し側が読むだけで決して変更しないもののロックフリーな写しです。
 type view struct {
-	cfg config.Config
-	// revision は、この設定が何度目のものかです。設定と同じ写しに入っているのは、
-	// 2 つを別々に読むと、その隙間に入った変更のせいで、設定とその版が食い違った
-	// まま呼び出し側へ渡るからです。Revised を参照。
-	revision uint64
-	paused   bool
+	cfg    config.Config
+	paused bool
 	// opening は、今まさに開こうとしているカメラです。設定そのものと違って、
 	// これは検証を通る前から公開します。何を開こうとしているかは、その時点で
 	// 確定しているからです。capturing を参照。
@@ -242,16 +233,13 @@ func (b *Bridge) provenLocked() bool {
 
 // publishView はロックフリーな写しを更新します。呼び出し側が mu を保持します。
 func (b *Bridge) publishView() {
-	b.view.Store(&view{cfg: b.cfg, revision: b.revision, paused: b.paused, opening: b.opening})
+	b.view.Store(&view{cfg: b.cfg, paused: b.paused, opening: b.opening})
 }
 
 // New は、渡された設定でブリッジを組み立てます。キャプチャを始めるには Start を
 // 呼ぶ必要があります。
 func New(cfg config.Config, cfgPath string, h *hub.Hub, st *status.Tracker, log *slog.Logger) *Bridge {
-	// 版は 1 から数えます。0 は「版を問わない」を表すので (config.AnyRevision)、
-	// そこから始めると、一度も設定が変わっていないブリッジが配った版だけが、
-	// 条件として使えないものになります。
-	b := &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg, startup: cfg, revision: 1}
+	b := &Bridge{hub: h, status: st, log: log, cfgPath: cfgPath, cfg: cfg, persistBase: cfg, startup: cfg}
 	b.publishView()
 	return b
 }
@@ -423,16 +411,6 @@ func (b *Bridge) Snapshot() config.Config {
 	return b.view.Load().cfg
 }
 
-// Revised は、現在有効な設定と、その版を返します。
-//
-// 2 つを一緒に返すのは、別々に読めない — 読めてはいけない — からです。間に別の
-// 要求が入れば、呼び出し側は「今の設定」と「1 つ前の版」を組にして持つことになり、
-// その組で条件を付けた変更は、通ってはいけないのに通ります。
-func (b *Bridge) Revised() (config.Config, uint64) {
-	v := b.view.Load()
-	return v.cfg, v.revision
-}
-
 // Apply は新しい設定を採用してソースを再起動し、設定ファイルのパスが与えられて
 // いれば保存します。設定を残すのは新しいソースが起動できた場合だけなので、誤った
 // デバイス名を渡してもブリッジが何も動かない状態にはなりません。
@@ -448,12 +426,14 @@ func (b *Bridge) Revised() (config.Config, uint64) {
 // こちらの要求について数えた名前が並ぶことになります。en で起動して、先の要求が ja、
 // 後の要求が en を指定すれば、language=en と pending_restart=["ui.language"] が同時に
 // 返り、保留になっていない変更を保留として伝えます。
-// ifRevision は、この変更が土台にした設定の版です。config.AnyRevision なら条件を
-// 付けません。食い違えば何もせず config.ErrRevisionMismatch を返します。判定を
-// mu の下でするのは、それが唯一「確かめてから適用する」を 1 つの操作にできる場所
-// だからです。呼び出し側が先に版を読んで比べても、比べ終えてから適用するまでの間に
-// 別の変更が入ります。
-func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifRevision uint64) (config.Config, []string, error) {
+// ifAny は、この変更が土台にしてよい設定の札です (config.Token を参照)。空なら
+// 条件を付けません。1 つでも今の設定に一致すれば進み、どれも一致しなければ何も
+// せず config.ErrRevisionMismatch を返します。
+//
+// 判定を mu の下でするのは、それが唯一「確かめてから適用する」を 1 つの操作に
+// できる場所だからです。呼び出し側が先に札を読んで比べても、比べ終えてから適用
+// するまでの間に別の変更が入ります。防ぎたいものがちょうどその隙間に入ります。
+func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifAny []string) (config.Config, []string, error) {
 	cfg.Normalise()
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, nil, err
@@ -461,23 +441,10 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifRevision uint64
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if ifRevision != config.AnyRevision && ifRevision != b.revision {
-		return b.cfg, nil, fmt.Errorf("%w: it was read at revision %d and is now at %d", config.ErrRevisionMismatch, ifRevision, b.revision)
+	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(b.cfg)) {
+		return b.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
 	}
 	return b.applyLocked(ctx, cfg)
-}
-
-// reviseLocked は、動作中の設定が実際に動いたときだけ版を進めます。呼び出し側が
-// mu を保持します。
-//
-// 動かなかったときに進めないのは、版が「設定がどれか」を指すものだからです。同じ
-// 設定をそのまま送り直すのは、死んだドライバを起こす手段でもあり保存のやり直しでも
-// あるので珍しくありません。そのたびに進めると、何も変えていない要求が、他の
-// クライアントの持っている版を無効にします。
-func (b *Bridge) reviseLocked(previous config.Config) {
-	if !reflect.DeepEqual(previous, b.cfg) {
-		b.revision++
-	}
 }
 
 // applyLocked は mu を保持済みの Apply です。先に現在の設定を読む必要のある
@@ -530,7 +497,6 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 		// 無いし、検証に失敗すればこの保存ごと巻き戻る。GUI から保存できるように
 		// したはずの設定が、カメラが直るまで一つも保存できなくなる。
 		b.cfg = cfg
-		b.reviseLocked(previous)
 		b.publishView()
 	} else if captureUnchanged(previous, cfg) && b.captureAsExpectedLocked() {
 		// 動いたのはサーバ側の設定だけなので、カメラには触れない。再起動すれば
@@ -538,7 +504,6 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 		// 下の検証が変更を丸ごと拒否してしまう。まさにその状況のための設定である
 		// hold_on_source_loss さえも。
 		b.cfg = cfg
-		b.reviseLocked(previous)
 		b.publishView()
 	} else {
 		b.stopLocked()
@@ -589,7 +554,6 @@ func (b *Bridge) applyLocked(ctx context.Context, cfg config.Config) (config.Con
 		}
 		// 検証を通った。ここで初めて外から見える。版が進むのもここです — 巻き戻る
 		// 変更は、他のクライアントが読んだ設定を古くしません。
-		b.reviseLocked(previous)
 		b.publishView()
 	}
 

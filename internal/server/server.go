@@ -72,16 +72,14 @@ type Devices struct {
 type Controller interface {
 	// Snapshot は、現在有効な設定を返します。
 	Snapshot() config.Config
-	// Revised は、現在有効な設定と、その版を返します。2 つを別々に読むと、その
-	// 隙間に入った変更のせいで、設定とその版が食い違ったまま呼び出し側へ渡ります。
-	Revised() (config.Config, uint64)
 	// Apply は新しい設定を検証し、採用します。起動時にしか読まれない設定も
 	// 受け入れますが、この起動の振る舞いは変わりません。落ち着いた設定と、
 	// それらの名前が返ります。2 つを別々に読むと、その隙間に入った別の要求の
 	// 設定と、こちらの要求について数えた名前が並ぶことになります。
-	// ifRevision は、この変更が土台にした設定の版です。config.AnyRevision なら
-	// 条件を付けません。食い違えば何もせず config.ErrRevisionMismatch を返します。
-	Apply(ctx context.Context, cfg config.Config, ifRevision uint64) (config.Config, []string, error)
+	// ifAny は、この変更が土台にしてよい設定の札です (config.Token を参照)。空なら
+	// 条件を付けません。1 つも一致しなければ何もせず config.ErrRevisionMismatch を
+	// 返します。
+	Apply(ctx context.Context, cfg config.Config, ifAny []string) (config.Config, []string, error)
 	// Switch は、稼働中のソース種別を変更します。
 	Switch(ctx context.Context, sourceType string) error
 	// Devices は、今使えるカメラとシリアルポートを列挙します。問題が起きた場合は、
@@ -521,8 +519,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		cfg, revision := s.opts.Controller.Revised()
-		w.Header().Set("ETag", revisionTag(revision))
+		// 札は設定そのものから導くので、この 1 つの写しから両方が出ます。別々に
+		// 読む必要が無いということは、その隙間に入った変更のせいで食い違う心配も
+		// 無いということです。
+		cfg := s.opts.Controller.Snapshot()
+		w.Header().Set("ETag", entityTag(config.Token(cfg)))
 		writeJSON(w, r, http.StatusOK, cfg)
 
 	case http.MethodPut:
@@ -549,20 +550,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		want, err := requiredRevision(r.Header.Get("If-Match"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg, want)
+		applied, deferred, err := s.opts.Controller.Apply(r.Context(), cfg, ifMatch(r.Header.Get("If-Match")))
 		if err != nil {
 			http.Error(w, err.Error(), applyStatus(err))
 			return
 		}
-		// 応答にも版を載せます。載せなければ、続けて変更する呼び出し側は、自分が
+		// 応答にも札を載せます。載せなければ、続けて変更する呼び出し側は、自分が
 		// たった今起こした変更のために、もう一度 GET しなければなりません。
-		_, revision := s.opts.Controller.Revised()
-		w.Header().Set("ETag", revisionTag(revision))
+		//
+		// 札は applied から導きます。これはロックの下で決まった設定そのものなので、
+		// 本体と札が同じ瞬間のものであることが形から保証されます。ここで改めて
+		// 現在値を訊くと、その隙間に入った別の変更の札を、こちらの本体に付けて
+		// 返すことになり、それを土台にした次の変更が間の変更を消せてしまいます。
+		w.Header().Set("ETag", entityTag(config.Token(applied)))
 		writeJSON(w, r, http.StatusOK, appliedConfig{
 			Config:         applied,
 			PendingRestart: deferred,
@@ -634,13 +634,12 @@ func applyStatus(err error) int {
 	return http.StatusBadRequest
 }
 
-// revisionTag は、設定の版を ETag にします。
-func revisionTag(revision uint64) string {
-	return `"` + strconv.FormatUint(revision, 10) + `"`
+// entityTag は、設定の札を ETag にします。
+func entityTag(token string) string {
+	return `"` + token + `"`
 }
 
-// requiredRevision は If-Match を読みます。何も要求していなければ
-// config.AnyRevision を返します。
+// ifMatch は If-Match が並べた札を読みます。条件を付けていなければ空を返します。
 //
 // 付けない呼び出しをそのまま通すのは、ここがループバック上の管理 API だからです。
 // curl やトレイのように 1 回だけ書くクライアントに、条件の付け方を覚えさせる理由は
@@ -649,37 +648,31 @@ func revisionTag(revision uint64) string {
 // "*" は「今この表現があるなら通す」を意味します (RFC 9110)。設定は常にあるので
 // 常に通ります。
 //
-// 値は 1 つとは限りません。並べられた場合、どれか 1 つに一致すれば通します。
-// 一致すべきものが複数あるわけではなく、呼び出し側が「このどれかなら」と言って
-// いるからです。読めない値は 400 で断ります。黙って条件を落とすと、競合を防いだ
-// つもりの要求が、防がないまま通ります。
-func requiredRevision(header string) (uint64, error) {
+// 値は 1 つとは限りません。**並べられたものは全部渡します。** どれか 1 つに一致
+// すれば通る、というのが If-Match の意味なので、こちらで 1 つに絞ると、使えたはず
+// の候補があるのに断ることになります。
+//
+// 読めない値は落としますが、条件そのものは残ります。落とした結果ひとつも残ら
+// なければ、一致しようのない条件として 412 になります。黙って「条件なし」に
+// 変えてはいけません — 競合を防いだつもりの要求が、防がないまま通ります。
+func ifMatch(header string) []string {
 	header = strings.TrimSpace(header)
-	if header == "" {
-		return config.AnyRevision, nil
+	if header == "" || header == "*" {
+		return nil
 	}
-	if header == "*" {
-		return config.AnyRevision, nil
-	}
+	tokens := []string{}
 	for _, tag := range strings.Split(header, ",") {
-		tag = strings.TrimSpace(tag)
-		tag = strings.TrimPrefix(tag, "W/")
-		unquoted, err := strconv.Unquote(tag)
-		if err != nil {
-			continue
+		tag = strings.TrimPrefix(strings.TrimSpace(tag), "W/")
+		if unquoted, err := strconv.Unquote(tag); err == nil {
+			tokens = append(tokens, unquoted)
 		}
-		revision, err := strconv.ParseUint(unquoted, 10, 64)
-		if err != nil {
-			continue
-		}
-		// 0 は「版を問わない」と同じ値なので、条件として受け取れません。設定が
-		// 一度も変わっていない状態の版でもあるため、そこだけ条件が黙って外れます。
-		if revision == config.AnyRevision {
-			continue
-		}
-		return revision, nil
 	}
-	return config.AnyRevision, fmt.Errorf("If-Match: %q is not a revision this API issued", header)
+	// 1 つも読めなくても、条件が無かったことにはしません。どの札とも一致しない
+	// ものを 1 つ入れて、断られる側へ倒します。
+	if len(tokens) == 0 {
+		return []string{header}
+	}
+	return tokens
 }
 
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,10 +382,11 @@ type fakeController struct {
 	modesErr   error
 	modesFor   string
 	modesCalls int
-	// revision は、この設定が何度目のものか。Apply が条件を見るのに使い、
-	// 通れば進める。askedRevision は最後に要求された条件。
-	revision      uint64
-	askedRevision uint64
+	// askedRevision は、最後に要求された条件 (If-Match が並べた札)。
+	askedRevision []string
+	// next は、Apply の後に読まれる設定。別のクライアントの変更が割り込んだ
+	// 状況を作るためのもの。
+	next *config.Config
 }
 
 func (c *fakeController) CameraModes(_ context.Context, device string) ([]source.Mode, error) {
@@ -393,23 +395,27 @@ func (c *fakeController) CameraModes(_ context.Context, device string) ([]source
 	return c.modes, c.modesErr
 }
 
-func (c *fakeController) Snapshot() config.Config { return c.cfg }
-
-func (c *fakeController) Revised() (config.Config, uint64) { return c.cfg, c.revision }
+// Snapshot は、next が置かれている場合、Apply の後だけそちらを返す。「この PUT が
+// ロックを離した直後に、別のクライアントの変更が入った」状況そのもの。
+func (c *fakeController) Snapshot() config.Config {
+	if c.applied && c.next != nil {
+		return *c.next
+	}
+	return c.cfg
+}
 
 func (c *fakeController) Overridden() []string { return c.overridden }
 
-func (c *fakeController) Apply(_ context.Context, cfg config.Config, ifRevision uint64) (config.Config, []string, error) {
-	c.askedRevision = ifRevision
-	if ifRevision != config.AnyRevision && ifRevision != c.revision {
-		return c.cfg, nil, fmt.Errorf("%w: it was read at revision %d and is now at %d", config.ErrRevisionMismatch, ifRevision, c.revision)
+func (c *fakeController) Apply(_ context.Context, cfg config.Config, ifAny []string) (config.Config, []string, error) {
+	c.askedRevision = ifAny
+	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(c.cfg)) {
+		return c.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
 	}
 	if c.applyErr != nil {
 		return config.Config{}, nil, c.applyErr
 	}
 	c.cfg = cfg
 	c.applied = true
-	c.revision++
 	return c.cfg, c.deferred, nil
 }
 
@@ -1295,14 +1301,15 @@ func TestConfigPutKeepsSettingsTheRequestNeverNamed(t *testing.T) {
 // 重ねて、書く」という往復をする。その 2 つの要求の間に別のクライアントが変更を
 // 確定させても、条件を付けなければ誰にも分からない。後から書いた側が黙って消す。
 func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
-	ctrl := &fakeController{cfg: config.Default(), revision: 7}
+	ctrl := &fakeController{cfg: config.Default()}
 	s, _, _ := newTestServer(t, Options{EnableAdmin: true, Controller: ctrl})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
+	current := config.Token(ctrl.cfg)
 
-	put := func(t *testing.T, ifMatch string) *http.Response {
+	putConfig := func(t *testing.T, cfg config.Config, ifMatch string) *http.Response {
 		t.Helper()
-		body, _ := json.Marshal(config.Default())
+		body, _ := json.Marshal(cfg)
 		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/config", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if ifMatch != "" {
@@ -1315,6 +1322,10 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		t.Cleanup(func() { resp.Body.Close() })
 		return resp
 	}
+	put := func(t *testing.T, ifMatch string) *http.Response {
+		t.Helper()
+		return putConfig(t, ctrl.cfg, ifMatch)
+	}
 
 	t.Run("the version comes back with the settings", func(t *testing.T) {
 		resp, err := http.Get(ts.URL + "/api/v1/config")
@@ -1322,14 +1333,14 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 			t.Fatalf("get: %v", err)
 		}
 		defer resp.Body.Close()
-		if got, want := resp.Header.Get("ETag"), `"7"`; got != want {
+		if got, want := resp.Header.Get("ETag"), `"`+current+`"`; got != want {
 			t.Errorf("ETag = %q, want %q", got, want)
 		}
 	})
 
 	t.Run("a stale version is refused", func(t *testing.T) {
 		ctrl.applied = false
-		resp := put(t, `"6"`)
+		resp := put(t, `"not-the-settings-that-are-here"`)
 		if resp.StatusCode != http.StatusPreconditionFailed {
 			out, _ := io.ReadAll(resp.Body)
 			t.Fatalf("status = %d, want 412: %s", resp.StatusCode, out)
@@ -1339,9 +1350,14 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		}
 	})
 
-	t.Run("the current version is accepted and a new one is issued", func(t *testing.T) {
+	t.Run("the current version is accepted and the response carries the new one", func(t *testing.T) {
 		ctrl.applied = false
-		resp := put(t, `"7"`)
+		// 送るのは今と違う設定。応答の札は、その届いた設定のものでなければ
+		// ならない。後から入った別の変更の札を付けて返すと、それを土台にした
+		// 次の変更が、間の変更を消せてしまう。
+		changed := config.Default()
+		changed.Transform.Rotate = 180
+		resp := putConfig(t, changed, `"`+current+`"`)
 		if resp.StatusCode != http.StatusOK {
 			out, _ := io.ReadAll(resp.Body)
 			t.Fatalf("status = %d: %s", resp.StatusCode, out)
@@ -1349,23 +1365,57 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		if !ctrl.applied {
 			t.Error("the settings were not applied")
 		}
-		// 応答にも版を載せる。載せなければ、続けて変更する呼び出し側は、自分が
-		// たった今起こした変更のためにもう一度読み直すことになる。
-		if got, want := resp.Header.Get("ETag"), `"8"`; got != want {
-			t.Errorf("ETag = %q, want %q", got, want)
+		if got, want := resp.Header.Get("ETag"), `"`+config.Token(changed)+`"`; got != want {
+			t.Errorf("ETag = %q, want %q — the tag must belong to the settings in the response body", got, want)
+		}
+		current = config.Token(ctrl.cfg)
+	})
+
+	// 応答の本体と札は、同じ瞬間のものでなければならない。適用が終わってから
+	// 札を訊き直すと、その隙間に入った別の変更の札を、こちらの本体に付けて
+	// 返すことになる。それを土台にした次の変更は条件を通り、間の変更を消す。
+	t.Run("the tag belongs to the body even when another change lands right after", func(t *testing.T) {
+		interleaved := config.Default()
+		interleaved.Transform.FlipV = true
+		ctrl.applied, ctrl.next = false, &interleaved
+		t.Cleanup(func() { ctrl.next = nil })
+
+		mine := config.Default()
+		mine.Transform.Rotate = 90
+		resp := putConfig(t, mine, "")
+		if resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d: %s", resp.StatusCode, out)
+		}
+		if got, want := resp.Header.Get("ETag"), `"`+config.Token(mine)+`"`; got != want {
+			t.Errorf("ETag = %q, want %q — it names the change that landed after this one, so building on it would erase that change", got, want)
+		}
+		current = config.Token(ctrl.cfg)
+	})
+
+	// 並べられた札は、どれか 1 つが一致すれば通る。1 つに絞ると、使えたはずの
+	// 候補があるのに断ることになる。
+	t.Run("any one of several versions is enough", func(t *testing.T) {
+		ctrl.applied = false
+		if resp := put(t, `"long-gone", "`+current+`"`); resp.StatusCode != http.StatusOK {
+			out, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, out)
+		}
+		if !ctrl.applied {
+			t.Error("a caller that offered the current version among others was refused")
 		}
 	})
 
 	t.Run("no condition is still accepted", func(t *testing.T) {
-		ctrl.applied, ctrl.askedRevision = false, 999
+		ctrl.applied, ctrl.askedRevision = false, []string{"stale"}
 		if resp := put(t, ""); resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
 		if !ctrl.applied {
 			t.Error("a caller that asked for no condition was refused")
 		}
-		if ctrl.askedRevision != config.AnyRevision {
-			t.Errorf("asked for revision %d, want no condition", ctrl.askedRevision)
+		if len(ctrl.askedRevision) != 0 {
+			t.Errorf("asked for %v, want no condition", ctrl.askedRevision)
 		}
 	})
 
@@ -1379,13 +1429,13 @@ func TestConfigOffersAVersionAndHonoursIt(t *testing.T) {
 		}
 	})
 
-	// 読めない条件は落とさずに断る。黙って落とすと、競合を防いだつもりの要求が、
-	// 防がないまま通る。
-	t.Run("an unreadable condition is refused", func(t *testing.T) {
+	// 読めない条件は落とさない。落として「条件なし」に変えると、競合を防いだ
+	// つもりの要求が、防がないまま通る。どの札とも一致しないものとして断る。
+	t.Run("an unreadable condition still refuses", func(t *testing.T) {
 		ctrl.applied = false
-		resp := put(t, `"not-a-revision"`)
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		resp := put(t, `bare-word-without-quotes`)
+		if resp.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("status = %d, want 412", resp.StatusCode)
 		}
 		if ctrl.applied {
 			t.Error("the settings were applied even though the condition could not be read")
