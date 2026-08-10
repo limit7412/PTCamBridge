@@ -69,9 +69,9 @@ type Server struct {
 	// Listen は bind するアドレスです。ループバックならストリームは LAN に出ません。
 	// それ以外に bind した場合は管理 API も無効になります。
 	Listen string `toml:"listen" json:"listen"`
-	// Boundary は multipart の区切りです。PaperTracker クライアントはソースが
-	// 公開されておらず、リリースによってパーサーが変わってきたため、これと
-	// ExtraHeaders は再ビルド無しにワイヤ形式を調整するために存在します。
+	// Boundary は multipart の区切りです。PaperTracker クライアントが受け取る形は
+	// 版によって違い得るので、これと ExtraHeaders は再ビルド無しにワイヤ形式を
+	// 調整するために存在します。
 	Boundary string `toml:"boundary" json:"boundary"`
 	// ExtraHeaders は、multipart の各パートに追加されます。
 	ExtraHeaders map[string]string `toml:"extra_headers" json:"extra_headers"`

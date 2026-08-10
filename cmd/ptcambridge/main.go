@@ -237,7 +237,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// ストリーム設定は、今の PaperTracker クライアントが解析するものに合わせる
+	// ストリーム設定は、今の PaperTracker クライアントが受け取れる形に合わせる
 	// ために存在するので、その変更は再起動を経ずにサーバまで届かなければならない。
 	app.SetStreamConfigurator(srv)
 
