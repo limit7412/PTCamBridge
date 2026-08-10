@@ -82,32 +82,41 @@ func TestTrackerCountsThePauses(t *testing.T) {
 	}
 }
 
-// ソースの切替も数えます。今どれが動いているかだけを載せると、状態を読む側の
-// 2 回の読みの間で別のソースへ移って戻ってきた往復が見えません。
-func TestTrackerCountsTheSourceSwitches(t *testing.T) {
+// ソースが動き出した回数を数えます。今どれが動いているかだけを載せると、状態を
+// 読む側の 2 回の読みの間で終わってしまった立て直しや、別のソースへ移って戻って
+// きた往復が見えません。
+func TestTrackerCountsTheSourceStarts(t *testing.T) {
 	tr := New()
-	if got := tr.Snapshot().Switches; got != 0 {
-		t.Fatalf("switches = %d before anything happened, want 0", got)
+	if got := tr.Snapshot().Starts; got != 0 {
+		t.Fatalf("starts = %d before anything happened, want 0", got)
 	}
 
 	tr.SetSource("uvc")
 	tr.SetSource("serial")
 	tr.SetSource("uvc")
-	if got := tr.Snapshot().Switches; got != 3 {
-		t.Errorf("switches = %d after uvc, serial and back, want 3", got)
+	if got := tr.Snapshot().Starts; got != 3 {
+		t.Errorf("starts = %d after uvc, serial and back, want 3", got)
 	}
 
-	// 同じソースを立て直しただけなら、何も入れ替わっていません。
+	// 同じ種別を続けて命じても、動き出してはいません。
 	tr.SetSource("uvc")
-	if got := tr.Snapshot().Switches; got != 3 {
-		t.Errorf("switches = %d after restarting the same source, want 3 — nothing was swapped", got)
+	if got := tr.Snapshot().Starts; got != 3 {
+		t.Errorf("starts = %d after being told the same source twice, want 3 — nothing started", got)
 	}
 
-	// 立て直しは必ず停止を挟みます (bridge.stopLocked が空文字を通します)。解像度を
-	// 変えて保存しただけ、一時停止して再開しただけで数が動いてはいけません。
+	// 立て直しは必ず停止を挟みます (bridge.stopLocked が空文字を通します)。
+	// **同じ種別のままでも数えます** — 設定を保存すればドライバは立て直され、その
+	// 短い間にカメラを差し替えられます。そこで新しい個体が次の読みまでに繋がると、
+	// 切れた回数も繋がっているかどうかも動かないので、ここが唯一の合図になります。
 	tr.SetSource("")
 	tr.SetSource("uvc")
-	if got := tr.Snapshot().Switches; got != 3 {
-		t.Errorf("switches = %d after a stop and restart of the same source, want 3 — passing through the stopped state is not a switch", got)
+	if got := tr.Snapshot().Starts; got != 4 {
+		t.Errorf("starts = %d after a stop and restart of the same source, want 4 — a camera can be swapped during the restart", got)
+	}
+
+	// 止めただけでは動き出していません。
+	tr.SetSource("")
+	if got := tr.Snapshot().Starts; got != 4 {
+		t.Errorf("starts = %d after a stop, want 4", got)
 	}
 }

@@ -1221,16 +1221,16 @@ await settle();
 // 止められた分まで使い切ると、**その後に差し替えて再開しても**、数はもう動いた後
 // なので合図が出ません。差し替えは止めている間のどこで起きてもおかしくありません。
 const beforePausedSwitch = listings;
-noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 3, switches: 0}));
+noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 3, starts: 0}));
 await settle();
-const pausedSwitch = noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 3, switches: 1}));
+const pausedSwitch = noticeCameras(running({reconnects: 2, connected: false, paused: true, pauses: 3, starts: 1}));
 await settle();
 const afterPausedSwitch = listings - beforePausedSwitch;
 
 // 動き出した。止めている間に差し替えられていても、新しいカメラが今のモードを
 // 受け付けなければ繋がらないので、他の合図は出ない。
 const beforeWoke = listings;
-const woke = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 3, switches: 1}));
+const woke = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 3, starts: 1}));
 await settle();
 const afterWoke = listings - beforeWoke;
 
@@ -1239,23 +1239,23 @@ const afterWoke = listings - beforeWoke;
 // では何も変わって見えない。背景のタブでは読む間隔が分単位まで伸びるので、これは
 // 十分あり得る。
 const beforeQuick = listings;
-const quick = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 4, switches: 1}));
+const quick = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 4, starts: 1}));
 await settle();
 const afterQuick = listings - beforeQuick;
 
 // 別のソースへ移り、そこで同名のカメラを差し替えて UVC へ戻した。ソースの切替では
 // reconnects は増えず (status.SetSource は数を触らない)、次に見るまでに繋がって
 // いれば connected も動かないので、他の合図はどれも出ない。
-noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 4, switches: 2});
+noticeCameras({capturing: "serial", reconnects: 2, connected: true, paused: false, pauses: 4, starts: 2});
 await settle();
 const beforeReturn = listings;
-const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 4, switches: 3});
+const returned = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 4, starts: 3});
 await settle();
 
 // 移って戻るまでが、読みと読みの間で終わった。前後の種別はどちらも uvc で、
 // 切替では切れた回数も増えない。数だけが動く。
 const beforeRound = listings;
-const roundTrip = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 4, switches: 5});
+const roundTrip = noticeCameras({capturing: "uvc", reconnects: 2, connected: true, paused: false, pauses: 4, starts: 5});
 await settle();
 const afterRound = listings - beforeRound;
 
@@ -1263,13 +1263,13 @@ const afterRound = listings - beforeRound;
 // ので見送るが、そこで止められた分を使い切ってはいけない。立て直しでは移った回数も
 // 動かないので、代わりになる合図が無い。
 const beforeStopped = listings;
-noticeCameras({capturing: "", reconnects: 2, connected: false, paused: true, pauses: 5, switches: 5});
+noticeCameras({capturing: "", reconnects: 2, connected: false, paused: true, pauses: 5, starts: 5});
 await settle();
 const whileStopped = listings - beforeStopped;
 
 // 動き出した。止めている間に差し替えられていて、新しいカメラが今のモードを
 // 受け付けなければ繋がらない。
-const wokeFromStop = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 5, switches: 5}));
+const wokeFromStop = noticeCameras(running({reconnects: 2, connected: false, paused: false, pauses: 5, starts: 5}));
 await settle();
 const afterWokeFromStop = listings - beforeStopped - whileStopped;
 
@@ -1780,7 +1780,7 @@ globalThis.fetch = async (url) => {
   return askedModes(url);
 };
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
-const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, starts: 0}, over);
 
 // A は調べ終えていて、候補も出ているものとする。
 nodes["uvc-device"].value = "A";
@@ -1852,7 +1852,7 @@ globalThis.fetch = async (url) => {
   return askedModes(url);
 };
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
-const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, starts: 0}, over);
 
 // A を調べ始める。要求はもう出ている (答えはまだ)。
 nodes["uvc-device"].value = "A";
@@ -1931,7 +1931,7 @@ globalThis.fetch = async (url) => {
   return askedModes(url);
 };
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
-const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, starts: 0}, over);
 
 // 初回の列挙が終わる。状態はまだ一度も読めていない。
 await countCameras();
@@ -1993,7 +1993,7 @@ globalThis.fetch = async (url) => {
   return askedModes(url);
 };
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
-const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, switches: 0}, over);
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false, pauses: 0, starts: 0}, over);
 
 // 初回の列挙が走り出す。まだ返らない。
 countCameras();
@@ -3072,5 +3072,75 @@ release();
 	}
 	if want := []string{"1920x1080"}; !equalStrings(got.After.Sizes, want) {
 		t.Errorf("sizes after the fresh answer = %v, want %v", got.After.Sizes, want)
+	}
+}
+
+// 訊きに行かないと決めたら、立っていた拒否は解きます。
+//
+// 数え直しの最中は残します — まだ調べている途中で、前の判断がいちばん確かなもの
+// だからです。しかし「一覧に居ないので訊かない」まで来たら、そのカメラのモードは
+// 分からないと確定したということです。残したままだと、そのカメラが一覧に戻るまで
+// **フォーム全体**が保存できません (カスタムエラーの残っているフォームは submit
+// そのものが起きないので、巻き添えになるのは UVC の欄だけではありません)。
+func TestSettingsPageLetsGoOfTheRefusalWhenItGivesUpOnTheCamera(t *testing.T) {
+	harness := modesHarness + `
+let cameraList = [{name: "A"}];
+const askedModes = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith("/api/v1/devices")) {
+    return { ok: true, json: async () => ({cameras: cameraList, serial_ports: []}) };
+  }
+  return askedModes(url);
+};
+const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0)); };
+const running = (over) => Object.assign({capturing: "uvc", reconnects: 1, connected: true, paused: false}, over);
+
+// A のモードを出し、そのカメラが持っていない大きさを入れて拒否を立てる。
+nodes["uvc-device"].value = "A";
+const first = loadCameraModes();
+release();
+await first;
+nodes["uvc-size"].value = "1920x1080";
+refreshModeChoices();
+const refused = nodes["uvc-size"].invalid;
+
+// A を抜く。数え直しは成功するが、選んでいるカメラは一覧に居ないので訊かない。
+cameraList = [{name: "B"}];
+noticeCameras(running());
+noticeCameras(running({reconnects: 2}));
+await settle();
+release();
+await settle();
+
+console.log(JSON.stringify({
+  refused,
+  invalid: nodes["uvc-size"].invalid,
+  sizes: listed["camera-sizes"],
+  modes: nodes["camera-modes"].textContent,
+}));
+release();
+`
+	var got struct {
+		Refused string   `json:"refused"`
+		Invalid string   `json:"invalid"`
+		Sizes   []string `json:"sizes"`
+		Modes   string   `json:"modes"`
+	}
+	out := runSettingsScript(t, harness)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+
+	if got.Refused == "" {
+		t.Fatalf("the size the camera does not have was accepted, so there is no refusal to let go of")
+	}
+	if got.Invalid != "" {
+		t.Errorf("the refusal still reads %q after the page gave up on the camera, so the whole form cannot be saved until that camera comes back", got.Invalid)
+	}
+	if len(got.Sizes) != 0 {
+		t.Errorf("sizes = %v for a camera that is not listed, want none", got.Sizes)
+	}
+	if got.Modes != "" {
+		t.Errorf("the modes line reads %q, want it cleared", got.Modes)
 	}
 }

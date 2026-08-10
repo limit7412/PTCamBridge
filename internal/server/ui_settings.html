@@ -931,8 +931,8 @@ let countedAt = null;
 // 数えないので、前の標本と比べるだけでは足りません (止まった標本を見た時点で
 // 前の値が追いついてしまい、再開が合図にならなくなります)。
 let countedPauses = 0;
-// countedSwitches は、最後に数え直したときに見た「ソースが移った回数」。
-let countedSwitches = 0;
+// countedStarts は、最後に数え直したときに見た「ソースが動き出した回数」。
+let countedStarts = 0;
 // countFailed は、最後の数え直しが失敗したかどうか。失敗した一覧は「1 台も無い」
 // とは違うので、成功するまで数え直す理由が残ります。
 let countFailed = false;
@@ -958,11 +958,14 @@ const dueForRecount = () => countedAt === null || Date.now() - countedAt >= ADRI
 //     ではなく**止められた回数**を見るのは、読みと読みの間で止めて再開まで済ませた
 //     操作を取りこぼさないためです — 背景のタブでは読む間隔が分単位まで伸びるので、
 //     その間に一時停止して差し替えて再開する、というのは十分あり得ます
-//   - ソースが移った後、UVC で動いている。別のソースで動かしている間に差し替えて
-//     戻した場合、ソースの切替では切れた回数は増えず (status.SetSource は
-//     reconnects を触りません)、次に見るまでに繋がっていれば繋がったことにも
-//     なりません。ここも今の種別ではなく**移った回数**を見ます。移って戻るまでが
-//     読みと読みの間で終わると、前後の種別はどちらも uvc だからです
+//   - ソースが (再) 起動された後、UVC で動いている。別のソースで動かしている間に
+//     差し替えて戻した場合も、設定を保存してドライバが立て直された短い間に差し替え
+//     られた場合も、切れた回数は増えず (停止はキャンセルによる終了なので
+//     status.Tracker.Disconnected を通りません)、次に見るまでに繋がっていれば
+//     繋がったことにもなりません。ここも今の種別ではなく**動き出した回数**を
+//     見ます。立て直しが読みと読みの間で終わると、前後の種別はどちらも uvc
+//     だからです。**同じ種別のままの立て直しも数えます** — 保存にはカメラ名の
+//     変更も含まれ得るので、そこは数え直してよい場面です
 //
 // **繋がらないまま漂っている間だけは、変化が無くても数え直します。** 切れた時点で
 // 繋がっていなければ reconnects は増えず (status.Tracker.Disconnected を参照)、
@@ -983,7 +986,7 @@ function noticeCameras(state) {
     capturing: state.capturing || "",
     reconnects: state.reconnects || 0,
     pauses: state.pauses || 0,
-    switches: state.switches || 0,
+    starts: state.starts || 0,
     connected: !!state.connected,
     paused: !!state.paused,
   };
@@ -995,8 +998,8 @@ function noticeCameras(state) {
     // 止められた分を使い切るのは、**別のソースが実際に動いているとき**だけです。
     // **一時停止するとソースは空になる**ので (bridge.stopLocked)、止まっている標本は
     // ここを通ります。ここで使い切ると、動き出したことが合図にならなくなります —
-    // 立て直しでは移った回数も動かないので (status.SetSource)、代わりになる合図も
-    // ありません。
+    // 動き出した回数はソースが立ち上がるまで動かないので、止まっている間の
+    // 差し替えに対しては代わりになる合図がありません。
     //
     // 止まっている印だけでは足りません。**再開の途中には、種別が空のまま paused
     // だけが下りた標本があります** — bridge.SetPaused は status.SetPaused(false) を
@@ -1007,7 +1010,7 @@ function noticeCameras(state) {
     // なければ、切れた・挿さった・移ったのどれも動かないので、数え直しは 30 秒後の
     // 漂いまで来ません。
     if (!now.paused && now.capturing !== "") countedPauses = now.pauses;
-    countedSwitches = now.switches;
+    countedStarts = now.starts;
     // 最初の標本が、最初の列挙より**後に**繋がったものかもしれません。その列挙は
     // まだカメラが挿さっていない一覧を見ている可能性があり、そこでは憶えが
     // 捨てられません (bridge.forgetModesIfCamerasChanged は、消えたカメラの憶えを
@@ -1038,7 +1041,7 @@ function noticeCameras(state) {
     return false;
   }
 
-  const changed = now.switches !== countedSwitches
+  const changed = now.starts !== countedStarts
     || now.reconnects !== before.reconnects
     || (now.connected && !before.connected)
     // 止められた回数が、最後に数えたときから動いている。動いていても、止まって
@@ -1060,7 +1063,7 @@ function noticeCameras(state) {
   // (ソースの切替など) があっても、**差し替えはその後に起こり得ます**。使い切ると、
   // 動き出したことが合図にならなくなります。
   if (!now.paused) countedPauses = now.pauses;
-  countedSwitches = now.switches;
+  countedStarts = now.starts;
   countCameras();
   return true;
 }
@@ -1143,10 +1146,18 @@ async function countCameras() {
   if (counted && (!chosen || listedHere(chosen))) {
     loadCameraModes();
   } else {
-    // 訊きに行かない。候補は始めた時点で下ろしてあるので、残っているのは
-    // 「調べています」の行だけです。訊き直すのは次の数え直しに任せます — 転んだ
-    // 列挙の後に訊いても照合の済んでいない答えが返るだけで、countFailed が
-    // 立っているので 30 秒後に来ます。
+    // 訊きに行かない。候補は始めた時点で下ろしてあります。訊き直すのは次の
+    // 数え直しに任せます — 転んだ列挙の後に訊いても照合の済んでいない答えが
+    // 返るだけで、countFailed が立っているので 30 秒後に来ます。
+    //
+    // **ここでは拒否を引き直します。** 始めた時点では残しました (まだ調べて
+    // いる最中で、前の判断がいちばん確かなものだったからです) が、ここまで来た
+    // ということは「このカメラのモードは分からない」と確定したということです。
+    // 分からないものについて「持っていない」とは言えませんし、残したままだと
+    // そのカメラが一覧に戻るまでフォーム全体が保存できません — カスタムエラーの
+    // 残っているフォームは submit そのものが起きないので、巻き添えになるのは
+    // UVC の欄だけではありません。
+    refreshModeChoices();
     sayModes("");
   }
 }
@@ -1181,8 +1192,8 @@ async function pollFFmpeg() {
     // 1 回の遷移から何度も数え直すことになります (減ったことも「変わった」です)。
     if (mine <= polled) return;
     polled = mine;
-    // 切れた・繋がった・止めて動き出した・ソースが移ったなら、カメラが差し替わった
-    // かもしれません。
+    // 切れた・繋がった・止めて動き出した・ソースが (再) 起動されたなら、カメラが
+    // 差し替わったかもしれません。
     noticeCameras(state);
     el("ffmpeg-actions").hidden = !state.has_ffmpeg;
     el("ffmpeg-state").textContent = state.has_ffmpeg ? state.ffmpeg : "";
