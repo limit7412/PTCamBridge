@@ -843,17 +843,27 @@ func (s *Server) handleFFmpeg(w http.ResponseWriter, r *http.Request) {
 // 設定がそれだけだからです。今後追加するものも、ここに属します。
 func carryUnmentioned(cfg *config.Config, body []byte, current config.Config) bool {
 	var mentioned struct {
-		UI *json.RawMessage `json:"ui"`
+		UI     *json.RawMessage `json:"ui"`
+		Output *json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(body, &mentioned); err != nil {
 		// デコードできない本体がここに届くことはない。厳格なデコードが先に走っている。
 		return false
 	}
+	carried := false
+	// 後から足した節はここに並べます。それを知らないクライアントは名前を挙げ
+	// ないので、挙げなかったことを「ゼロ値にしてくれ」と読むと、無関係な設定を
+	// 1 つ保存しただけで機能が黙って消えます。output なら、シリアル出力が
+	// enabled = false になり、次の起動で何も出なくなります。
 	if mentioned.UI == nil {
 		cfg.UI = current.UI
-		return true
+		carried = true
 	}
-	return false
+	if mentioned.Output == nil {
+		cfg.Output = current.Output
+		carried = true
+	}
+	return carried
 }
 
 // applyBody は、受け取った本体を適用します。

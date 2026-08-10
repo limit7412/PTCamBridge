@@ -465,11 +465,16 @@ func (b *Bridge) Apply(ctx context.Context, cfg config.Config, ifAny []string) (
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if err := b.serialPortConflicts(cfg); err != nil {
-		return b.cfg, nil, err
-	}
+	// 札の判定が先です。古い設定の上で組まれた要求は、まずそのことを告げられ
+	// なければなりません。先に衝突を見ると、読み直せば消えるかもしれない衝突を
+	// 理由に断ってしまい、しかも返るのは 412 ではなく設定の誤りになります。
+	// 呼び出し側は「読み直してやり直す」という正しい手が取れず、送っていない
+	// 設定について直し方を考えることになります。
 	if len(ifAny) > 0 && !slices.Contains(ifAny, config.Token(b.cfg)) {
 		return b.cfg, nil, fmt.Errorf("%w: it was built on %s", config.ErrRevisionMismatch, strings.Join(ifAny, ", "))
+	}
+	if err := b.serialPortConflicts(cfg); err != nil {
+		return b.cfg, nil, err
 	}
 	return b.applyLocked(ctx, cfg)
 }

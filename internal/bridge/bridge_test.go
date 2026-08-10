@@ -4631,3 +4631,27 @@ func TestTheDeviceNamespacePrefixDoesNotHideAClash(t *testing.T) {
 		t.Errorf("Switch failed with %v, want it to name the port clash", err)
 	}
 }
+
+// 古い札で来た要求は、まずそのことを告げられなければなりません。先に衝突を見ると、
+// 読み直せば消えるかもしれない衝突を理由に断ってしまい、しかも呼び出し側が受け取る
+// のは 412 ではなく設定の誤りになります。「読み直してやり直す」という正しい手が
+// 取れず、送っていない設定について直し方を考えることになります。
+func TestAStaleRevisionIsReportedBeforeAPortClash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ptcambridge.toml")
+	cfg := serialOutputConfig(t, "COM7", "", false)
+	cfg.Source.Type = config.SourceSerial
+	b := New(cfg, path, hub.New(), status.New(), discardLogger())
+
+	// 衝突する設定を、古い札を条件にして送る。両方が当てはまる。
+	clashing := b.Snapshot()
+	clashing.Output.Serial.Enabled = true
+	clashing.Output.Serial.Port = "COM7"
+
+	_, _, err := b.Apply(context.Background(), clashing, []string{"a-token-from-some-older-read"})
+	if err == nil {
+		t.Fatal("Apply accepted a request built on a revision that is no longer current")
+	}
+	if !errors.Is(err, config.ErrRevisionMismatch) {
+		t.Errorf("Apply failed with %v, want ErrRevisionMismatch so the caller knows to re-read and retry", err)
+	}
+}
